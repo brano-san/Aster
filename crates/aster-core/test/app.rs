@@ -310,3 +310,28 @@ fn the_enter_that_picks_a_profile_does_not_reach_the_new_tab() {
     assert_eq!(spawns(&e).len(), 1);
     assert!(writes(&e).is_empty(), "{:?}", writes(&e));
 }
+
+#[test]
+fn a_waiting_transfer_takes_typed_paths_drops_and_escape_instead_of_the_shell() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let pane = spawns(&a.take_effects())[0].0;
+    a.transfer_offered(pane, true);
+    for c in r"C:\\notes.txt".chars() {
+        a.on_event(Event::Char(c));
+    }
+    assert_eq!(a.offer(pane), Some(r"C:\\notes.txt"));
+    key(&mut a, Key::Enter, Mods::NONE);
+    a.on_event(Event::Char('\r'));
+    let e = a.take_effects();
+    assert!(writes(&e).is_empty(), "nothing reaches the remote shell");
+    assert!(e.iter().any(|e| matches!(e, Effect::SendFiles { files, .. } if files == &[std::path::PathBuf::from(r"C:\\notes.txt")])));
+    a.on_event(Event::DroppedFiles(vec!["/tmp/a".into(), "/tmp/b".into()]));
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::SendFiles { files, .. } if files.len() == 2)));
+    key(&mut a, Key::Escape, Mods::NONE);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::CancelTransfer { .. })));
+    assert_eq!(a.offer(pane), None);
+    a.on_event(Event::Char('x'));
+    assert_eq!(writes(&a.take_effects()), [b"x".to_vec()], "typing goes to the shell again");
+}

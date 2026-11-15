@@ -55,6 +55,8 @@ pub enum Effect {
     Beep,
     Surface(crate::config::Backdrop),
     Files { pane: PaneId, request: crate::files::FileRequest },
+    SendFiles { pane: PaneId, files: Vec<std::path::PathBuf> },
+    CancelTransfer { pane: PaneId },
     ImeArea(Rect),
 }
 
@@ -137,6 +139,7 @@ pub struct App {
     pub(crate) transfers: Vec<crate::files::Transfer>,
     pub(crate) transfer_seq: u64,
     pub(crate) last_dirs: HashMap<PaneId, String>,
+    pub(crate) offers: HashMap<PaneId, String>,
     pub(crate) bell: Option<(PaneId, Instant)>,
     last_bell: Option<Instant>,
     bell_pane: Option<PaneId>,
@@ -203,6 +206,7 @@ impl App {
             transfers: Vec::new(),
             transfer_seq: 0,
             last_dirs: HashMap::new(),
+            offers: HashMap::new(),
             bell: None,
             last_bell: None,
             bell_pane: None,
@@ -232,6 +236,53 @@ impl App {
             self.translucent = translucent;
             self.backdrop = backdrop;
             self.restyle();
+        }
+    }
+
+    pub fn transfer_offered(&mut self, pane: PaneId, offered: bool) {
+        if offered {
+            self.offers.insert(pane, String::new());
+        } else {
+            self.offers.remove(&pane);
+        }
+        self.dirty = true;
+    }
+
+    pub fn offer(&self, pane: PaneId) -> Option<&str> {
+        self.offers.get(&pane).map(String::as_str)
+    }
+
+    fn offered_pane(&self) -> Option<PaneId> {
+        self.focused_pane().filter(|p| self.offers.contains_key(p))
+    }
+
+    fn offer_key(&mut self, pane: PaneId, key: Key, mods: Mods) {
+        self.dirty = true;
+        match key {
+            Key::Escape => {
+                self.offers.remove(&pane);
+                self.effects.push(Effect::CancelTransfer { pane });
+            }
+            Key::Enter => {
+                let path = self.offers.get(&pane).map(|p| p.trim().trim_matches('"').to_owned()).unwrap_or_default();
+                if !path.is_empty() {
+                    self.effects.push(Effect::SendFiles { pane, files: vec![std::path::PathBuf::from(path)] });
+                    if let Some(p) = self.offers.get_mut(&pane) {
+                        p.clear();
+                    }
+                }
+            }
+            Key::Backspace => {
+                if let Some(p) = self.offers.get_mut(&pane) {
+                    if mods.ctrl {
+                        p.clear();
+                    } else {
+                        p.pop();
+                    }
+                }
+            }
+            Key::Char('V') if mods.ctrl => self.effects.push(Effect::RequestPaste),
+            _ => {}
         }
     }
 
@@ -446,6 +497,7 @@ impl App {
         if self.files.as_ref().is_some_and(|f| f.pane == pane) {
             self.files = None;
         }
+        self.offers.remove(&pane);
         if self.search.as_ref().is_some_and(|s| s.pane == pane) {
             self.search = None;
         }
@@ -594,6 +646,13 @@ impl App {
         }
         if self.settings.is_some() {
             return self.settings_text(&text.replace(['\r', '\n'], " "));
+        }
+        if let Some(pane) = self.offered_pane() {
+            if let Some(p) = self.offers.get_mut(&pane) {
+                p.push_str(text.lines().next().unwrap_or_default());
+            }
+            self.dirty = true;
+            return;
         }
         if self.search_paste(&text) {
             return;
@@ -962,7 +1021,9 @@ impl App {
                 self.dirty = true;
             }
             Event::DroppedFiles(paths) => {
-                if self.files.is_some() {
+                if let Some(pane) = self.offered_pane() {
+                    self.effects.push(Effect::SendFiles { pane, files: paths.into_iter().map(std::path::PathBuf::from).collect() });
+                } else if self.files.is_some() {
                     self.files_dropped(paths);
                 } else if let Some(profile) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.profile.clone()) {
                     let text = dropped_text(&profile, &paths);
@@ -1000,6 +1061,12 @@ impl App {
                 return self.close_files();
             }
             return self.files_key(key, mods);
+        }
+        if !modal {
+            if let Some(pane) = self.offered_pane() {
+                self.swallow_control = true;
+                return self.offer_key(pane, key, mods);
+            }
         }
         if self.settings.is_some() {
             if self.settings.as_ref().is_some_and(|p| p.capture.is_some()) {
@@ -1058,6 +1125,15 @@ impl App {
         }
         if self.settings.is_some() {
             return self.settings_text(&c.to_string());
+        }
+        if let Some(pane) = self.offered_pane() {
+            if !c.is_control() {
+                if let Some(p) = self.offers.get_mut(&pane) {
+                    p.push(c);
+                }
+                self.dirty = true;
+            }
+            return;
         }
         if self.search.is_some() {
             if !alt {

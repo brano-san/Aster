@@ -37,6 +37,8 @@ pub struct Handler<P: Platform> {
     remotes: HashMap<(WindowId, PaneId), tokio::sync::mpsc::UnboundedSender<aster_ssh::console::Input>>,
     file_tx: Sender<(WindowId, PaneId, aster_core::files::FileReply)>,
     file_rx: Receiver<(WindowId, PaneId, aster_core::files::FileReply)>,
+    note_tx: Sender<crate::session::TransferNote>,
+    note_rx: Receiver<crate::session::TransferNote>,
     exit_tx: Sender<Exit>,
     config_stamp: Option<SystemTime>,
     ssh: Option<String>,
@@ -77,9 +79,10 @@ impl<P: Platform> Handler<P> {
         }
         let (exit_tx, exits) = unbounded();
         let (file_tx, file_rx) = unbounded();
+        let (note_tx, note_rx) = unbounded();
         let config_stamp = stamp(&crate::config_path::<P>());
         let pending = if config.terminal.recover_tabs { load_session::<P>() } else { Vec::new() };
-        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None }
+        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None }
     }
 
     fn save_config(&mut self, text: String) {
@@ -168,7 +171,7 @@ impl<P: Platform> Handler<P> {
                 }
                 self.remotes.insert((id, pane), remote.input);
                 let waker = self.waker.clone();
-                let session = Session::start(id, pane, remote.spawned, terminal, move || waker.wake(), self.exit_tx.clone());
+                let session = Session::start(self.session_start(id, pane), remote.spawned, terminal, move || waker.wake());
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal } => {
@@ -187,7 +190,7 @@ impl<P: Platform> Handler<P> {
                             s.app.set_pane_pid(pane, pid);
                         }
                         let waker = self.waker.clone();
-                        let session = Session::start(id, pane, spawned, terminal, move || waker.wake(), self.exit_tx.clone());
+                        let session = Session::start(self.session_start(id, pane), spawned, terminal, move || waker.wake());
                         self.sessions.insert((id, pane), session);
                     }
                     Err(e) => {
@@ -240,6 +243,16 @@ impl<P: Platform> Handler<P> {
             Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()) }),
             Effect::Timer(ms) => window.set_timer(ms),
             Effect::Attention => window.request_attention(),
+            Effect::SendFiles { pane, files } => {
+                if let Some(s) = self.sessions.get(&(id, pane)) {
+                    s.send_files(&files);
+                }
+            }
+            Effect::CancelTransfer { pane } => {
+                if let Some(s) = self.sessions.get(&(id, pane)) {
+                    s.cancel_transfer();
+                }
+            }
             Effect::Files { pane, request } => {
                 let downloads = P::downloads_dir().unwrap_or_else(std::env::temp_dir);
                 let sent = self.remotes.get(&(id, pane)).is_some_and(|r| r.send(aster_ssh::console::Input::Sftp(crate::remote::file_request(request, downloads))).is_ok());
@@ -311,7 +324,16 @@ impl<P: Platform> Handler<P> {
         }
     }
 
+    fn session_start(&self, window: WindowId, pane: PaneId) -> crate::session::Start {
+        crate::session::Start { window, pane, downloads: P::downloads_dir().unwrap_or_else(std::env::temp_dir), exits: self.exit_tx.clone(), notes: self.note_tx.clone() }
+    }
+
     fn drain_exits(&mut self) {
+        while let Ok((wid, pane, note)) = self.note_rx.try_recv() {
+            if let Some(s) = self.windows.get_mut(&wid) {
+                s.app.transfer_offered(pane, note == crate::zmodem::Note::Offered);
+            }
+        }
         while let Ok((wid, pane, reply)) = self.file_rx.try_recv() {
             if let Some(s) = self.windows.get_mut(&wid) {
                 s.app.files_reply(pane, reply);
