@@ -256,6 +256,17 @@ fn code(e: std::io::Error) -> russh_sftp::protocol::StatusCode {
 impl russh_sftp::server::Handler for Fs {
     type Error = russh_sftp::protocol::StatusCode;
 
+    async fn setstat(&mut self, id: u32, path: String, attrs: russh_sftp::protocol::FileAttributes) -> Result<russh_sftp::protocol::Status, Self::Error> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(mode) = attrs.permissions { std::fs::set_permissions(self.local(&path), std::fs::Permissions::from_mode(mode)).map_err(code)?; }
+        }
+        #[cfg(not(unix))]
+        let _ = (path, attrs);
+        Ok(status(id))
+    }
+
     fn unimplemented(&self) -> Self::Error {
         russh_sftp::protocol::StatusCode::OpUnsupported
     }
@@ -353,4 +364,17 @@ impl russh_sftp::server::Handler for Fs {
         std::fs::rename(self.local(&oldpath), self.local(&newpath)).map_err(code)?;
         Ok(status(id))
     }
+}
+
+pub async fn sftp_session(port: u16) -> russh_sftp::client::SftpSession {
+    struct Accept;
+    impl russh::client::Handler for Accept {
+        type Error = russh::Error;
+        async fn check_server_key(&mut self, _key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> { Ok(true) }
+    }
+    let mut connection = russh::client::connect(Arc::new(russh::client::Config::default()), ("127.0.0.1", port), Accept).await.unwrap();
+    assert!(connection.authenticate_password("ann", "secret").await.unwrap().success());
+    let channel = connection.channel_open_session().await.unwrap();
+    channel.request_subsystem(true, "sftp").await.unwrap();
+    russh_sftp::client::SftpSession::new(channel.into_stream()).await.unwrap()
 }
