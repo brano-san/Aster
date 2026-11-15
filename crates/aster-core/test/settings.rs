@@ -192,3 +192,14 @@ fn clicking_a_switch_row_toggles_it() {
     a.settings_click(row.rect.x + 20.0, row.rect.y + 10.0);
     assert!(!a.config().terminal.copy_on_select);
 }
+
+#[test]
+fn each_section_is_listed_in_one_piece() {
+    let mut seen: Vec<&str> = Vec::new();
+    for s in SETTINGS {
+        if seen.last() != Some(&s.section) {
+            assert!(!seen.contains(&s.section), "{} appears in two places", s.section);
+            seen.push(s.section);
+        }
+    }
+}

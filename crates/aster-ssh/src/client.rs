@@ -9,7 +9,8 @@ use russh::{ChannelMsg, Disconnect, MethodKind, MethodSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::UnboundedSender;
@@ -29,6 +30,7 @@ pub struct Request {
     pub home: PathBuf,
     pub user: String,
     pub use_agent: bool,
+    pub share: bool,
 }
 
 pub struct Connection {
@@ -43,25 +45,108 @@ pub fn start(req: Request) -> Connection {
     let (input, in_rx) = tokio::sync::mpsc::unbounded_channel();
     let (exit_tx, exit) = crossbeam_channel::bounded(1);
     let (files_tx, files) = crossbeam_channel::unbounded();
-    let spawned = std::thread::Builder::new().name("aster-ssh".into()).spawn(move || {
-        let console = Console::new(out_tx, in_rx, (req.cols, req.rows));
-        let code = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => {
-                let code = rt.block_on(run(req, console, files_tx));
-                drop(rt);
-                code
-            }
-            Err(e) => {
-                console.print(&format!("\ncannot start the SSH client: {e}\n"));
-                FAILED
-            }
-        };
-        let _ = exit_tx.send(code);
-    });
-    if let Err(e) = spawned {
-        tracing::error!("ssh thread: {e}");
+    let console = Console::new(out_tx, in_rx, (req.cols, req.rows));
+    match runtime() {
+        Some(rt) => {
+            rt.spawn(async move {
+                let code = run(req, console, files_tx).await;
+                let _ = exit_tx.send(code);
+            });
+        }
+        None => {
+            console.print("\ncannot start the SSH client\n");
+            let _ = exit_tx.send(FAILED);
+        }
     }
     Connection { output, input, exit, files }
+}
+
+fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static RUNTIME: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_name("aster-ssh")
+                .enable_all()
+                .build()
+                .map_err(|e| tracing::error!("ssh runtime: {e}"))
+                .ok()
+        })
+        .as_ref()
+}
+
+struct Conn {
+    handle: Mutex<Option<Handle<Client>>>,
+    jumps: std::sync::Mutex<Vec<Handle<Client>>>,
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        let handle = self.handle.get_mut().take();
+        let jumps = self.jumps.get_mut().map(std::mem::take).unwrap_or_default();
+        if let Some(rt) = runtime() {
+            rt.spawn(async move {
+                if let Some(h) = handle {
+                    let _ = h.disconnect(Disconnect::ByApplication, "", "").await;
+                }
+                for j in jumps.into_iter().rev() {
+                    let _ = j.disconnect(Disconnect::ByApplication, "", "").await;
+                }
+            });
+        }
+    }
+}
+
+impl Conn {
+    async fn open_session(&self) -> Result<russh::Channel<client::Msg>, String> {
+        let guard = self.handle.lock().await;
+        let handle = guard.as_ref().ok_or("the connection is closed")?;
+        handle.channel_open_session().await.map_err(|e| format!("cannot open a session: {e}"))
+    }
+
+    async fn closed(&self) -> bool {
+        self.handle.lock().await.as_ref().is_none_or(|h| h.is_closed())
+    }
+}
+
+#[derive(Default)]
+struct Entry {
+    conn: Weak<Conn>,
+    gate: Arc<Mutex<()>>,
+}
+
+fn pool() -> &'static std::sync::Mutex<HashMap<String, Entry>> {
+    static POOL: OnceLock<std::sync::Mutex<HashMap<String, Entry>>> = OnceLock::new();
+    POOL.get_or_init(Default::default)
+}
+
+fn pool_key(dest: &Destination) -> String {
+    format!("{}@{}:{}|{}|{}", dest.user, dest.host, dest.port, dest.proxy_jump.join(","), dest.proxy_command.as_deref().unwrap_or(""))
+}
+
+async fn connection(dest: Destination, req: &Request, console: &Shared) -> Result<(Arc<Conn>, bool), String> {
+    let fresh = |dest: Destination| async move {
+        let (handle, jumps) = open(dest, req, console, 0).await?;
+        Ok::<_, String>(Arc::new(Conn { handle: Mutex::new(Some(handle)), jumps: std::sync::Mutex::new(jumps) }))
+    };
+    if !req.share {
+        return Ok((fresh(dest).await?, false));
+    }
+    let key = pool_key(&dest);
+    let gate = pool().lock().map_err(|_| "connection pool is broken")?.entry(key.clone()).or_default().gate.clone();
+    let _turn = gate.lock().await;
+    let existing = pool().lock().ok().and_then(|p| p.get(&key).and_then(|e| e.conn.upgrade()));
+    if let Some(conn) = existing {
+        if !conn.closed().await {
+            return Ok((conn, true));
+        }
+    }
+    let conn = fresh(dest).await?;
+    if let Ok(mut p) = pool().lock() {
+        p.entry(key).or_default().conn = Arc::downgrade(&conn);
+    }
+    Ok((conn, false))
 }
 
 type Shared = Arc<Mutex<Console>>;
@@ -89,8 +174,18 @@ fn context_destination(spec: &str, req: &Request) -> Destination {
 
 async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Sender<crate::sftp::Reply>) -> Result<u32, String> {
     let dest = context_destination(&req.destination, req);
-    let (handle, _jumps) = open(dest, req, console, 0).await?;
-    let channel = handle.channel_open_session().await.map_err(|e| format!("cannot open a session: {e}"))?;
+    let (mut conn, shared) = connection(dest.clone(), req, console).await?;
+    let channel = match conn.open_session().await {
+        Ok(c) => c,
+        Err(_) if shared => {
+            if let Ok(mut p) = pool().lock() {
+                p.remove(&pool_key(&dest));
+            }
+            conn = connection(dest, req, console).await?.0;
+            conn.open_session().await?
+        }
+        Err(e) => return Err(e),
+    };
     let (mut rx, tx) = channel.split();
     let (cols, rows) = console.lock().await.size;
     tx.request_pty(false, &req.term, cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
@@ -118,7 +213,7 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
                 }
                 Some(Input::Sftp(request)) => {
                     if files.is_none() {
-                        match open_files(&handle, replies.clone()).await {
+                        match open_files(&conn, replies.clone()).await {
                             Ok(f) => files = Some(f),
                             Err(error) => {
                                 let _ = replies.send(crate::sftp::Reply::Failed { id: None, error });
@@ -132,18 +227,16 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
                 }
                 Some(Input::Close) | None => {
                     let _ = tx.close().await;
-                    let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
                     return Ok(0);
                 }
             },
         }
     }
-    let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
     Ok(code.unwrap_or(0))
 }
 
-async fn open_files(handle: &Handle<Client>, replies: crossbeam_channel::Sender<crate::sftp::Reply>) -> Result<crate::sftp::Files, String> {
-    let channel = handle.channel_open_session().await.map_err(|e| format!("cannot open a file channel: {e}"))?;
+async fn open_files(conn: &Conn, replies: crossbeam_channel::Sender<crate::sftp::Reply>) -> Result<crate::sftp::Files, String> {
+    let channel = conn.open_session().await.map_err(|e| format!("cannot open a file channel: {e}"))?;
     channel.request_subsystem(true, "sftp").await.map_err(|e| format!("the server has no SFTP: {e}"))?;
     let session = russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP failed to start: {e}"))?;
     Ok(crate::sftp::Files::new(session, replies))
@@ -227,7 +320,7 @@ fn proxy_stream(command: &str) -> Result<impl AsyncRead + AsyncWrite + Unpin + S
 }
 
 pub struct Client {
-    console: Shared,
+    console: Weak<Mutex<Console>>,
     host: String,
     port: u16,
     known_hosts: PathBuf,
@@ -236,7 +329,7 @@ pub struct Client {
 
 impl Client {
     fn new(dest: &Destination, req: &Request, console: Shared) -> Self {
-        Self { console, host: dest.host.clone(), port: dest.port, known_hosts: req.ssh_dir.join("known_hosts"), accepted: None }
+        Self { console: Arc::downgrade(&console), host: dest.host.clone(), port: dest.port, known_hosts: req.ssh_dir.join("known_hosts"), accepted: None }
     }
 
     fn label(&self) -> String {
@@ -252,15 +345,18 @@ impl client::Handler for Client {
     type Error = russh::Error;
 
     async fn auth_banner(&mut self, banner: &str, _session: &mut client::Session) -> Result<(), Self::Error> {
-        if let Ok(c) = self.console.try_lock() {
-            c.print(banner);
+        if let Some(console) = self.console.upgrade() {
+            if let Ok(c) = console.try_lock() {
+                c.print(banner);
+            }
         }
         Ok(())
     }
 
     async fn check_server_key(&mut self, key: &russh::keys::PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        let console = self.console.upgrade();
         let russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } = key else {
-            if let Ok(c) = self.console.try_lock() {
+            if let Some(Ok(c)) = console.as_ref().map(|c| c.try_lock()) {
                 c.print(&format!("\n{} presented a host certificate; only plain host keys are supported.\n", self.label()));
             }
             return Ok(false);
@@ -276,7 +372,7 @@ impl client::Handler for Client {
                 Ok(true)
             }
             Err(russh::keys::Error::KeyChanged { line }) => {
-                if let Ok(c) = self.console.try_lock() {
+                if let Some(Ok(c)) = console.as_ref().map(|c| c.try_lock()) {
                     c.print(&format!(
                         "\nWARNING: the host key of {} has changed.\nSomeone could be intercepting the connection, or the host key was replaced.\nThe {} key fingerprint is {fingerprint}.\nThe stored key is on line {line} of {}.\nRemove that line to connect anyway.\n",
                         self.label(),
@@ -287,7 +383,7 @@ impl client::Handler for Client {
                 Ok(false)
             }
             _ => {
-                let Ok(mut c) = self.console.try_lock() else { return Ok(false) };
+                let Some(Ok(mut c)) = console.as_ref().map(|c| c.try_lock()) else { return Ok(false) };
                 let prompt = format!(
                     "The authenticity of host '{}' can't be established.\n{} key fingerprint is {fingerprint}.\nAre you sure you want to continue connecting (yes/no)? ",
                     self.label(),

@@ -148,7 +148,7 @@ pub fn temp_ssh_dir() -> PathBuf {
 }
 
 pub fn request(destination: String, ssh_dir: PathBuf) -> Request {
-    Request { destination, cols: 90, rows: 25, term: "xterm-256color".into(), home: ssh_dir.clone(), ssh_dir, user: "ann".into(), use_agent: false }
+    Request { destination, cols: 90, rows: 25, term: "xterm-256color".into(), home: ssh_dir.clone(), ssh_dir, user: "ann".into(), use_agent: false, share: false }
 }
 
 pub struct Pane {
