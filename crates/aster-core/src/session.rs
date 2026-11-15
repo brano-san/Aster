@@ -27,7 +27,7 @@ pub struct TabState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum NodeState {
-    Pane(PaneState),
+    Pane(Box<PaneState>),
     Split { vertical: bool, ratio: f32, a: Box<NodeState>, b: Box<NodeState> },
 }
 
@@ -65,7 +65,7 @@ impl App {
             Node::Leaf(id) => {
                 let pane = self.panes.get(id)?;
                 let t = pane.terminal.lock();
-                NodeState::Pane(PaneState { profile: pane.profile.clone(), cwd: t.cwd().map(str::to_owned), buffer: t.tail_lines(BUFFER_LINES) })
+                NodeState::Pane(Box::new(PaneState { profile: pane.profile.clone(), cwd: t.cwd().map(str::to_owned), buffer: t.tail_lines(BUFFER_LINES) }))
             }
             Node::Split { axis, ratio, a, b } => match (self.node_state(a), self.node_state(b)) {
                 (Some(a), Some(b)) => NodeState::Split { vertical: *axis == Axis::Vertical, ratio: *ratio, a: Box::new(a), b: Box::new(b) },
