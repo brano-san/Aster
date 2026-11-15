@@ -13,6 +13,8 @@ pub struct Destination {
     pub proxy_command: Option<String>,
     pub forward_agent: Option<bool>,
     pub agent: Option<String>,
+    pub forwards: Vec<crate::forward::Forward>,
+    pub forward_errors: Vec<String>,
 }
 
 pub fn split(spec: &str) -> (Option<String>, String, Option<u16>) {
@@ -58,6 +60,16 @@ pub fn resolve(spec: &str, cx: &Context) -> Destination {
         .unwrap_or_default();
     let proxy_command = entry.proxy_command.filter(|c| !c.eq_ignore_ascii_case("none"));
     let agent = entry.identity_agent.filter(|a| a != "SSH_AUTH_SOCK");
+    let mut forwards = Vec::new();
+    let mut forward_errors = Vec::new();
+    for (kind, specs) in [("local", &entry.local_forwards), ("remote", &entry.remote_forwards), ("dynamic", &entry.dynamic_forwards)] {
+        for spec in specs {
+            match crate::forward::parse(kind, spec) {
+                Ok(f) => forwards.push(f),
+                Err(e) => forward_errors.push(format!("{kind} forward \"{spec}\": {e}")),
+            }
+        }
+    }
     Destination {
         name,
         host,
@@ -69,6 +81,8 @@ pub fn resolve(spec: &str, cx: &Context) -> Destination {
         proxy_command,
         forward_agent: entry.forward_agent,
         agent,
+        forwards,
+        forward_errors,
     }
 }
 

@@ -277,3 +277,72 @@ fn a_forwarded_agent_channel_reaches_the_local_agent_only_when_asked() {
     plain.wait_for("got:hi");
     assert!(!plain.seen.contains("agent said"), "no agent channel without ForwardAgent");
 }
+
+fn echo_server() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let mut stream = stream;
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = stream.read(&mut buf) {
+                    if n == 0 || stream.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+fn port_after(text: &str, marker: &str) -> u16 {
+    let at = text.find(marker).unwrap_or_else(|| panic!("{marker:?} not in {text:?}")) + marker.len();
+    text[at..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap()
+}
+
+fn round_trip(stream: &mut std::net::TcpStream, payload: &[u8]) -> Vec<u8> {
+    exchange(stream, payload, payload.len())
+}
+
+fn exchange(stream: &mut std::net::TcpStream, payload: &[u8], answer: usize) -> Vec<u8> {
+    use std::io::{Read, Write};
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    stream.write_all(payload).unwrap();
+    let mut got = vec![0u8; answer];
+    stream.read_exact(&mut got).unwrap();
+    got
+}
+
+#[test]
+fn forwards_from_the_config_start_with_the_connection_and_carry_data() {
+    let (port, _) = serve();
+    let echo = echo_server();
+    let dir = temp_ssh_dir();
+    std::fs::write(dir.join("config"), format!("Host fw\n  HostName 127.0.0.1\n  Port {port}\n  User ann\n  LocalForward 0 127.0.0.1:{echo}\n  DynamicForward 0\n  RemoteForward 0 127.0.0.1:{echo}\n  LocalForward nonsense\n")).unwrap();
+    let mut pane = Pane { conn: start(request("fw".into(), dir)), seen: String::new() };
+    pane.wait_for("(yes/no)? ");
+    pane.send("yes\r");
+    pane.wait_for("password: ");
+    pane.send("secret\r");
+    pane.wait_for("welcome");
+    assert!(pane.seen.contains("Ignored local forward"), "{:?}", pane.seen);
+
+    let local = port_after(&pane.seen, "Forwarding 127.0.0.1:");
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", local)).unwrap();
+    assert_eq!(round_trip(&mut s, b"through the tunnel"), b"through the tunnel");
+
+    let socks = port_after(&pane.seen, "SOCKS proxy on 127.0.0.1:");
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", socks)).unwrap();
+    assert_eq!(exchange(&mut s, &[5, 1, 0], 2), [5, 0]);
+    let mut connect = vec![5, 1, 0, 1, 127, 0, 0, 1];
+    connect.extend(echo.to_be_bytes());
+    assert_eq!(round_trip(&mut s, &connect)[1], 0, "the proxy connects");
+    assert_eq!(round_trip(&mut s, b"socks"), b"socks");
+
+    let remote = port_after(&pane.seen, "The server listens on 127.0.0.1:");
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", remote)).unwrap();
+    assert_eq!(round_trip(&mut s, b"from the server side"), b"from the server side");
+}

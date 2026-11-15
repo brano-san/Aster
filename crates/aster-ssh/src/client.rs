@@ -79,9 +79,77 @@ fn runtime() -> Option<&'static tokio::runtime::Runtime> {
         .as_ref()
 }
 
+type Targets = Arc<std::sync::Mutex<HashMap<u32, (String, u16)>>>;
+
 struct Conn {
     handle: Mutex<Option<Handle<Client>>>,
     jumps: std::sync::Mutex<Vec<Handle<Client>>>,
+    targets: Targets,
+    forwards: std::sync::Mutex<Vec<crate::forward::Running>>,
+}
+
+struct Tunnel(Weak<Conn>);
+
+impl crate::forward::Opener for Tunnel {
+    fn open(&self, host: String, port: u16) -> crate::forward::Opened {
+        let conn = self.0.clone();
+        Box::pin(async move {
+            let conn = conn.upgrade().ok_or("the connection is closed")?;
+            let guard = conn.handle.lock().await;
+            let handle = guard.as_ref().ok_or("the connection is closed")?;
+            let channel = handle.channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0).await.map_err(|e| e.to_string())?;
+            Ok(Box::new(channel.into_stream()) as Box<dyn crate::forward::Stream>)
+        })
+    }
+}
+
+async fn start_forwards(conn: &Arc<Conn>, dest: &Destination) -> Vec<String> {
+    use crate::forward::{Event, Forward};
+    let mut notes: Vec<String> = dest.forward_errors.iter().map(|e| format!("Ignored {e}")).collect();
+    for forward in &dest.forwards {
+        if let Forward::Remote { bind, port, host, host_port } = forward {
+            let asked = {
+                let guard = conn.handle.lock().await;
+                match guard.as_ref() {
+                    Some(h) => h.tcpip_forward(bind.clone(), *port as u32).await.map_err(|e| e.to_string()),
+                    None => Err("the connection is closed".into()),
+                }
+            };
+            match asked {
+                Ok(got) => {
+                    let bound = if *port == 0 { got } else { *port as u32 };
+                    if let Ok(mut t) = conn.targets.lock() {
+                        t.insert(bound, (host.clone(), *host_port));
+                    }
+                    notes.push(format!("The server listens on {bind}:{bound} and forwards to {host}:{host_port}"));
+                }
+                Err(e) => notes.push(format!("The server refused to listen on {bind}:{port}: {e}")),
+            }
+            continue;
+        }
+        let (events, mut seen) = tokio::sync::mpsc::unbounded_channel();
+        let running = crate::forward::start(forward.clone(), Arc::new(Tunnel(Arc::downgrade(conn))), events).await;
+        while let Ok(event) = seen.try_recv() {
+            match event {
+                Event::Listening { forward: Forward::Local { bind, host, host_port, .. }, port } => notes.push(format!("Forwarding {bind}:{port} to {host}:{host_port}")),
+                Event::Listening { forward: Forward::Dynamic { bind, .. }, port } => notes.push(format!("SOCKS proxy on {bind}:{port}")),
+                Event::Failed { forward, error } => notes.push(format!("Cannot forward {}: {error}", describe(&forward))),
+                _ => {}
+            }
+        }
+        if let Ok(mut f) = conn.forwards.lock() {
+            f.push(running);
+        }
+    }
+    notes
+}
+
+fn describe(forward: &crate::forward::Forward) -> String {
+    use crate::forward::Forward;
+    match forward {
+        Forward::Local { bind, port, host, host_port } | Forward::Remote { bind, port, host, host_port } => format!("{bind}:{port} to {host}:{host_port}"),
+        Forward::Dynamic { bind, port } => format!("SOCKS on {bind}:{port}"),
+    }
 }
 
 impl Drop for Conn {
@@ -130,8 +198,8 @@ fn pool_key(dest: &Destination) -> String {
 
 async fn connection(dest: Destination, req: &Request, console: &Shared) -> Result<(Arc<Conn>, bool), String> {
     let fresh = |dest: Destination| async move {
-        let (handle, jumps) = open(dest, req, console, 0).await?;
-        Ok::<_, String>(Arc::new(Conn { handle: Mutex::new(Some(handle)), jumps: std::sync::Mutex::new(jumps) }))
+        let (handle, jumps, targets) = open(dest, req, console, 0).await?;
+        Ok::<_, String>(Arc::new(Conn { handle: Mutex::new(Some(handle)), jumps: std::sync::Mutex::new(jumps), targets, forwards: std::sync::Mutex::new(Vec::new()) }))
     };
     if !req.share {
         return Ok((fresh(dest).await?, false));
@@ -190,6 +258,13 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
         }
         Err(e) => return Err(e),
     };
+    if !shared && (!dest.forwards.is_empty() || !dest.forward_errors.is_empty()) {
+        let notes = start_forwards(&conn, dest).await;
+        let c = console.lock().await;
+        for note in notes {
+            c.print(&format!("{note}\n"));
+        }
+    }
     let (mut rx, tx) = channel.split();
     let (cols, rows) = console.lock().await.size;
     tx.request_pty(false, &req.term, cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
@@ -249,7 +324,7 @@ async fn open_files(conn: &Conn, replies: crossbeam_channel::Sender<crate::sftp:
     Ok(crate::sftp::Files::new(session, replies))
 }
 
-type Opened = (Handle<Client>, Vec<Handle<Client>>);
+type Opened = (Handle<Client>, Vec<Handle<Client>>, Targets);
 
 fn open<'a>(dest: Destination, req: &'a Request, console: &'a Shared, depth: usize) -> Pin<Box<dyn Future<Output = Result<Opened, String>> + Send + 'a>> {
     Box::pin(async move {
@@ -257,6 +332,7 @@ fn open<'a>(dest: Destination, req: &'a Request, console: &'a Shared, depth: usi
             return Err("too many jump hosts".into());
         }
         let handler = Client::new(&dest, req, console.clone());
+        let targets = handler.targets.clone();
         let config = Arc::new(client::Config {
             keepalive_interval: Some(Duration::from_secs(30)),
             keepalive_max: 4,
@@ -268,7 +344,7 @@ fn open<'a>(dest: Destination, req: &'a Request, console: &'a Shared, depth: usi
             if !rest.is_empty() {
                 via.proxy_jump = rest.to_vec();
             }
-            let (jump, mut jumps) = open(via, req, console, depth + 1).await?;
+            let (jump, mut jumps, _) = open(via, req, console, depth + 1).await?;
             let channel = jump
                 .channel_open_direct_tcpip(dest.host.clone(), dest.port as u32, "127.0.0.1", 0)
                 .await
@@ -287,7 +363,7 @@ fn open<'a>(dest: Destination, req: &'a Request, console: &'a Shared, depth: usi
             (connect(config, tcp, handler, &dest).await?, Vec::new())
         };
         authenticate(&mut handle, &dest, req, console).await?;
-        Ok((handle, jumps))
+        Ok((handle, jumps, targets))
     })
 }
 
@@ -327,6 +403,7 @@ fn proxy_stream(command: &str) -> Result<impl AsyncRead + AsyncWrite + Unpin + S
 }
 
 pub struct Client {
+    targets: Targets,
     agent: Option<Option<String>>,
     console: Weak<Mutex<Console>>,
     host: String,
@@ -337,7 +414,7 @@ pub struct Client {
 
 impl Client {
     fn new(dest: &Destination, req: &Request, console: Shared) -> Self {
-        Self { agent: forwards_agent(dest, req).then(|| dest.agent.clone()), console: Arc::downgrade(&console), host: dest.host.clone(), port: dest.port, known_hosts: req.ssh_dir.join("known_hosts"), accepted: None }
+        Self { targets: Targets::default(), agent: forwards_agent(dest, req).then(|| dest.agent.clone()), console: Arc::downgrade(&console), host: dest.host.clone(), port: dest.port, known_hosts: req.ssh_dir.join("known_hosts"), accepted: None }
     }
 
     fn label(&self) -> String {
@@ -351,6 +428,18 @@ impl Client {
 
 impl client::Handler for Client {
     type Error = russh::Error;
+
+    async fn server_channel_open_forwarded_tcpip(&mut self, channel: russh::Channel<client::Msg>, _address: &str, port: u32, _from: &str, _from_port: u32, reply: client::ChannelOpenHandle, _session: &mut client::Session) -> Result<(), Self::Error> {
+        let target = self.targets.lock().ok().and_then(|t| t.get(&port).cloned());
+        let Some((host, host_port)) = target else { return Ok(()) };
+        let Ok(mut local) = tokio::net::TcpStream::connect((host, host_port)).await else { return Ok(()) };
+        reply.accept().await;
+        tokio::spawn(async move {
+            let mut stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut stream, &mut local).await;
+        });
+        Ok(())
+    }
 
     async fn server_channel_open_agent_forward(&mut self, channel: russh::Channel<client::Msg>, reply: client::ChannelOpenHandle, _session: &mut client::Session) -> Result<(), Self::Error> {
         let Some(path) = self.agent.clone() else { return Ok(()) };
