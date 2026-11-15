@@ -5,6 +5,7 @@ pub mod destination;
 pub mod secrets;
 pub mod sftp;
 pub mod sftp_tree;
+pub mod socks;
 
 #[cfg(test)]
 #[path = "../test/server.rs"]
