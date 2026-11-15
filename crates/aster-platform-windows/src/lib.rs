@@ -71,6 +71,10 @@ impl Platform for Windows {
         process::current_directory(pid)
     }
 
+    fn beep() -> bool {
+        unsafe { windows::Win32::System::Diagnostics::Debug::MessageBeep(windows::Win32::UI::WindowsAndMessaging::MB_OK) }.is_ok()
+    }
+
     fn ssh_command() -> Option<String> {
         let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:/Windows"));
         let bundled = root.join("System32").join("OpenSSH").join("ssh.exe");

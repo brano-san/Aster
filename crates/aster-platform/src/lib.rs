@@ -183,6 +183,7 @@ pub trait Platform: 'static {
     fn open(target: &str);
     fn ssh_command() -> Option<String>;
     fn process_cwd(pid: u32) -> Option<String>;
+    fn beep() -> bool;
 }
 
 #[cfg(test)]

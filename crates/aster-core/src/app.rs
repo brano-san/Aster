@@ -1,4 +1,4 @@
-use crate::config::{Config, CursorStyle, RightClick, SchemeMode};
+use crate::config::{Bell, Config, CursorStyle, RightClick, SchemeMode};
 use crate::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Preedit};
 use crate::keymap::{Action, Chord, Keymap, Outcome};
 use crate::keys::{encode_alt_char, encode_key, encode_mouse, paste_bytes, MouseAction};
@@ -20,6 +20,8 @@ pub type Wake = Arc<dyn Fn() + Send + Sync>;
 pub type CwdProbe = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
 
 pub const BLINK: Duration = Duration::from_millis(530);
+const BELL_FLASH: Duration = Duration::from_millis(150);
+const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
@@ -49,6 +51,7 @@ pub enum Effect {
     NewWindow,
     Timer(u32),
     Attention,
+    Beep,
     ImeArea(Rect),
 }
 
@@ -126,6 +129,10 @@ pub struct App {
     pub(crate) settings: Option<crate::settings::SettingsPage>,
     pub(crate) menu: Option<crate::menu::Menu>,
     pub(crate) rename: Option<crate::tabs::Rename>,
+    pub(crate) paste_confirm: Option<crate::paste::PasteConfirm>,
+    pub(crate) bell: Option<(PaneId, Instant)>,
+    last_bell: Option<Instant>,
+    bell_pane: Option<PaneId>,
     pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
     pub(crate) blink_on: bool,
@@ -181,6 +188,10 @@ impl App {
             settings: None,
             menu: None,
             rename: None,
+            paste_confirm: None,
+            bell: None,
+            last_bell: None,
+            bell_pane: None,
             search: None,
             swallow_char: false,
             blink_on: true,
@@ -547,12 +558,59 @@ impl App {
         if self.search_paste(&text) {
             return;
         }
+        if self.needs_paste_warning(&text, self.paste_mode()) {
+            return self.ask_paste(text);
+        }
+        self.paste_now(&text);
+    }
+
+    fn paste_mode(&self) -> TermMode {
         let mut mode = self.mode();
         if !self.config.terminal.bracketed_paste {
             mode.remove(TermMode::BRACKETED_PASTE);
         }
-        let bytes = paste_bytes(&text, mode, self.config.terminal.trim_whitespace_on_paste);
+        mode
+    }
+
+    pub(crate) fn paste_now(&mut self, text: &str) {
+        let bytes = paste_bytes(text, self.paste_mode(), self.config.terminal.trim_whitespace_on_paste);
         self.write_focused(bytes);
+    }
+
+    fn ring(&mut self, pane: PaneId) {
+        let kind = self.config.terminal.bell;
+        if kind == Bell::Off {
+            return;
+        }
+        if !self.focused {
+            self.effects.push(Effect::Attention);
+        }
+        let now = Instant::now();
+        if self.last_bell.is_some_and(|t| now.duration_since(t) < BELL_GAP) {
+            return;
+        }
+        self.last_bell = Some(now);
+        self.bell_pane = Some(pane);
+        match kind {
+            Bell::Audible => self.effects.push(Effect::Beep),
+            _ => self.flash_bell(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_bell_reset(&mut self) {
+        self.last_bell = None;
+    }
+
+    pub fn flash_bell(&mut self) {
+        if let Some(pane) = self.bell_pane {
+            self.bell = Some((pane, Instant::now()));
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn bell_flash(&self, pane: PaneId) -> bool {
+        self.bell.is_some_and(|(p, t)| p == pane && t.elapsed() < BELL_FLASH)
     }
 
     fn copy(&mut self) -> bool {
@@ -799,7 +857,7 @@ impl App {
     }
 
     pub(crate) fn terminal_has_focus(&self) -> bool {
-        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none()
+        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.paste_confirm.is_none()
     }
 
     fn blinking(&self) -> bool {
@@ -808,6 +866,10 @@ impl App {
 
     pub fn on_timer(&mut self) {
         self.blink_armed = false;
+        if self.bell.is_some_and(|(_, t)| t.elapsed() >= BELL_FLASH) {
+            self.bell = None;
+            self.dirty = true;
+        }
         if self.blinking() && self.blink_since.elapsed() >= BLINK {
             self.blink_on = !self.blink_on;
             self.blink_since = Instant::now();
@@ -878,6 +940,9 @@ impl App {
             return;
         }
         self.swallow_char = false;
+        if self.paste_confirm.is_some() {
+            return self.paste_key(key);
+        }
         if self.menu.is_some() {
             return self.menu_key(key);
         }
@@ -924,7 +989,7 @@ impl App {
             self.preview_scheme();
             return;
         }
-        if self.menu.is_some() {
+        if self.menu.is_some() || self.paste_confirm.is_some() {
             return;
         }
         if self.rename.is_some() {
@@ -1130,6 +1195,9 @@ impl App {
             }
             return;
         }
+        if self.paste_confirm.is_some() {
+            return self.paste_click(x, y);
+        }
         if self.menu.is_some() {
             return self.menu_click(x, y);
         }
@@ -1322,7 +1390,7 @@ impl App {
                         p.title = None;
                     }
                 }
-                VtEvent::Bell => self.effects.push(Effect::Attention),
+                VtEvent::Bell => self.ring(pane),
                 VtEvent::Clipboard(text) => self.effects.push(Effect::SetClipboard(text)),
             }
         }
@@ -1371,6 +1439,11 @@ impl App {
             self.blink_armed = true;
             let left = BLINK.saturating_sub(self.blink_since.elapsed()).as_millis().max(16) as u32;
             self.effects.push(Effect::Timer(left));
+        }
+        if let Some((_, t)) = self.bell {
+            let left = BELL_FLASH.saturating_sub(t.elapsed()).as_millis().max(16) as u32;
+            self.effects.push(Effect::Timer(left));
+            self.blink_armed = false;
         }
     }
 

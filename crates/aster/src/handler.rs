@@ -216,6 +216,14 @@ impl<P: Platform> Handler<P> {
             Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()) }),
             Effect::Timer(ms) => window.set_timer(ms),
             Effect::Attention => window.request_attention(),
+            Effect::Beep => {
+                if !P::beep() {
+                    if let Some(s) = self.windows.get_mut(&id) {
+                        s.app.flash_bell();
+                        window.request_redraw();
+                    }
+                }
+            }
             Effect::ImeArea(r) => window.set_ime_area(r),
         }
     }
