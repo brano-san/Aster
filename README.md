@@ -15,7 +15,16 @@
 
 ## Status
 
-Проект в ранней разработке. Текущий этап и порядок работ — в [docs/PLAN.md](docs/PLAN.md).
+Проект в ранней разработке. Уже есть: вкладки и панели, автоопределение оболочек, 191 цветовая схема, горячие клавиши Tabby, выделение и ссылки. SSH, восстановление сессий, режим Quake и экран настроек — следующий этап. Порядок работ — в [docs/PLAN.md](docs/PLAN.md), заметки к выпускам — в [docs/releases](docs/releases).
+
+## Getting Aster
+
+Готовые сборки — на странице [Releases](https://github.com/brano-san/Aster/releases):
+
+* **Windows 10/11:** скачайте `aster-<версия>-x86_64-windows.zip`, распакуйте в любую папку и запустите `aster.exe`. Права администратора не нужны.
+* **Linux (Wayland / X11):** скачайте `aster-<версия>-x86_64-linux.tar.gz`, распакуйте и запустите `./aster`. Нужны EGL / OpenGL ES и xkbcommon (на Debian и Ubuntu: `libegl1`, `libgles2`, `libgl1-mesa-dri`, `libxkbcommon-x11-0`); сборка совместима с glibc 2.35 (Ubuntu 22.04) и новее.
+
+Настройки лежат в `%APPDATA%\Aster\config.toml` (Windows) или `~/.config/aster/config.toml` (Linux) и создаются при первом запуске.
 
 ## Free, open source and private
 
