@@ -141,3 +141,32 @@ fn xresources_defines_and_short_hex_are_resolved() {
     assert_eq!(p.cursor, p.foreground);
     assert!(schemes::parse_xresources("*.foreground: #fff").is_none());
 }
+
+#[test]
+fn working_directory_comes_from_osc_7_9_9_and_1337_even_split_across_chunks() {
+    let (mut t, _) = term(20, 3);
+    t.feed(b"\x1b]7;file://host/home/me/my%20dir\x07");
+    assert_eq!(t.cwd(), Some("/home/me/my dir"));
+    t.feed(b"\x1b]7;file://pc/C:/Users/me\x1b\\");
+    assert_eq!(t.cwd(), Some(r"C:\Users\me"));
+    t.feed(br#"]9;9;"D:\Projects""#.as_slice().iter().fold(vec![0x1b], |mut v, b| {
+        v.push(*b);
+        v
+    }).as_slice());
+    t.feed(b"\x1b\\");
+    assert_eq!(t.cwd(), Some(r"D:\Projects"));
+    t.feed(b"\x1b]1337;CurrentDir=/tmp\x07");
+    assert_eq!(t.cwd(), Some("/tmp"));
+    t.feed(b"\x1b]0;title\x07");
+    assert_eq!(t.cwd(), Some("/tmp"));
+    assert_eq!(t.screen_text(), "");
+}
+
+#[test]
+fn line_text_maps_characters_to_columns_around_wide_chars() {
+    let (mut t, _) = term(10, 2);
+    t.feed("a日b".as_bytes());
+    let (text, cols) = t.line_text(0);
+    assert!(text.starts_with("a日b"));
+    assert_eq!(&cols[..3], &[0, 1, 3]);
+}

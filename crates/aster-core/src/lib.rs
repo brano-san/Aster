@@ -4,6 +4,7 @@ pub mod fuzzy;
 pub mod input;
 pub mod keymap;
 pub mod keys;
+pub mod links;
 pub mod overlay;
 pub mod panes;
 pub mod profile;

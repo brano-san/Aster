@@ -38,6 +38,7 @@ pub enum Effect {
     SetClipboard(String),
     RequestPaste,
     SaveConfig(String),
+    Open(String),
     Title(String),
     Cursor(CursorIcon),
     Minimize,
@@ -115,6 +116,7 @@ pub struct App {
     pub(crate) drag: Drag,
     last_click: Option<(Instant, f32, f32, u8)>,
     pub(crate) hover: HitArea,
+    pub(crate) hover_link: Option<HoverLink>,
     pub(crate) overlay: Option<Overlay>,
     swallow_char: bool,
     pub(crate) blink_on: bool,
@@ -163,6 +165,7 @@ impl App {
             drag: Drag::None,
             last_click: None,
             hover: HitArea::Client,
+            hover_link: None,
             overlay: None,
             swallow_char: false,
             blink_on: true,
@@ -308,7 +311,9 @@ impl App {
         for (k, v) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "Aster")] {
             env.entry(k.to_owned()).or_insert_with(|| v.to_owned());
         }
-        let launch = Launch { command: profile.command.clone(), args: profile.args.clone(), cwd: profile.cwd.clone().or_else(|| self.home.clone()), env, cols: 80, rows: 24 };
+        let inherited = self.focused_pane().and_then(|p| self.panes.get(&p)).and_then(|p| p.terminal.lock().cwd().map(str::to_owned));
+        let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
+        let launch = Launch { command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), size, scroll_acc: 0.0 });
         id
     }
@@ -922,12 +927,19 @@ impl App {
             }
             _ => {}
         }
+        let link = self.link_at(x, y);
+        if link != self.hover_link {
+            self.hover_link = link;
+            self.dirty = true;
+        }
         let icon = if let Some(s) = self.splitter_at(x, y) {
             if s.axis == Axis::Horizontal {
                 CursorIcon::ResizeHorizontal
             } else {
                 CursorIcon::ResizeVertical
             }
+        } else if self.hover_link.is_some() {
+            CursorIcon::Hand
         } else if self.overlay.is_none() && self.pane_at(x, y).is_some() {
             CursorIcon::Text
         } else {
@@ -937,6 +949,27 @@ impl App {
         if let Some((pane, rect)) = self.pane_at(x, y) {
             self.report(pane, rect, MouseAction::Motion(None), x, y, Mods::NONE);
         }
+    }
+
+    fn link_at(&self, x: f32, y: f32) -> Option<HoverLink> {
+        if self.overlay.is_some() || !matches!(self.drag, Drag::None) {
+            return None;
+        }
+        let (pane, rect) = self.pane_at(x, y)?;
+        let (line, col, _) = self.cell_at(pane, rect, x, y);
+        let p = self.panes.get(&pane)?;
+        let (text, cols) = {
+            let t = p.terminal.lock();
+            if t.mode().intersects(TermMode::MOUSE_MODE) {
+                return None;
+            }
+            t.line_text(line)
+        };
+        let at = cols.iter().position(|c| *c >= col)?;
+        let link = crate::links::find_links(&text).into_iter().find(|l| (l.start..l.end).contains(&at))?;
+        let start = cols[link.start];
+        let end = cols.get(link.end).copied().unwrap_or_else(|| cols.last().map_or(0, |c| c + 1));
+        Some(HoverLink { pane, line, start, end, target: link.target })
     }
 
     fn click_count(&mut self, x: f32, y: f32, clicks: u8) -> u8 {
@@ -1046,6 +1079,9 @@ impl App {
                 let has = self.panes.get(&pane).is_some_and(|p| p.terminal.lock().has_selection());
                 if !has {
                     self.clear_selection(pane);
+                    if let Some(link) = self.link_at(x, y).filter(|l| self.hover_link.as_ref() == Some(l)) {
+                        self.effects.push(Effect::Open(open_target(&link.target)));
+                    }
                 } else if self.config.terminal.copy_on_select {
                     self.copy();
                 }
@@ -1195,6 +1231,45 @@ impl App {
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HoverLink {
+    pub pane: PaneId,
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+    pub target: String,
+}
+
+pub fn open_target(target: &str) -> String {
+    if target.contains("://") {
+        return target.to_owned();
+    }
+    let mut t = target;
+    for _ in 0..2 {
+        if let Some((head, tail)) = t.rsplit_once(':') {
+            if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) && head.len() > 1 {
+                t = head;
+            }
+        }
+    }
+    t.to_owned()
+}
+
+pub fn inherit_cwd(profile: &Profile, inherited: Option<String>, home: Option<String>) -> (Vec<String>, Option<String>) {
+    let mut args = profile.args.clone();
+    let Some(dir) = inherited else { return (args, profile.cwd.clone().or(home)) };
+    if dir.starts_with('/') {
+        if let Some(i) = args.iter().position(|a| a == "--cd") {
+            if let Some(next) = args.get_mut(i + 1) {
+                *next = dir;
+                return (args, profile.cwd.clone().or(home));
+            }
+        }
+        return (args, profile.cwd.clone().or(home));
+    }
+    (args, Some(dir))
 }
 
 #[cfg(test)]

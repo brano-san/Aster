@@ -96,6 +96,7 @@ pub fn detect() -> Vec<Profile> {
     }
     let mut cmd = Profile::new("local:cmd", "CMD", &path_str(&sys.join("cmd.exe")), &[]);
     cmd.icon = Some("cmd".into());
+    cmd.env.insert("PROMPT".into(), r"$e]9;9;$P$e\$P$G".into());
     out.push(cmd);
     let wsl = sys.join("wsl.exe");
     if wsl.is_file() {
