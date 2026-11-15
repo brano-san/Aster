@@ -513,8 +513,19 @@ fn capture_keys(keys: &str) -> Vec<Event> {
     keys.split(';')
         .filter(|k| !k.is_empty())
         .flat_map(|k| match k.strip_prefix('\'') {
-            Some(text) => text.chars().map(Event::Char).collect(),
-            None => vec![capture_key(k)],
+            Some(text) => text.chars().map(Event::Char).collect::<Vec<_>>(),
+            None => {
+                let key = capture_key(k);
+                let produced = match key {
+                    Event::Key { key: Key::Enter, mods, .. } if !mods.ctrl => Some('\r'),
+                    Event::Key { key: Key::Tab, .. } => Some('\t'),
+                    Event::Key { key: Key::Backspace, .. } => Some('\u{8}'),
+                    Event::Key { key: Key::Escape, .. } => Some('\u{1b}'),
+                    Event::Key { key: Key::Char(c), mods, .. } if mods.ctrl && c.is_ascii_alphabetic() => Some(((c as u8) & 0x1f) as char),
+                    _ => None,
+                };
+                std::iter::once(key).chain(produced.map(Event::Char)).collect::<Vec<_>>()
+            }
         })
         .collect()
 }

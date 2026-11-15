@@ -1,7 +1,11 @@
+pub mod app;
 pub mod config;
 pub mod fuzzy;
 pub mod input;
 pub mod keymap;
 pub mod keys;
+pub mod overlay;
 pub mod panes;
 pub mod profile;
+pub mod theme;
+pub mod view;
