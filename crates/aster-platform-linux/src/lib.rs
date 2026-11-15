@@ -60,6 +60,29 @@ impl Platform for Linux {
         Some(listed.map(PathBuf::from).unwrap_or_else(|| home.join("Downloads")))
     }
 
+    fn secret_get(key: &str) -> Option<String> {
+        let out = std::process::Command::new("secret-tool").args(["lookup", "service", "aster", "account", key]).stderr(std::process::Stdio::null()).output().ok()?;
+        let value = String::from_utf8(out.stdout).ok()?;
+        (out.status.success() && !value.is_empty()).then_some(value)
+    }
+
+    fn secret_set(key: &str, value: &str) -> bool {
+        use std::io::Write;
+        let child = std::process::Command::new("secret-tool")
+            .args(["store", &format!("--label=Aster {key}"), "service", "aster", "account", key])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else { return false };
+        let wrote = child.stdin.take().is_some_and(|mut i| i.write_all(value.as_bytes()).is_ok());
+        wrote && child.wait().is_ok_and(|s| s.success())
+    }
+
+    fn secret_delete(key: &str) {
+        let _ = std::process::Command::new("secret-tool").args(["clear", "service", "aster", "account", key]).stderr(std::process::Stdio::null()).status();
+    }
+
     fn beep() -> bool {
         false
     }

@@ -156,3 +156,68 @@ fn unshared_tabs_each_log_in() {
     let mut second = connect_to(port, dir);
     second.wait_for("password: ");
 }
+
+fn remembering(port: u16, dir: PathBuf, secrets: Arc<crate::secrets::Memory>) -> Pane {
+    let mut req = request(format!("ann@127.0.0.1:{port}"), dir);
+    req.secrets = Some(secrets);
+    req.remember = true;
+    Pane { conn: start(req), seen: String::new() }
+}
+
+#[test]
+fn a_typed_password_can_be_saved_and_is_then_used_without_asking() {
+    use crate::secrets::Secrets;
+    let (port, _) = serve();
+    let dir = temp_ssh_dir();
+    let secrets = Arc::new(crate::secrets::Memory::default());
+    let mut first = remembering(port, dir.clone(), secrets.clone());
+    first.wait_for("(yes/no)? ");
+    first.send("yes\r");
+    first.wait_for("password: ");
+    first.send("secret\r");
+    first.wait_for("system credential store (yes/no)? ");
+    first.send("yes\r");
+    first.wait_for("welcome");
+    let key = crate::secrets::password_key("ann", "127.0.0.1", port);
+    assert_eq!(secrets.get(&key).as_deref(), Some("secret"));
+
+    let mut second = remembering(port, dir.clone(), secrets.clone());
+    second.wait_for("welcome");
+    assert!(!second.seen.contains("password"), "{:?}", second.seen);
+
+    secrets.set(&key, "outdated");
+    let mut third = remembering(port, dir, secrets.clone());
+    third.wait_for("The saved password was not accepted");
+    third.wait_for("password: ");
+    assert_eq!(secrets.get(&key), None, "a rejected password is forgotten");
+}
+
+#[test]
+fn declining_keeps_nothing_and_a_saved_passphrase_unlocks_the_key() {
+    use crate::secrets::Secrets;
+    let (port, _) = serve();
+    let dir = temp_ssh_dir();
+    let key = dir.join("work_key");
+    std::fs::write(&key, CLIENT_KEY).unwrap();
+    std::fs::write(dir.join("config"), format!("Host work\n  HostName 127.0.0.1\n  Port {port}\n  User ann\n  IdentityFile {}\n", key.display())).unwrap();
+    let secrets = Arc::new(crate::secrets::Memory::default());
+    let open = |secrets: Arc<crate::secrets::Memory>| {
+        let mut req = request("work".into(), dir.clone());
+        req.secrets = Some(secrets);
+        req.remember = true;
+        Pane { conn: start(req), seen: String::new() }
+    };
+    let mut first = open(secrets.clone());
+    first.wait_for("(yes/no)? ");
+    first.send("yes\r");
+    first.wait_for("Enter passphrase");
+    first.send("pw\r");
+    first.wait_for("credential store (yes/no)? ");
+    first.send("no\r");
+    first.wait_for("welcome");
+    assert_eq!(secrets.get(&crate::secrets::passphrase_key(&key)), None);
+    secrets.set(&crate::secrets::passphrase_key(&key), "pw");
+    let mut second = open(secrets);
+    second.wait_for("welcome");
+    assert!(!second.seen.contains("passphrase"));
+}
