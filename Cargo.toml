@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.87"
+
+[workspace.dependencies]
+aster-gfx = { path = "crates/aster-gfx" }
+aster-vt = { path = "crates/aster-vt" }
+aster-core = { path = "crates/aster-core" }
+aster-platform = { path = "crates/aster-platform" }
+aster-platform-windows = { path = "crates/aster-platform-windows" }
+
+alacritty_terminal = "0.26"
+crossbeam-channel = "0.5"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+windows = "0.62"
+windows-core = "0.62"
+crc32fast = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
+
+[profile.dist]
+inherits = "release"
+debug = false
+strip = true
+lto = "fat"
