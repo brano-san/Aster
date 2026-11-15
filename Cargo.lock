@@ -148,6 +148,7 @@ dependencies = [
  "aster-platform-windows",
  "aster-ssh",
  "aster-vt",
+ "aster-zmodem",
  "crossbeam-channel",
  "tokio",
  "tracing",

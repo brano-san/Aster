@@ -3,6 +3,7 @@
 mod handler;
 mod remote;
 mod session;
+mod zmodem;
 
 use aster_core::config::{Config, SchemeMode};
 use aster_platform::{Placement, Platform, WindowOptions, WindowSystem};

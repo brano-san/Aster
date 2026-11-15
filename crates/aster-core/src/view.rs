@@ -153,6 +153,9 @@ impl App {
             if split && focus != Some(*id) {
                 g.dl.rect(*rect, theme.dim);
             }
+            if let Some(typed) = self.offer(*id).map(str::to_owned) {
+                self.draw_offer(g, *rect, &typed);
+            }
             if self.bell_flash(*id) {
                 g.dl.rect(*rect, theme.foreground.alpha(0x2C));
             }
@@ -488,6 +491,28 @@ impl App {
                 SearchHit::Field => {}
             }
         }
+    }
+
+    fn draw_offer<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, typed: &str) {
+        let s = self.scale;
+        let theme = self.theme;
+        let h = (64.0 * s).round();
+        let r = Rect::new(pane.x, pane.bottom() - h, pane.w, h);
+        g.dl.rect(r, theme.overlay);
+        g.dl.rect(Rect::new(r.x, r.y, r.w, (1.0 * s).round().max(1.0)), theme.accent);
+        let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
+        let pad = (14.0 * s).round();
+        let first = Rect::new(r.x + pad, r.y + (6.0 * s).round(), r.w - 2.0 * pad, (24.0 * s).round());
+        let y = baseline(g, first, ui);
+        g.text(first.x, y, "Send files: drop them here, or type a path and press Enter. Esc cancels.", ui, theme.text_dim, first.w);
+        let field = Rect::new(r.x + pad, first.bottom() + (2.0 * s).round(), r.w - 2.0 * pad, (26.0 * s).round());
+        g.dl.round_rect(field, theme.surface, (4.0 * s).round());
+        g.dl.outline(field, theme.accent, (4.0 * s).round(), (1.0 * s).round().max(1.0));
+        let inner = field.inset((8.0 * s).round(), 0.0);
+        let fy = baseline(g, inner, ui);
+        let w = g.text(inner.x, fy, typed, ui, theme.text, inner.w);
+        let caret_h = (14.0 * s).round();
+        g.dl.rect(Rect::new(inner.x + w + 1.0, field.y + ((field.h - caret_h) / 2.0).round(), (1.0 * s).round().max(1.0), caret_h), theme.accent);
     }
 
     fn draw_paste<B: TextBackend>(&mut self, g: &mut Gfx<B>, m: Metrics) {
