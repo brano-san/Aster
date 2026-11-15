@@ -183,28 +183,7 @@ impl ScriptRunner {
                 Escape::Osc | Escape::OscTerminator => Escape::Osc,
             };
         }
-        let mut consumed = 0;
-        while consumed < self.pending_utf8.len() {
-            match std::str::from_utf8(&self.pending_utf8[consumed..]) {
-                Ok(text) => {
-                    self.buffer.push_str(text);
-                    consumed = self.pending_utf8.len();
-                }
-                Err(error) => {
-                    let end = consumed + error.valid_up_to();
-                    self.buffer
-                        .push_str(std::str::from_utf8(&self.pending_utf8[consumed..end]).unwrap());
-                    consumed = end;
-                    if let Some(length) = error.error_len() {
-                        self.buffer.push('\u{fffd}');
-                        consumed += length;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        self.pending_utf8.drain(..consumed);
+        crate::utf8::decode(&mut self.pending_utf8, &mut self.buffer);
         if let Some((start, _)) = self.buffer.char_indices().rev().nth(4095) {
             self.buffer.drain(..start);
         }

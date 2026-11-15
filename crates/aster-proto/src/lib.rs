@@ -5,3 +5,4 @@ pub mod prompt;
 pub mod quote;
 pub mod scripts;
 pub mod telnet;
+mod utf8;
