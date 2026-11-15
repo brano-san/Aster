@@ -170,3 +170,33 @@ fn line_text_maps_characters_to_columns_around_wide_chars() {
     assert!(text.starts_with("a日b"));
     assert_eq!(&cols[..3], &[0, 1, 3]);
 }
+
+#[test]
+fn search_walks_matches_from_the_newest_and_scrolls_to_them() {
+    let (mut t, _) = term(20, 3);
+    t.feed(b"alpha one\r\nbeta\r\nalpha two\r\ngamma\r\ndelta\r\nend");
+    t.set_search("alpha", search::SearchOptions::default()).unwrap();
+    assert!(t.search_step(true));
+    let first = t.visible_matches();
+    assert!(first.iter().any(|m| m.current), "{first:?}");
+    assert!(t.search_step(true));
+    assert!(t.display_offset() > 0, "the older match scrolled into view");
+    let screen = t.screen_text();
+    assert!(screen.contains("alpha one"), "{screen}");
+    assert!(!t.search_step(true) || t.screen_text().contains("alpha"));
+}
+
+#[test]
+fn search_options_build_the_expected_patterns() {
+    use search::{pattern, SearchOptions};
+    assert_eq!(pattern("a.b", SearchOptions::default()), r"(?i)a\.b");
+    assert_eq!(pattern("a.b", SearchOptions { regex: true, ..Default::default() }), "(?i)a.b");
+    assert_eq!(pattern("Hi", SearchOptions { case_sensitive: true, whole_word: true, ..Default::default() }), r"(?-i)(?-u:\b)(?:Hi)(?-u:\b)");
+    let (mut t, _) = term(20, 3);
+    t.feed(b"Cat cat concat");
+    t.set_search("cat", SearchOptions { whole_word: true, ..Default::default() }).unwrap();
+    assert_eq!(t.visible_matches().len(), 2);
+    t.set_search("cat", SearchOptions { case_sensitive: true, ..Default::default() }).unwrap();
+    assert_eq!(t.visible_matches().len(), 2);
+    assert!(t.set_search("(", SearchOptions { regex: true, ..Default::default() }).is_err());
+}

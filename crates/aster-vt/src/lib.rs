@@ -1,6 +1,7 @@
 mod osc;
 mod palette;
 pub mod schemes;
+pub mod search;
 
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::{Column, Line, Point, Side};
@@ -101,6 +102,16 @@ pub struct Terminal {
     seq: u64,
     sniffer: osc::Sniffer,
     cwd: Option<String>,
+    search: Option<alacritty_terminal::term::search::RegexSearch>,
+    found: Option<alacritty_terminal::term::search::Match>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibleMatch {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+    pub current: bool,
 }
 
 pub struct VisibleCell<'a> {
@@ -122,7 +133,76 @@ impl Terminal {
     pub fn new(size: Size, options: Options, sink: Sink) -> Self {
         let cell = Arc::new(AtomicU32::new(0));
         let listener = Listener { sink, cell: cell.clone() };
-        Self { term: Term::new(config(options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, sniffer: osc::Sniffer::default(), cwd: None }
+        Self { term: Term::new(config(options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, sniffer: osc::Sniffer::default(), cwd: None, search: None, found: None }
+    }
+
+    pub fn set_search(&mut self, query: &str, options: search::SearchOptions) -> Result<(), String> {
+        self.found = None;
+        self.search = None;
+        self.bump();
+        if query.is_empty() {
+            return Ok(());
+        }
+        self.search = Some(search::compile(query, options)?);
+        Ok(())
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search = None;
+        self.found = None;
+        self.bump();
+    }
+
+    pub fn search_step(&mut self, older: bool) -> bool {
+        use alacritty_terminal::index::Direction;
+        let Some(mut regex) = self.search.take() else { return false };
+        let (origin, direction, side) = match (&self.found, older) {
+            (Some(m), true) => (*m.start(), Direction::Left, Side::Left),
+            (Some(m), false) => (*m.end(), Direction::Right, Side::Right),
+            (None, _) => (Point::new(self.term.bottommost_line(), Column(self.size.cols - 1)), Direction::Left, Side::Right),
+        };
+        let origin = match (&self.found, direction) {
+            (Some(_), Direction::Left) => origin.sub(&self.term, alacritty_terminal::index::Boundary::None, 1),
+            (Some(_), Direction::Right) => origin.add(&self.term, alacritty_terminal::index::Boundary::None, 1),
+            _ => origin,
+        };
+        let found = self.term.search_next(&mut regex, origin, direction, side, None);
+        self.search = Some(regex);
+        self.bump();
+        match found {
+            Some(m) => {
+                self.term.scroll_to_point(*m.start());
+                self.found = Some(m);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn visible_matches(&mut self) -> Vec<VisibleMatch> {
+        use alacritty_terminal::index::Direction;
+        use alacritty_terminal::term::search::RegexIter;
+        let Some(mut regex) = self.search.take() else { return Vec::new() };
+        let offset = self.display_offset() as i32;
+        let top = Point::new(Line(-offset), Column(0));
+        let bottom = Point::new(Line(self.size.rows as i32 - 1 - offset), Column(self.size.cols - 1));
+        let current = self.found.clone();
+        let mut out = Vec::new();
+        for m in RegexIter::new(top, bottom, Direction::Right, &self.term, &mut regex).take(2000) {
+            let (s, e) = (*m.start(), *m.end());
+            let is_current = current.as_ref().is_some_and(|c| *c.start() == s && *c.end() == e);
+            for line in s.line.0..=e.line.0 {
+                let row = line + offset;
+                if row < 0 || row >= self.size.rows as i32 {
+                    continue;
+                }
+                let start = if line == s.line.0 { s.column.0 } else { 0 };
+                let end = if line == e.line.0 { e.column.0 + 1 } else { self.size.cols };
+                out.push(VisibleMatch { line: row as usize, start, end, current: is_current });
+            }
+        }
+        self.search = Some(regex);
+        out
     }
 
     pub fn cwd(&self) -> Option<&str> {

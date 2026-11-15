@@ -8,5 +8,6 @@ pub mod links;
 pub mod overlay;
 pub mod panes;
 pub mod profile;
+pub mod search;
 pub mod theme;
 pub mod view;

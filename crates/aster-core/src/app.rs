@@ -107,7 +107,7 @@ pub struct App {
     pub(crate) focused: bool,
     system_dark: bool,
     effects: Vec<Effect>,
-    dirty: bool,
+    pub(crate) dirty: bool,
     events: Receiver<(PaneId, VtEvent)>,
     sender: Sender<(PaneId, VtEvent)>,
     wake: Wake,
@@ -118,6 +118,7 @@ pub struct App {
     pub(crate) hover: HitArea,
     pub(crate) hover_link: Option<HoverLink>,
     pub(crate) overlay: Option<Overlay>,
+    pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
     pub(crate) blink_on: bool,
     blink_since: Instant,
@@ -167,6 +168,7 @@ impl App {
             hover: HitArea::Client,
             hover_link: None,
             overlay: None,
+            search: None,
             swallow_char: false,
             blink_on: true,
             blink_since: Instant::now(),
@@ -349,6 +351,9 @@ impl App {
 
     pub fn close_pane(&mut self, pane: PaneId) {
         let Some(ti) = self.tabs.iter().position(|t| t.root.contains(pane)) else { return };
+        if self.search.as_ref().is_some_and(|s| s.pane == pane) {
+            self.search = None;
+        }
         if let Some(p) = self.panes.remove(&pane) {
             if p.exited.is_none() {
                 self.effects.push(Effect::Kill { pane });
@@ -483,6 +488,9 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.search_paste(&text) {
+            return;
+        }
         let mut mode = self.mode();
         if !self.config.terminal.bracketed_paste {
             mode.remove(TermMode::BRACKETED_PASTE);
@@ -547,6 +555,7 @@ impl App {
         match action {
             CommandSelector => self.open_overlay(OverlayKind::Commands),
             ProfileSelector => self.open_overlay(OverlayKind::Profiles),
+            Search => self.open_search(),
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             ToggleFullscreen => self.effects.push(Effect::ToggleFullscreen),
             NewTab => self.open_default_tab(),
@@ -797,12 +806,16 @@ impl App {
         if key == Key::Other {
             return;
         }
+        if self.search_key(key, mods) {
+            return;
+        }
         match self.keymap.press(Chord { key, mods }) {
             Outcome::Action(a) => {
                 self.swallow_char = true;
                 self.run(a);
             }
             Outcome::Pending => self.swallow_char = true,
+            Outcome::None if self.search.is_some() => {}
             Outcome::None => {
                 if let Some(e) = encode_key(key, mods, self.mode()) {
                     self.swallow_char = e.swallows_char;
@@ -822,6 +835,12 @@ impl App {
                 self.dirty = true;
             }
             self.preview_scheme();
+            return;
+        }
+        if self.search.is_some() {
+            if !alt {
+                self.search_char(c);
+            }
             return;
         }
         let bytes = if alt {
@@ -1004,6 +1023,9 @@ impl App {
                 Some(None) => {}
                 None => self.close_overlay(),
             }
+            return;
+        }
+        if button == MouseButton::Left && self.search_click(x, y) {
             return;
         }
         let hit = self.hit_test(x, y);
@@ -1230,6 +1252,11 @@ impl App {
 
     pub(crate) fn push(&mut self, e: Effect) {
         self.effects.push(e);
+    }
+
+    pub(crate) fn push_save_config(&mut self) {
+        let text = self.config.to_text();
+        self.effects.push(Effect::SaveConfig(text));
     }
 
     pub fn take_effects(&mut self) -> Vec<Effect> {

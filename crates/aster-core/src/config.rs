@@ -30,6 +30,14 @@ pub enum SchemeMode {
     Auto,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct SearchOptions {
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Terminal {
@@ -49,6 +57,7 @@ pub struct Terminal {
     pub scroll_on_input: bool,
     pub profile: String,
     pub environment: BTreeMap<String, String>,
+    pub search_options: SearchOptions,
 }
 
 impl Default for Terminal {
@@ -70,6 +79,7 @@ impl Default for Terminal {
             scroll_on_input: true,
             profile: String::new(),
             environment: BTreeMap::new(),
+            search_options: SearchOptions::default(),
         }
     }
 }
