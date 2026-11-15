@@ -71,27 +71,7 @@ impl InputProcessor {
         }
         self.pending_utf8.extend_from_slice(keys);
         let mut text = String::new();
-        let mut consumed = 0;
-        while consumed < self.pending_utf8.len() {
-            match std::str::from_utf8(&self.pending_utf8[consumed..]) {
-                Ok(valid) => {
-                    text.push_str(valid);
-                    consumed = self.pending_utf8.len();
-                }
-                Err(error) => {
-                    let end = consumed + error.valid_up_to();
-                    text.push_str(std::str::from_utf8(&self.pending_utf8[consumed..end]).unwrap());
-                    consumed = end;
-                    if let Some(length) = error.error_len() {
-                        text.push('\u{fffd}');
-                        consumed += length;
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-        self.pending_utf8.drain(..consumed);
+        crate::utf8::decode(&mut self.pending_utf8, &mut text);
         for character in text.chars() {
             match self.escape {
                 Escape::Start => {
