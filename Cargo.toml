@@ -11,6 +11,7 @@ rust-version = "1.87"
 [workspace.dependencies]
 aster-gfx = { path = "crates/aster-gfx" }
 aster-vt = { path = "crates/aster-vt" }
+aster-vault = { path = "crates/aster-vault" }
 aster-core = { path = "crates/aster-core" }
 aster-platform = { path = "crates/aster-platform" }
 aster-platform-windows = { path = "crates/aster-platform-windows" }
