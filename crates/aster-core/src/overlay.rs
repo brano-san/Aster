@@ -23,15 +23,26 @@ pub struct Overlay {
     pub shown: Vec<(usize, Vec<Range<usize>>)>,
     pub selected: usize,
     pub scroll: usize,
+    pub quick: bool,
+    base: usize,
 }
+
+pub const QUICK: &str = "quick:";
 
 pub const VISIBLE: usize = 12;
 
 impl Overlay {
     pub fn new(kind: OverlayKind, items: Vec<Pick>) -> Self {
-        let mut o = Self { kind, items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0 };
+        let base = items.len();
+        let mut o = Self { kind, items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0, quick: false, base };
         o.refilter();
         o
+    }
+
+    pub fn with_quick_connect(mut self) -> Self {
+        self.quick = true;
+        self.refilter();
+        self
     }
 
     pub fn placeholder(&self) -> &'static str {
@@ -43,11 +54,17 @@ impl Overlay {
     }
 
     fn refilter(&mut self) {
+        self.items.truncate(self.base);
         let mut scored: Vec<(i32, usize, Vec<Range<usize>>)> = self.items.iter().enumerate().filter_map(|(i, p)| fuzzy(&self.query, &p.label).map(|m| (m.score, i, m.ranges))).collect();
         if !self.query.trim().is_empty() {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         }
         self.shown = scored.into_iter().map(|(_, i, r)| (i, r)).collect();
+        if let Some(target) = self.quick.then(|| crate::ssh::parse_target(&self.query)).flatten() {
+            self.items.push(Pick { label: format!("Connect to {}", target.display()), hint: "SSH".into(), value: format!("{QUICK}{}", self.query.trim()) });
+            let at = if self.query.contains('@') || self.shown.is_empty() { 0 } else { self.shown.len() };
+            self.shown.insert(at, (self.items.len() - 1, Vec::new()));
+        }
         self.selected = 0;
         self.scroll = 0;
     }

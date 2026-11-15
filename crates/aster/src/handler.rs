@@ -33,6 +33,15 @@ pub struct Handler<P: Platform> {
     exits: Receiver<Exit>,
     exit_tx: Sender<Exit>,
     config_stamp: Option<SystemTime>,
+    ssh: Option<String>,
+}
+
+fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
+    let Some(home) = P::home_dir() else { return Vec::new() };
+    let dir = home.join(".ssh");
+    let Ok(text) = std::fs::read_to_string(dir.join("config")) else { return Vec::new() };
+    let read = |p: &std::path::Path| std::fs::read_to_string(p).ok();
+    aster_ssh::config::parse(&text, &dir, &home, &read).iter().map(|h| aster_core::ssh::host_profile(&h.alias, ssh)).collect()
 }
 
 fn stamp(path: &Option<PathBuf>) -> Option<SystemTime> {
@@ -41,10 +50,14 @@ fn stamp(path: &Option<PathBuf>) -> Option<SystemTime> {
 
 impl<P: Platform> Handler<P> {
     pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker) -> Self {
-        let profiles = P::shells();
+        let mut profiles = P::shells();
+        let ssh = P::ssh_command();
+        if let Some(cmd) = &ssh {
+            profiles.extend(ssh_hosts::<P>(cmd));
+        }
         let (exit_tx, exits) = unbounded();
         let config_stamp = stamp(&crate::config_path::<P>());
-        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, exit_tx, config_stamp }
+        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, exit_tx, config_stamp, ssh }
     }
 
     fn save_config(&mut self, text: String) {
@@ -200,6 +213,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let mut app = App::new(self.config.clone(), self.profiles.clone(), window.is_dark_mode(), home, Arc::new(move || waker.wake()));
         let (w, h) = window.size();
         app.set_viewport(w, h, window.scale());
+        app.set_ssh(self.ssh.clone());
         app.open_default_tab();
         window.set_dark(app.is_dark());
         self.windows.insert(window.id(), State { app, gfx: Gfx::new(text, ATLAS), renderer: None });

@@ -66,6 +66,13 @@ impl Platform for Windows {
         std::env::var_os("USERPROFILE").map(PathBuf::from)
     }
 
+    fn ssh_command() -> Option<String> {
+        let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:/Windows"));
+        let bundled = root.join("System32").join("OpenSSH").join("ssh.exe");
+        let found = Some(bundled).filter(|p| p.is_file()).or_else(|| std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("ssh.exe")).find(|p| p.is_file()));
+        found.map(|p| p.to_string_lossy().into_owned())
+    }
+
     fn open(target: &str) {
         let wide: Vec<u16> = target.encode_utf16().chain([0]).collect();
         unsafe {

@@ -244,3 +244,16 @@ fn hovering_a_link_underlines_it_and_a_plain_click_opens_it() {
     assert_eq!(open_target("C:/src/main.rs:12:5"), "C:/src/main.rs");
     assert_eq!(open_target("https://a.b:8080"), "https://a.b:8080");
 }
+
+#[test]
+fn executable_path_titles_fall_back_to_the_profile_name() {
+    assert!(is_program_path("C:/WINDOWS/System32/OpenSSH/ssh.exe"));
+    assert!(!is_program_path("vim notes.txt"));
+    assert!(!is_program_path("C:/work"));
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.focused_terminal().unwrap().lock().feed(b"\x1b]0;C:/Windows/system32/cmd.exe\x07");
+    a.woken();
+    assert_eq!(a.tab_title(0), "local:a");
+}
