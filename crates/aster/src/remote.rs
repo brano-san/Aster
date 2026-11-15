@@ -77,7 +77,7 @@ pub fn file_reply(reply: sftp::Reply) -> FileReply {
     match reply {
         sftp::Reply::Listing { path, entries } => FileReply::Listing {
             path,
-            entries: entries.into_iter().map(|e| FileEntry { name: e.name, dir: e.dir, link: e.link, size: e.size, modified: e.modified }).collect(),
+            entries: entries.into_iter().map(|e| FileEntry { name: e.name, dir: e.dir, link: e.link, size: e.size, modified: e.modified, mode: e.mode }).collect(),
         },
         sftp::Reply::Progress { id, done, total } => FileReply::Progress { id, done, total },
         sftp::Reply::Downloaded { id, local } => FileReply::Downloaded { id, local },
@@ -98,6 +98,7 @@ pub fn file_request(request: FileRequest, downloads: PathBuf) -> sftp::Request {
         FileRequest::Remove { path, dir } => sftp::Request::Remove { path, dir },
         FileRequest::Rename { from, to } => sftp::Request::Rename { from, to },
         FileRequest::Edit { id, remote } => sftp::Request::Edit { id, remote, dir: std::env::temp_dir().join("aster-edit") },
+        FileRequest::Chmod { path, mode, recursive } => sftp::Request::Chmod { path, mode, recursive },
         FileRequest::Cancel(id) => sftp::Request::Cancel { id },
     }
 }

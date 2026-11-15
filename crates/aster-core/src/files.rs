@@ -11,6 +11,7 @@ pub struct FileEntry {
     pub link: bool,
     pub size: u64,
     pub modified: Option<u64>,
+    pub mode: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +23,7 @@ pub enum FileRequest {
     Remove { path: String, dir: bool },
     Rename { from: String, to: String },
     Edit { id: u64, remote: String },
+    Chmod { path: String, mode: u32, recursive: bool },
     Cancel(u64),
 }
 
@@ -65,6 +67,7 @@ pub enum Prompt {
     Delete { name: String, dir: bool },
     GoTo(String),
     Upload(String),
+    Chmod { name: String, dir: bool, text: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +105,11 @@ pub fn parent(path: &str) -> String {
         None if path.starts_with('/') => "/".to_owned(),
         None => ".".to_owned(),
     }
+}
+
+pub fn permissions(mode: u32) -> String {
+    let bits = ['r', 'w', 'x', 'r', 'w', 'x', 'r', 'w', 'x'];
+    (0..9).map(|i| if mode & (0o400 >> i) != 0 { bits[i] } else { '-' }).collect()
 }
 
 pub fn human_size(bytes: u64) -> String {
@@ -284,6 +292,12 @@ impl App {
         self.dirty = true;
     }
 
+    fn download_selected(&mut self) {
+        if let Some(e) = self.selected_entry() {
+            self.download(&e.name);
+        }
+    }
+
     fn download(&mut self, name: &str) {
         let Some(page) = self.files.as_ref() else { return };
         let (pane, remote) = (page.pane, join(&page.path, name));
@@ -425,6 +439,13 @@ impl App {
             Prompt::Delete { name, dir: is_dir } => self.request(pane, FileRequest::Remove { path: join(&dir, &name), dir: is_dir }),
             Prompt::GoTo(path) if !path.trim().is_empty() => self.browse(path.trim().to_owned()),
             Prompt::Upload(path) if !path.trim().is_empty() => self.upload(PathBuf::from(path.trim().trim_matches('"'))),
+            Prompt::Chmod { name, dir: is_dir, text } => {
+                if let Ok(mode) = u32::from_str_radix(text.trim(), 8) {
+                    if mode <= 0o7777 {
+                        self.request(pane, FileRequest::Chmod { path: join(&dir, &name), mode, recursive: is_dir });
+                    }
+                }
+            }
             _ => {}
         }
         self.dirty = true;
@@ -440,7 +461,7 @@ impl App {
         self.dirty = true;
         if let Some(prompt) = page.prompt.as_mut() {
             let text = match prompt {
-                Prompt::NewFolder(t) | Prompt::GoTo(t) | Prompt::Upload(t) | Prompt::Rename { text: t, .. } => Some(t),
+                Prompt::NewFolder(t) | Prompt::GoTo(t) | Prompt::Upload(t) | Prompt::Rename { text: t, .. } | Prompt::Chmod { text: t, .. } => Some(t),
                 Prompt::Delete { .. } => None,
             };
             match key {
@@ -494,6 +515,15 @@ impl App {
                     self.edit_locally(&e.name);
                 }
             }
+            Key::Char('D') if mods.ctrl => self.download_selected(),
+            Key::F(9) => {
+                if let Some(e) = self.selected_entry() {
+                    let text = e.mode.map(|m| format!("{:o}", m & 0o7777)).unwrap_or_default();
+                    if let Some(page) = self.files.as_mut() {
+                        page.prompt = Some(Prompt::Chmod { name: e.name, dir: e.dir, text });
+                    }
+                }
+            }
             Key::Char('E') if mods.ctrl => {
                 if let Some(e) = self.selected_entry().filter(|e| !e.dir) {
                     self.edit_locally(&e.name);
@@ -528,7 +558,7 @@ impl App {
             return;
         }
         match page.prompt.as_mut() {
-            Some(Prompt::NewFolder(t) | Prompt::GoTo(t) | Prompt::Upload(t) | Prompt::Rename { text: t, .. }) => t.push_str(&clean),
+            Some(Prompt::NewFolder(t) | Prompt::GoTo(t) | Prompt::Upload(t) | Prompt::Rename { text: t, .. } | Prompt::Chmod { text: t, .. }) => t.push_str(&clean),
             Some(Prompt::Delete { .. }) => {}
             None => {
                 page.query.push_str(&clean);

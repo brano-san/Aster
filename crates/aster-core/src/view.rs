@@ -609,7 +609,9 @@ impl App {
             Some(Prompt::Rename { text, .. }) => (text.clone(), "New name".to_owned(), true),
             Some(Prompt::GoTo(t)) => (t.clone(), "Go to folder".to_owned(), true),
             Some(Prompt::Upload(t)) => (t.clone(), "Local file to upload".to_owned(), true),
-            Some(Prompt::Delete { name, dir }) => (String::new(), format!("Delete {} {name}? Enter to delete, Esc to keep", if *dir { "folder" } else { "file" }), false),
+            Some(Prompt::Delete { name, dir: true }) => (String::new(), format!("Delete the folder {name} and everything in it? Enter to delete, Esc to keep"), false),
+            Some(Prompt::Delete { name, .. }) => (String::new(), format!("Delete {name}? Enter to delete, Esc to keep"), false),
+            Some(Prompt::Chmod { text, dir, .. }) => (text.clone(), if *dir { "Permissions in octal, applied to everything inside".to_owned() } else { "Permissions in octal, for example 644".to_owned() }, true),
             None => (page.path.clone(), "Loading".to_owned(), false),
         };
         field(g, geo.path, &path_text, &path_hint, editing);
@@ -646,7 +648,7 @@ impl App {
                 g.dl.outline(paper, theme.text_dim, (2.0 * s).round(), line);
             }
             let right = r.right() - (12.0 * s).round();
-            let name_w = (right - date_w - size_w - name_x - 12.0 * s).max(0.0);
+            let name_w = (right - date_w - size_w - name_x - 110.0 * s).max(0.0);
             let name = if entry.link { format!("{} \u{2192}", entry.name) } else { entry.name.clone() };
             g.text(name_x, y, &name, ui, theme.text, name_w);
             if !entry.dir {
@@ -654,6 +656,12 @@ impl App {
                 let w = g.measure(&size, small);
                 let sy = baseline(g, *r, small);
                 g.text(right - date_w - w - 12.0 * s, sy, &size, small, theme.text_dim, size_w);
+            }
+            if let Some(mode) = entry.mode {
+                let p = crate::files::permissions(mode);
+                let py = baseline(g, *r, small);
+                let pw = g.measure(&p, small);
+                g.text(right - date_w - size_w - pw - 24.0 * s, py, &p, small, theme.text_dim, pw + 1.0);
             }
             if let Some(m) = entry.modified {
                 let d = date(m);
@@ -701,7 +709,7 @@ impl App {
             let lw = g.text(r.x + pad, y, &label, ui, theme.text, r.w * 0.45);
             g.text(r.x + pad + lw + (14.0 * s).round(), y, &state, small, color, (r.w - lw - 3.0 * pad).max(0.0));
         }
-        let hint = "Enter open or download  ·  F4 edit  ·  Backspace up  ·  F2 rename  ·  F7 new folder  ·  Del delete  ·  Ctrl+U upload  ·  drop files to upload";
+        let hint = "Enter open  ·  Ctrl+D download  ·  F4 edit  ·  F2 rename  ·  F7 new folder  ·  F9 permissions  ·  Del delete  ·  Ctrl+U or drop to upload";
         let hy = baseline(g, geo.hint, small);
         g.text(geo.hint.x, hy, hint, small, theme.text_dim, geo.hint.w);
     }

@@ -22,7 +22,7 @@ fn requests(a: &mut App) -> Vec<FileRequest> {
 }
 
 fn entry(name: &str, dir: bool, size: u64) -> FileEntry {
-    FileEntry { name: name.into(), dir, link: false, size, modified: Some(1_763_164_800) }
+    FileEntry { name: name.into(), dir, link: false, size, modified: Some(1_763_164_800), mode: Some(if dir { 0o40755 } else { 0o100644 }) }
 }
 
 fn key(a: &mut App, k: Key) {
@@ -197,4 +197,25 @@ fn f4_edits_a_file_locally_opens_it_and_counts_saves_until_stopped() {
     assert_eq!(requests(&mut a), [FileRequest::Cancel(id)]);
     a.files_reply(pane, FileReply::Failed { id: Some(id), error: "cancelled".into() });
     assert!(matches!(&a.transfers_of(pane)[0].state, TransferState::Done(m) if m.contains("2 saves")));
+}
+
+#[test]
+fn ctrl_d_downloads_folders_and_f9_sets_permissions_from_octal() {
+    let (mut a, pane) = ssh_app();
+    a.run(Action::OpenFiles);
+    listed(&mut a, pane, "/srv");
+    a.take_effects();
+    key(&mut a, Key::Down);
+    a.on_event(Event::Key { key: Key::Char('D'), mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true });
+    assert!(matches!(&requests(&mut a)[0], FileRequest::Download { remote, .. } if remote == "/srv/docs"));
+    key(&mut a, Key::F(9));
+    assert!(matches!(&a.files_page().unwrap().prompt, Some(Prompt::Chmod { text, .. }) if text == "755"));
+    key(&mut a, Key::Backspace);
+    key(&mut a, Key::Backspace);
+    for c in "00".chars() {
+        a.on_event(Event::Char(c));
+    }
+    key(&mut a, Key::Enter);
+    assert_eq!(requests(&mut a), [FileRequest::Chmod { path: "/srv/docs".into(), mode: 0o700, recursive: true }]);
+    assert_eq!(permissions(0o100754), "rwxr-xr--");
 }
