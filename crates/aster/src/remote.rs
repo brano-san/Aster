@@ -101,6 +101,7 @@ pub fn file_request(request: FileRequest, downloads: PathBuf) -> sftp::Request {
 
 pub struct Options {
     pub share: bool,
+    pub forward_agent: bool,
     pub remember: bool,
     pub secrets: Arc<dyn Secrets>,
 }
@@ -141,6 +142,7 @@ pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, 
         share: options.share,
         secrets: Some(options.secrets),
         remember: options.remember,
+        forward_agent: options.forward_agent,
     };
     let conn = client::start(req);
     let exit = conn.exit;

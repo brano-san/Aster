@@ -221,3 +221,59 @@ fn declining_keeps_nothing_and_a_saved_passphrase_unlocks_the_key() {
     second.wait_for("welcome");
     assert!(!second.seen.contains("passphrase"));
 }
+
+fn fake_agent() -> String {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            #[cfg(windows)]
+            let (path, mut stream) = {
+                let path = format!(r"\\.\pipe\{}", temp_ssh_dir().file_name().unwrap().to_string_lossy());
+                let server = tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(&path).unwrap();
+                tx.send(path.clone()).unwrap();
+                server.connect().await.unwrap();
+                (path, server)
+            };
+            #[cfg(not(windows))]
+            let (path, mut stream) = {
+                let path = temp_ssh_dir().join("agent.sock").display().to_string();
+                let listener = tokio::net::UnixListener::bind(&path).unwrap();
+                tx.send(path.clone()).unwrap();
+                (path.clone(), listener.accept().await.unwrap().0)
+            };
+            let _ = path;
+            let mut buf = [0u8; 4];
+            stream.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+            stream.write_all(b"pong").await.unwrap();
+            stream.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        });
+    });
+    rx.recv().unwrap()
+}
+
+#[test]
+fn a_forwarded_agent_channel_reaches_the_local_agent_only_when_asked() {
+    let (port, _) = serve();
+    let dir = temp_ssh_dir();
+    let agent = fake_agent();
+    std::fs::write(dir.join("config"), format!("Host fwd\n  HostName 127.0.0.1\n  Port {port}\n  User ann\n  ForwardAgent yes\n  IdentityAgent {agent}\n")).unwrap();
+    let mut pane = Pane { conn: start(request("fwd".into(), dir.clone())), seen: String::new() };
+    pane.wait_for("(yes/no)? ");
+    pane.send("yes\r");
+    pane.wait_for("password: ");
+    pane.send("secret\r");
+    pane.wait_for("agent said pong");
+
+    std::fs::write(dir.join("config"), format!("Host plain\n  HostName 127.0.0.1\n  Port {port}\n  User ann\n")).unwrap();
+    let mut plain = Pane { conn: start(request("plain".into(), dir)), seen: String::new() };
+    plain.wait_for("password: ");
+    plain.send("secret\r");
+    plain.wait_for("welcome");
+    plain.send("hi\r");
+    plain.wait_for("got:hi");
+    assert!(!plain.seen.contains("agent said"), "no agent channel without ForwardAgent");
+}

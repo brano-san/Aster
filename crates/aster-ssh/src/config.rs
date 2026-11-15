@@ -14,6 +14,8 @@ pub struct HostEntry {
     pub local_forwards: Vec<String>,
     pub remote_forwards: Vec<String>,
     pub dynamic_forwards: Vec<String>,
+    pub forward_agent: Option<bool>,
+    pub identity_agent: Option<String>,
 }
 
 enum Scope {
@@ -262,6 +264,18 @@ fn apply(entry: &mut HostEntry, key: &str, value: &str, home: &Path) {
                 };
                 entry.identity_files.push(expanded);
             }
+        }
+        "forwardagent" => {
+            if entry.forward_agent.is_none() {
+                entry.forward_agent = first.map(|t| t.eq_ignore_ascii_case("yes"));
+            }
+        }
+        "identityagent" => {
+            let expanded = first.map(|token| match token.strip_prefix("~/") {
+                Some(stripped) => home.join(stripped).to_string_lossy().into_owned(),
+                None => token,
+            });
+            set_once(&mut entry.identity_agent, expanded);
         }
         "localforward" => push_forward(&mut entry.local_forwards, &tokens),
         "remoteforward" => push_forward(&mut entry.remote_forwards, &tokens),

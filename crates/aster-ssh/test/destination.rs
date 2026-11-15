@@ -48,3 +48,13 @@ fn proxy_commands_expand_their_tokens() {
     let d = resolve_with("box", "Host box\n  HostName 1.2.3.4\n  User ann\n  ProxyCommand nc -X 5 %h %p %r %n 100%% %q\n");
     assert_eq!(d.proxy_command_line().as_deref(), Some("nc -X 5 1.2.3.4 22 ann box 100% %q"));
 }
+
+#[test]
+fn agent_forwarding_and_the_agent_socket_come_from_the_config() {
+    let d = resolve_with("box", "Host box\n  ForwardAgent yes\n  IdentityAgent ~/.ssh/agent.sock\n");
+    assert_eq!(d.forward_agent, Some(true));
+    assert_eq!(d.agent.as_deref(), Some(Path::new("/home/u").join(".ssh/agent.sock").to_string_lossy().as_ref()));
+    let d = resolve_with("other", "Host *\n  ForwardAgent no\n  IdentityAgent SSH_AUTH_SOCK\n");
+    assert_eq!((d.forward_agent, d.agent), (Some(false), None));
+    assert_eq!(resolve_with("plain", "").forward_agent, None);
+}

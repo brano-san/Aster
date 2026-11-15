@@ -33,6 +33,7 @@ pub struct Request {
     pub share: bool,
     pub secrets: Option<Arc<dyn crate::secrets::Secrets>>,
     pub remember: bool,
+    pub forward_agent: bool,
 }
 
 pub struct Connection {
@@ -177,13 +178,14 @@ fn context_destination(spec: &str, req: &Request) -> Destination {
 async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Sender<crate::sftp::Reply>) -> Result<u32, String> {
     let dest = context_destination(&req.destination, req);
     let (mut conn, shared) = connection(dest.clone(), req, console).await?;
+    let dest = &dest;
     let channel = match conn.open_session().await {
         Ok(c) => c,
         Err(_) if shared => {
             if let Ok(mut p) = pool().lock() {
-                p.remove(&pool_key(&dest));
+                p.remove(&pool_key(dest));
             }
-            conn = connection(dest, req, console).await?.0;
+            conn = connection(dest.clone(), req, console).await?.0;
             conn.open_session().await?
         }
         Err(e) => return Err(e),
@@ -191,6 +193,9 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
     let (mut rx, tx) = channel.split();
     let (cols, rows) = console.lock().await.size;
     tx.request_pty(false, &req.term, cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
+    if forwards_agent(dest, req) {
+        let _ = tx.agent_forward(false).await;
+    }
     tx.request_shell(false).await.map_err(|e| e.to_string())?;
     let mut code = None;
     let mut files: Option<crate::sftp::Files> = None;
@@ -322,6 +327,7 @@ fn proxy_stream(command: &str) -> Result<impl AsyncRead + AsyncWrite + Unpin + S
 }
 
 pub struct Client {
+    agent: Option<Option<String>>,
     console: Weak<Mutex<Console>>,
     host: String,
     port: u16,
@@ -331,7 +337,7 @@ pub struct Client {
 
 impl Client {
     fn new(dest: &Destination, req: &Request, console: Shared) -> Self {
-        Self { console: Arc::downgrade(&console), host: dest.host.clone(), port: dest.port, known_hosts: req.ssh_dir.join("known_hosts"), accepted: None }
+        Self { agent: forwards_agent(dest, req).then(|| dest.agent.clone()), console: Arc::downgrade(&console), host: dest.host.clone(), port: dest.port, known_hosts: req.ssh_dir.join("known_hosts"), accepted: None }
     }
 
     fn label(&self) -> String {
@@ -345,6 +351,17 @@ impl Client {
 
 impl client::Handler for Client {
     type Error = russh::Error;
+
+    async fn server_channel_open_agent_forward(&mut self, channel: russh::Channel<client::Msg>, reply: client::ChannelOpenHandle, _session: &mut client::Session) -> Result<(), Self::Error> {
+        let Some(path) = self.agent.clone() else { return Ok(()) };
+        let Ok(mut agent) = local_agent(path.as_deref()).await else { return Ok(()) };
+        reply.accept().await;
+        tokio::spawn(async move {
+            let mut stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut stream, &mut agent).await;
+        });
+        Ok(())
+    }
 
     async fn auth_banner(&mut self, banner: &str, _session: &mut client::Session) -> Result<(), Self::Error> {
         if let Some(console) = self.console.upgrade() {
@@ -436,7 +453,7 @@ async fn authenticate(handle: &mut Handle<Client>, dest: &Destination, req: &Req
     let mut methods: Option<MethodSet> = None;
 
     if req.use_agent && allows(&methods, MethodKind::PublicKey) {
-        if let Some(r) = agent_auth(handle, &user, rsa).await {
+        if let Some(r) = agent_auth(handle, &user, rsa, dest.agent.as_deref()).await {
             if note(&r, &mut methods) {
                 return Ok(());
             }
@@ -575,13 +592,45 @@ async fn offer_to_save(req: &Request, console: &Shared, key: &str, value: &str, 
     }
 }
 
-async fn agent_auth(handle: &mut Handle<Client>, user: &str, rsa: Option<HashAlg>) -> Option<AuthResult> {
+fn forwards_agent(dest: &Destination, req: &Request) -> bool {
+    dest.forward_agent.unwrap_or(req.forward_agent) && dest.agent.as_deref() != Some("none")
+}
+
+#[cfg(windows)]
+const AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+trait AgentStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> AgentStream for T {}
+
+async fn local_agent(path: Option<&str>) -> std::io::Result<Box<dyn AgentStream>> {
     #[cfg(windows)]
     {
-        if let Ok(agent) = AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
+        let pipe = tokio::net::windows::named_pipe::ClientOptions::new().open(path.unwrap_or(AGENT_PIPE))?;
+        Ok(Box::new(pipe))
+    }
+    #[cfg(not(windows))]
+    {
+        let socket = match path {
+            Some(p) => p.to_owned(),
+            None => std::env::var("SSH_AUTH_SOCK").map_err(|_| std::io::Error::from(std::io::ErrorKind::NotFound))?,
+        };
+        Ok(Box::new(tokio::net::UnixStream::connect(socket).await?))
+    }
+}
+
+async fn agent_auth(handle: &mut Handle<Client>, user: &str, rsa: Option<HashAlg>, path: Option<&str>) -> Option<AuthResult> {
+    if path == Some("none") {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(agent) = AgentClient::connect_named_pipe(path.unwrap_or(AGENT_PIPE)).await {
             if let Some(r) = try_agent(handle, user, rsa, agent).await {
                 return Some(r);
             }
+        }
+        if path.is_some() {
+            return None;
         }
         if let Ok(agent) = AgentClient::connect_pageant().await {
             return try_agent(handle, user, rsa, agent).await;
@@ -590,7 +639,10 @@ async fn agent_auth(handle: &mut Handle<Client>, user: &str, rsa: Option<HashAlg
     }
     #[cfg(not(windows))]
     {
-        let agent = AgentClient::connect_env().await.ok()?;
+        let agent = match path {
+            Some(p) => AgentClient::connect_uds(p).await.ok()?,
+            None => AgentClient::connect_env().await.ok()?,
+        };
         try_agent(handle, user, rsa, agent).await
     }
 }

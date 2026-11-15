@@ -11,6 +11,8 @@ pub struct Destination {
     pub explicit_identities: bool,
     pub proxy_jump: Vec<String>,
     pub proxy_command: Option<String>,
+    pub forward_agent: Option<bool>,
+    pub agent: Option<String>,
 }
 
 pub fn split(spec: &str) -> (Option<String>, String, Option<u16>) {
@@ -55,6 +57,7 @@ pub fn resolve(spec: &str, cx: &Context) -> Destination {
         .map(|j| j.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect())
         .unwrap_or_default();
     let proxy_command = entry.proxy_command.filter(|c| !c.eq_ignore_ascii_case("none"));
+    let agent = entry.identity_agent.filter(|a| a != "SSH_AUTH_SOCK");
     Destination {
         name,
         host,
@@ -64,6 +67,8 @@ pub fn resolve(spec: &str, cx: &Context) -> Destination {
         explicit_identities,
         proxy_jump,
         proxy_command,
+        forward_agent: entry.forward_agent,
+        agent,
     }
 }
 
