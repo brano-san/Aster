@@ -53,6 +53,7 @@ pub mod kind {
     pub const GLYPH: u32 = 1;
     pub const IMAGE: u32 = 2;
     pub const SHADOW: u32 = 3;
+    pub const UNDERCURL: u32 = 4;
 }
 
 #[repr(C)]
@@ -131,6 +132,10 @@ impl DrawList {
 
     pub fn shadow(&mut self, r: Rect, color: Color, radius: f32, blur: f32) {
         self.push(r.inset(-blur, -blur).snap(), [0.0; 4], color, self.corner(radius), blur, kind::SHADOW);
+    }
+
+    pub fn undercurl(&mut self, r: Rect, color: Color, thickness: f32) {
+        self.push(r, [0.0; 4], color, thickness, 0.0, kind::UNDERCURL);
     }
 
     pub fn circle(&mut self, r: Rect, color: Color) {
