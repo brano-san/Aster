@@ -754,7 +754,6 @@ impl App {
                     g.text(r.x, y, name, section, theme.accent, r.w);
                 }
                 RowKind::Item(n) => {
-                    let setting = &SETTINGS[page.shown[n]];
                     let selected = n == page.selected;
                     let card = row.rect.inset(0.0, (2.0 * s).round());
                     if selected {
@@ -762,6 +761,27 @@ impl App {
                     } else if card.contains(mx, my) {
                         g.dl.round_rect(card, theme.button_hover, radius);
                     }
+                    if let Some(action) = crate::settings::shortcut(page.shown[n]) {
+                        let tx = row.rect.x + (14.0 * s).round();
+                        let tw = (row.control.x - tx - 16.0 * s).max(0.0);
+                        let capturing = page.capture == Some(action);
+                        g.text(tx, row.rect.y + (25.0 * s).round(), &action.label(), ui, theme.text, tw);
+                        let hint = match (&page.notice, selected) {
+                            (Some(n), true) => n.clone(),
+                            (_, true) => "Enter to change  \u{b7}  Del to clear  \u{b7}  Shift+Del for the default".to_owned(),
+                            _ => action.id(),
+                        };
+                        g.text(tx, row.rect.y + (43.0 * s).round(), &hint, small, if selected && page.notice.is_some() { theme.accent } else { theme.text_dim }, tw);
+                        let c = row.control;
+                        g.dl.round_rect(c, theme.overlay, radius);
+                        g.dl.outline(c, if capturing { theme.accent } else { theme.overlay_border }, radius, line);
+                        let inner = c.inset((10.0 * s).round(), 0.0);
+                        let y = baseline(g, inner, ui);
+                        let (text, ink) = if capturing { ("Press the new shortcut".to_owned(), theme.text_dim) } else { (self.shortcut_text(action), theme.text) };
+                        g.text(inner.x, y, &text, ui, ink, inner.w);
+                        continue;
+                    }
+                    let setting = &SETTINGS[page.shown[n]];
                     let tx = row.rect.x + (14.0 * s).round();
                     let tw = (row.control.x - tx - 16.0 * s).max(0.0);
                     g.text(tx, row.rect.y + (25.0 * s).round(), setting.label, ui, theme.text, tw);

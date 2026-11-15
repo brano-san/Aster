@@ -70,7 +70,8 @@ fn numbers_print_without_float_noise() {
 #[test]
 fn the_query_filters_by_every_word_across_label_hint_and_section() {
     let mut page = SettingsPage::new();
-    assert_eq!(page.shown.len(), SETTINGS.len());
+    assert_eq!(page.shown.iter().filter(|&&i| i < SETTINGS.len()).count(), SETTINGS.len());
+    assert!(page.shown.iter().any(|&i| shortcut(i).is_some()), "shortcuts are listed too");
     page.query = "dock top".into();
     page.refilter();
     let keys: Vec<_> = page.shown.iter().map(|&i| SETTINGS[i].key).collect();
@@ -171,12 +172,13 @@ fn moving_the_selection_scrolls_it_into_view() {
     a.set_viewport(1000, 360, 1.0);
     a.chrome = crate::view::chrome(1000.0, 360.0, 1.0, 1);
     a.run(Action::Settings);
-    for _ in 0..SETTINGS.len() {
+    let rows = a.settings.as_ref().unwrap().shown.len();
+    for _ in 0..rows {
         key(&mut a, Key::Down);
     }
     let geo = a.settings_geometry().unwrap();
     let page = a.settings.as_ref().unwrap();
-    assert_eq!(page.selected, SETTINGS.len() - 1);
+    assert_eq!(page.selected, rows - 1);
     let row = geo.rows.iter().find(|r| r.kind == RowKind::Item(page.selected)).unwrap();
     assert!(row.rect.bottom() <= geo.list.bottom() + 0.5 && row.rect.y >= geo.list.y);
     assert!(page.scroll > 0.0);
@@ -202,4 +204,56 @@ fn each_section_is_listed_in_one_piece() {
             seen.push(s.section);
         }
     }
+}
+
+fn ctrl_shift(c: char) -> Mods {
+    let _ = c;
+    Mods { ctrl: true, shift: true, ..Mods::NONE }
+}
+
+fn select_shortcut(a: &mut App, query: &str) {
+    a.run(Action::Settings);
+    typed(a, query);
+    let page = a.settings.as_ref().unwrap();
+    let at = page.shown.iter().position(|&i| shortcut(i).is_some()).expect("a shortcut row");
+    a.settings.as_mut().unwrap().selected = at;
+}
+
+#[test]
+fn a_captured_shortcut_replaces_the_binding_and_frees_it_elsewhere() {
+    let mut a = app();
+    select_shortcut(&mut a, "new tab");
+    key(&mut a, Key::Enter);
+    assert!(a.settings.as_ref().unwrap().capture.is_some());
+    a.on_event(Event::Key { key: Key::Char('P'), mods: ctrl_shift('P'), pressed: true });
+    let config = saved(&mut a).expect("saved");
+    assert_eq!(config.hotkeys.get("new-tab"), Some(&vec!["Ctrl-Shift-P".to_owned()]));
+    assert_eq!(config.hotkeys.get("command-selector"), Some(&Vec::<String>::new()), "the old owner loses it");
+    assert!(a.settings.as_ref().unwrap().notice.as_deref().is_some_and(|n| n.contains("Show command selector")));
+    assert_eq!(a.shortcut_text(Action::NewTab), "Ctrl-Shift-P");
+}
+
+#[test]
+fn escape_cancels_capture_and_delete_clears_or_restores_the_default() {
+    let mut a = app();
+    select_shortcut(&mut a, "new tab");
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::Escape);
+    assert!(a.settings.as_ref().unwrap().capture.is_none());
+    assert!(a.settings_open(), "escape only ends the capture");
+    key(&mut a, Key::Delete);
+    assert_eq!(a.shortcut_text(Action::NewTab), "None");
+    a.on_event(Event::Key { key: Key::Delete, mods: Mods { shift: true, ..Mods::NONE }, pressed: true });
+    assert_eq!(a.shortcut_text(Action::NewTab), "Ctrl-Shift-T");
+    assert!(!a.config().hotkeys.contains_key("new-tab"));
+}
+
+#[test]
+fn the_settings_shortcut_itself_can_be_captured() {
+    let mut a = app();
+    select_shortcut(&mut a, "open settings");
+    key(&mut a, Key::Enter);
+    a.on_event(Event::Key { key: Key::Char(','), mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true });
+    assert!(a.settings_open());
+    assert_eq!(a.shortcut_text(Action::Settings), "Ctrl-,");
 }
