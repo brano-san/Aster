@@ -35,17 +35,19 @@ pub struct Connection {
     pub output: Receiver<Vec<u8>>,
     pub input: UnboundedSender<Input>,
     pub exit: Receiver<u32>,
+    pub files: Receiver<crate::sftp::Reply>,
 }
 
 pub fn start(req: Request) -> Connection {
     let (out_tx, output) = crossbeam_channel::unbounded();
     let (input, in_rx) = tokio::sync::mpsc::unbounded_channel();
     let (exit_tx, exit) = crossbeam_channel::bounded(1);
+    let (files_tx, files) = crossbeam_channel::unbounded();
     let spawned = std::thread::Builder::new().name("aster-ssh".into()).spawn(move || {
         let console = Console::new(out_tx, in_rx, (req.cols, req.rows));
         let code = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => {
-                let code = rt.block_on(run(req, console));
+                let code = rt.block_on(run(req, console, files_tx));
                 drop(rt);
                 code
             }
@@ -59,14 +61,14 @@ pub fn start(req: Request) -> Connection {
     if let Err(e) = spawned {
         tracing::error!("ssh thread: {e}");
     }
-    Connection { output, input, exit }
+    Connection { output, input, exit, files }
 }
 
 type Shared = Arc<Mutex<Console>>;
 
-async fn run(req: Request, console: Console) -> u32 {
+async fn run(req: Request, console: Console, files: crossbeam_channel::Sender<crate::sftp::Reply>) -> u32 {
     let console = Arc::new(Mutex::new(console));
-    match session(&req, &console).await {
+    match session(&req, &console, files).await {
         Ok(code) => code,
         Err(e) => {
             let c = console.lock().await;
@@ -85,7 +87,7 @@ fn context_destination(spec: &str, req: &Request) -> Destination {
     destination::resolve(spec, &cx)
 }
 
-async fn session(req: &Request, console: &Shared) -> Result<u32, String> {
+async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Sender<crate::sftp::Reply>) -> Result<u32, String> {
     let dest = context_destination(&req.destination, req);
     let (handle, _jumps) = open(dest, req, console, 0).await?;
     let channel = handle.channel_open_session().await.map_err(|e| format!("cannot open a session: {e}"))?;
@@ -94,6 +96,7 @@ async fn session(req: &Request, console: &Shared) -> Result<u32, String> {
     tx.request_pty(false, &req.term, cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
     tx.request_shell(false).await.map_err(|e| e.to_string())?;
     let mut code = None;
+    let mut files: Option<crate::sftp::Files> = None;
     let mut con = console.lock().await;
     loop {
         tokio::select! {
@@ -113,6 +116,20 @@ async fn session(req: &Request, console: &Shared) -> Result<u32, String> {
                 Some(Input::Resize(c, r)) => {
                     let _ = tx.window_change(c as u32, r as u32, 0, 0).await;
                 }
+                Some(Input::Sftp(request)) => {
+                    if files.is_none() {
+                        match open_files(&handle, replies.clone()).await {
+                            Ok(f) => files = Some(f),
+                            Err(error) => {
+                                let _ = replies.send(crate::sftp::Reply::Failed { id: None, error });
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(f) = &files {
+                        f.handle(request);
+                    }
+                }
                 Some(Input::Close) | None => {
                     let _ = tx.close().await;
                     let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
@@ -123,6 +140,13 @@ async fn session(req: &Request, console: &Shared) -> Result<u32, String> {
     }
     let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
     Ok(code.unwrap_or(0))
+}
+
+async fn open_files(handle: &Handle<Client>, replies: crossbeam_channel::Sender<crate::sftp::Reply>) -> Result<crate::sftp::Files, String> {
+    let channel = handle.channel_open_session().await.map_err(|e| format!("cannot open a file channel: {e}"))?;
+    channel.request_subsystem(true, "sftp").await.map_err(|e| format!("the server has no SFTP: {e}"))?;
+    let session = russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP failed to start: {e}"))?;
+    Ok(crate::sftp::Files::new(session, replies))
 }
 
 type Opened = (Handle<Client>, Vec<Handle<Client>>);
