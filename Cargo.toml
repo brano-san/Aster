@@ -17,6 +17,8 @@ aster-platform = { path = "crates/aster-platform" }
 aster-platform-windows = { path = "crates/aster-platform-windows" }
 aster-platform-linux = { path = "crates/aster-platform-linux" }
 aster-ssh = { path = "crates/aster-ssh" }
+aster-proto = { path = "crates/aster-proto" }
+regex = "1"
 
 alacritty_terminal = "0.26"
 crossbeam-channel = "0.5"
