@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 const ATLAS: u32 = 2048;
 
+type Elevated = (WindowId, PaneId, Result<aster_platform::Spawned, aster_platform::PlatformError>, aster_core::app::Shared);
+
 type Win<P> = <<P as Platform>::Windows as WindowSystem>::Window;
 type Device<P> = <<P as Platform>::Renderer as Renderer>::Device;
 
@@ -39,6 +41,8 @@ pub struct Handler<P: Platform> {
     file_rx: Receiver<(WindowId, PaneId, aster_core::files::FileReply)>,
     note_tx: Sender<crate::session::TransferNote>,
     note_rx: Receiver<crate::session::TransferNote>,
+    elevated_tx: Sender<Elevated>,
+    elevated_rx: Receiver<Elevated>,
     exit_tx: Sender<Exit>,
     config_stamp: Option<SystemTime>,
     ssh: Option<String>,
@@ -81,9 +85,10 @@ impl<P: Platform> Handler<P> {
         let (exit_tx, exits) = unbounded();
         let (file_tx, file_rx) = unbounded();
         let (note_tx, note_rx) = unbounded();
+        let (elevated_tx, elevated_rx) = unbounded();
         let config_stamp = stamp(&crate::config_path::<P>());
         let pending = if config.terminal.recover_tabs { load_session::<P>() } else { Vec::new() };
-        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None }
+        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None }
     }
 
     fn save_config(&mut self, text: String) {
@@ -190,6 +195,18 @@ impl<P: Platform> Handler<P> {
                     cols: launch.cols,
                     rows: launch.rows,
                 };
+                if launch.elevated {
+                    let (tx, waker) = (self.elevated_tx.clone(), self.waker.clone());
+                    let started = std::thread::Builder::new().name("aster-elevate".into()).spawn(move || {
+                        let result = P::spawn_elevated(&req);
+                        let _ = tx.send((id, pane, result, terminal));
+                        waker.wake();
+                    });
+                    if let Err(e) = started {
+                        tracing::error!("elevated spawn thread: {e}");
+                    }
+                    return;
+                }
                 match P::spawn(&req) {
                     Ok(spawned) => {
                         let pid = spawned.pty.pid();
@@ -358,7 +375,25 @@ impl<P: Platform> Handler<P> {
         crate::session::Start { window, pane, downloads: P::downloads_dir().unwrap_or_else(std::env::temp_dir), exits: self.exit_tx.clone(), notes: self.note_tx.clone() }
     }
 
+    fn drain_elevated(&mut self) {
+        while let Ok((id, pane, result, terminal)) = self.elevated_rx.try_recv() {
+            match result {
+                Ok(spawned) => {
+                    let waker = self.waker.clone();
+                    let session = Session::start(self.session_start(id, pane), spawned, terminal, move || waker.wake());
+                    self.sessions.insert((id, pane), session);
+                }
+                Err(e) => {
+                    if let Some(s) = self.windows.get_mut(&id) {
+                        s.app.spawn_failed(pane, &e.message);
+                    }
+                }
+            }
+        }
+    }
+
     fn drain_exits(&mut self) {
+        self.drain_elevated();
         while let Ok((wid, pane, note)) = self.note_rx.try_recv() {
             if let Some(s) = self.windows.get_mut(&wid) {
                 let state = match note {
@@ -402,6 +437,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         app.set_viewport(w, h, window.scale());
         app.set_ssh(self.ssh.clone());
         app.set_cwd_probe(Arc::new(P::process_cwd));
+        app.set_can_elevate(P::can_elevate());
         let restored = (!self.pending.is_empty()).then(|| self.pending.remove(0)).is_some_and(|state| app.restore(&state));
         if !restored {
             app.open_default_tab();

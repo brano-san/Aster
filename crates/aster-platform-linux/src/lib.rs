@@ -83,6 +83,18 @@ impl Platform for Linux {
         let _ = std::process::Command::new("secret-tool").args(["clear", "service", "aster", "account", key]).stderr(std::process::Stdio::null()).status();
     }
 
+    fn can_elevate() -> bool {
+        false
+    }
+
+    fn spawn_elevated(_req: &SpawnRequest) -> Result<Spawned, PlatformError> {
+        Err(PlatformError::new(-1, "Administrator tabs are only available on Windows"))
+    }
+
+    fn connect_host(_base: &str) -> Result<(aster_platform::host::Reader, aster_platform::host::Writer), PlatformError> {
+        Err(PlatformError::new(-1, "The terminal host is only available on Windows"))
+    }
+
     fn beep() -> bool {
         false
     }

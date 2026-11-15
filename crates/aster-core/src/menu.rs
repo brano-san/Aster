@@ -114,6 +114,7 @@ impl App {
         let entries = vec![
             item("New tab", Action::NewTab, true),
             item("Duplicate", Action::DuplicateTab, true),
+            item("Duplicate as administrator", Action::DuplicateAsAdmin, self.can_elevate() && self.focused_pane().and_then(|p| self.panes.get(&p)).is_some_and(|p| p.profile.ssh.is_none() && p.profile.serial.is_none())),
             item("Rename", Action::RenameTab, true),
             Entry::Separator,
             item("Move left", Action::MoveTabLeft, index > 0),

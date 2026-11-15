@@ -1,3 +1,5 @@
+pub mod host;
+
 use aster_core::input::{CursorIcon, Event, HitArea};
 use aster_core::profile::Profile;
 use aster_gfx::atlas::Slot;
@@ -191,6 +193,9 @@ pub trait Platform: 'static {
     fn ssh_command() -> Option<String>;
     fn process_cwd(pid: u32) -> Option<String>;
     fn beep() -> bool;
+    fn can_elevate() -> bool;
+    fn spawn_elevated(req: &SpawnRequest) -> Result<Spawned, PlatformError>;
+    fn connect_host(base: &str) -> Result<(host::Reader, host::Writer), PlatformError>;
     fn downloads_dir() -> Option<PathBuf>;
     fn secret_get(key: &str) -> Option<String>;
     fn secret_set(key: &str, value: &str) -> bool;

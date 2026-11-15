@@ -2,6 +2,7 @@
 
 mod conpty;
 mod d3d;
+mod elevate;
 mod process;
 mod secrets;
 mod dwrite;
@@ -94,6 +95,18 @@ impl Platform for Windows {
 
     fn secret_delete(key: &str) {
         secrets::delete(key)
+    }
+
+    fn can_elevate() -> bool {
+        true
+    }
+
+    fn spawn_elevated(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
+        elevate::spawn_elevated(req)
+    }
+
+    fn connect_host(base: &str) -> Result<(aster_platform::host::Reader, aster_platform::host::Writer), PlatformError> {
+        elevate::connect(base)
     }
 
     fn beep() -> bool {

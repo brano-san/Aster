@@ -93,3 +93,34 @@ fn custom_titles_survive_a_session_round_trip() {
     assert!(b.restore(&state));
     assert_eq!(b.tab_title(0), "Shell!");
 }
+
+
+#[test]
+fn administrator_tabs_spawn_elevated_and_say_so_in_the_title() {
+    let mut a = app(1);
+    a.set_can_elevate(true);
+    a.run(Action::DuplicateAsAdmin);
+    assert_eq!(a.tab_count(), 2);
+    assert_eq!(a.tab_title(1), "Administrator: Shell");
+    let pane = a.focused_pane().unwrap();
+    let launch = a.panes[&pane].pending.clone().expect("a pending launch");
+    assert!(launch.elevated);
+    let state = a.snapshot();
+    let mut b = App::new(Config::default(), vec![Profile::new("local:a", "Shell", "a.exe", &[])], true, None, Arc::new(|| {}));
+    assert!(b.restore(&state));
+    assert_eq!(b.tab_title(1), "Shell", "a restored tab does not ask for elevation again");
+}
+
+#[test]
+fn administrator_tabs_need_support_and_a_local_shell() {
+    let mut a = app(1);
+    a.run(Action::NewAdminTab);
+    assert_eq!(a.tab_count(), 1, "nothing happens where elevation is unavailable");
+    let mut ssh = Profile::new("ssh:box", "SSH: box", "ssh", &["box"]);
+    ssh.ssh = Some("box".into());
+    let mut b = App::new(Config::default(), vec![ssh], true, None, Arc::new(|| {}));
+    b.set_can_elevate(true);
+    b.open_default_tab();
+    b.run(Action::DuplicateAsAdmin);
+    assert_eq!(b.tab_count(), 1, "remote tabs are not elevated");
+}

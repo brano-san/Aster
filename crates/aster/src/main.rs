@@ -62,8 +62,32 @@ fn run<P: Platform>() -> Result<(), aster_platform::PlatformError> {
     windows.run(WindowOptions { title: "Aster".into(), placement, dark }, handler)
 }
 
+fn host<P: Platform>(base: &str, token: &str) -> i32 {
+    match P::connect_host(base) {
+        Ok((reader, writer)) => match aster_platform::host::serve(reader, writer, token, &|req| P::spawn(req)) {
+            Ok(()) => 0,
+            Err(e) => {
+                tracing::error!("terminal host: {e}");
+                1
+            }
+        },
+        Err(e) => {
+            tracing::error!("terminal host: {e}");
+            1
+        }
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(tracing::Level::INFO).init();
+    let args: Vec<String> = std::env::args().collect();
+    if let (Some("--host"), Some(base), Some(token)) = (args.get(1).map(String::as_str), args.get(2), args.get(3)) {
+        #[cfg(windows)]
+        let code = host::<aster_platform_windows::Windows>(base, token);
+        #[cfg(target_os = "linux")]
+        let code = host::<aster_platform_linux::Linux>(base, token);
+        std::process::exit(code);
+    }
     #[cfg(windows)]
     let result = run::<aster_platform_windows::Windows>();
     #[cfg(target_os = "linux")]
