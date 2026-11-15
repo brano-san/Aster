@@ -19,6 +19,7 @@ aster-platform-linux = { path = "crates/aster-platform-linux" }
 aster-ssh = { path = "crates/aster-ssh" }
 aster-proto = { path = "crates/aster-proto" }
 aster-zmodem = { path = "crates/aster-zmodem" }
+aster-serial = { path = "crates/aster-serial" }
 regex = "1"
 
 alacritty_terminal = "0.26"
@@ -34,6 +35,7 @@ crc32fast = "1.5"
 russh = { version = "0.65", default-features = false }
 tokio = { version = "1", default-features = false }
 russh-sftp = "3"
+serialport = { version = "4", default-features = false }
 
 [profile.release]
 opt-level = 3
