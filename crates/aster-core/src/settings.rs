@@ -37,6 +37,7 @@ const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("under
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
 const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("auto", "Follow the system")];
 const BELLS: &[(&str, &str)] = &[("off", "Off"), ("visual", "Flash the pane"), ("audible", "System sound")];
+const BACKDROPS: &[(&str, &str)] = &[("none", "None"), ("acrylic", "Acrylic"), ("mica", "Mica")];
 const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
 const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
 
@@ -65,6 +66,8 @@ pub const SETTINGS: &[Setting] = &[
     item(APPEARANCE, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Choice(SCHEME_MODES)),
     item(APPEARANCE, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
     item(APPEARANCE, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
+    item(APPEARANCE, "appearance.opacity", "Opacity", "Background opacity of the terminal", Control::Number { min: 0.2, max: 1.0, step: 0.05 }),
+    item(APPEARANCE, "appearance.backdrop", "Backdrop", "System material behind the window on Windows 11", Control::Choice(BACKDROPS)),
     item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Text),
     item(APPEARANCE, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
     item(APPEARANCE, "appearance.last-tab-closes-window", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),

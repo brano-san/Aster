@@ -159,6 +159,19 @@ impl Window for Win32Window {
         }
     }
 
+    fn set_surface(&self, backdrop: aster_core::config::Backdrop) -> aster_platform::Surface {
+        use aster_core::config::Backdrop;
+        use windows::Win32::Graphics::Dwm::{DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE};
+        let h = self.hwnd();
+        let kind = match backdrop {
+            Backdrop::None => DWMSBT_NONE,
+            Backdrop::Mica => DWMSBT_MAINWINDOW,
+            Backdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
+        };
+        let applied = unsafe { DwmSetWindowAttribute(h, DWMWA_SYSTEMBACKDROP_TYPE, &kind as *const _ as _, 4).is_ok() };
+        aster_platform::Surface { translucent: true, backdrop: applied && backdrop != Backdrop::None }
+    }
+
     fn request_attention(&self) {
         let h = self.hwnd();
         if h.is_invalid() || unsafe { GetForegroundWindow() } == h {

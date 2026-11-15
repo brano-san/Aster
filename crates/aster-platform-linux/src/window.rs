@@ -171,6 +171,10 @@ impl Window for LinuxWindow {
         self.timer.set(Some(Instant::now() + Duration::from_millis(ms.into())));
     }
 
+    fn set_surface(&self, _backdrop: aster_core::config::Backdrop) -> aster_platform::Surface {
+        aster_platform::Surface::default()
+    }
+
     fn request_attention(&self) {
         self.raw.request_user_attention(Some(UserAttentionType::Informational));
     }

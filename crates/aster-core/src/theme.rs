@@ -21,6 +21,7 @@ pub struct Theme {
     pub selection: Color,
     pub shadow: Color,
     pub dim: Color,
+    pub surface: Color,
 }
 
 pub fn color(c: Rgb) -> Color {
@@ -74,6 +75,7 @@ impl Theme {
             selection: color(accent).alpha(0x40),
             shadow: Color::rgba(0x0000_0000).alpha(if dark { 0x90 } else { 0x40 }),
             dim: color(bg).alpha(0x40),
+            surface: color(bg),
         }
     }
 }

@@ -101,6 +101,7 @@ fn splitting_and_closing_panes() {
 fn input_typed_before_the_shell_starts_is_sent_after_the_spawn() {
     let (mut a, mut g) = app();
     a.open_default_tab();
+    a.take_effects();
     a.on_event(Event::Char('l'));
     a.on_event(Event::Char('s'));
     assert!(a.take_effects().is_empty());
@@ -273,4 +274,20 @@ fn executable_path_titles_fall_back_to_the_profile_name() {
     a.focused_terminal().unwrap().lock().feed(b"\x1b]0;C:/Windows/system32/cmd.exe\x07");
     a.woken();
     assert_eq!(a.tab_title(0), "local:a");
+}
+
+#[test]
+fn opacity_reaches_the_backgrounds_only_where_the_window_can_show_it() {
+    let (mut a, _) = app();
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface(crate::config::Backdrop::None))));
+    let mut config = Config::default();
+    config.appearance.opacity = 0.5;
+    config.appearance.backdrop = crate::config::Backdrop::Mica;
+    a.set_config(config);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface(crate::config::Backdrop::Mica))));
+    assert_eq!(a.theme.background.0 >> 24, 0xFF, "an opaque window keeps opaque backgrounds");
+    a.set_surface(true, true);
+    assert_eq!((a.theme.background.0 >> 24, a.theme.chrome.0 >> 24, a.theme.surface.0 >> 24), (128, 0, 0xFF));
+    a.set_surface(true, false);
+    assert_eq!(a.theme.chrome.0 >> 24, 128, "without a backdrop the tab bar is as clear as the terminal");
 }

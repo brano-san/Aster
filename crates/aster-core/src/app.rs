@@ -52,6 +52,7 @@ pub enum Effect {
     Timer(u32),
     Attention,
     Beep,
+    Surface(crate::config::Backdrop),
     ImeArea(Rect),
 }
 
@@ -133,6 +134,8 @@ pub struct App {
     pub(crate) bell: Option<(PaneId, Instant)>,
     last_bell: Option<Instant>,
     bell_pane: Option<PaneId>,
+    translucent: bool,
+    backdrop: bool,
     pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
     pub(crate) blink_on: bool,
@@ -192,6 +195,8 @@ impl App {
             bell: None,
             last_bell: None,
             bell_pane: None,
+            translucent: false,
+            backdrop: false,
             search: None,
             swallow_char: false,
             blink_on: true,
@@ -206,7 +211,16 @@ impl App {
             ime_area: Rect::default(),
         };
         app.restyle();
+        app.effects.push(Effect::Surface(app.config.appearance.backdrop));
         app
+    }
+
+    pub fn set_surface(&mut self, translucent: bool, backdrop: bool) {
+        if (self.translucent, self.backdrop) != (translucent, backdrop) {
+            self.translucent = translucent;
+            self.backdrop = backdrop;
+            self.restyle();
+        }
     }
 
     pub fn set_cwd_probe(&mut self, probe: CwdProbe) {
@@ -255,7 +269,12 @@ impl App {
         let mut palette = self.scheme(&name).unwrap_or(fallback);
         palette.bold_is_bright = self.config.terminal.draw_bold_text_in_bright_colors;
         self.palette = palette;
-        self.theme = Theme::from_palette(&palette);
+        let mut theme = Theme::from_palette(&palette);
+        let opacity = if self.translucent { self.config.appearance.opacity.clamp(0.2, 1.0) } else { 1.0 };
+        let alpha = (opacity * 255.0).round() as u8;
+        theme.background = theme.background.alpha(alpha);
+        theme.chrome = theme.chrome.alpha(if self.backdrop { 0 } else { alpha });
+        self.theme = theme;
         self.dirty = true;
     }
 
@@ -314,6 +333,9 @@ impl App {
         profiles.extend(config.profiles.iter().cloned());
         self.profiles = profiles;
         self.keymap = Keymap::new(&config.hotkeys);
+        if config.appearance.backdrop != self.config.appearance.backdrop {
+            self.effects.push(Effect::Surface(config.appearance.backdrop));
+        }
         self.config = config;
         let options = self.options();
         for p in self.panes.values() {

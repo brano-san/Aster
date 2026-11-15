@@ -282,7 +282,8 @@ impl D3dRenderer {
             let d = &self.dev;
             let ctx = &d.ctx;
             ctx.OMSetRenderTargets(Some(std::slice::from_ref(&self.rtv)), None);
-            ctx.ClearRenderTargetView(self.rtv.as_ref().unwrap(), &list.clear.to_f32());
+            let [r, g, b, a] = list.clear.to_f32();
+            ctx.ClearRenderTargetView(self.rtv.as_ref().unwrap(), &[r * a, g * a, b * a, a]);
             ctx.RSSetViewports(Some(&[D3D11_VIEWPORT { Width: w as f32, Height: h as f32, MaxDepth: 1.0, ..Default::default() }]));
             ctx.RSSetState(&d.raster);
             ctx.OMSetBlendState(&d.blend, None, u32::MAX);
@@ -419,7 +420,7 @@ impl Renderer for D3dRenderer {
                 BufferCount: 2,
                 Scaling: DXGI_SCALING_STRETCH,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
                 Flags: SWAP_FLAGS.0 as u32,
                 ..Default::default()
             };

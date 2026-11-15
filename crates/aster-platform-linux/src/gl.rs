@@ -398,7 +398,7 @@ impl GlRenderer {
             gl.bind_framebuffer(glow::FRAMEBUFFER, fbo);
             gl.viewport(0, 0, w as i32, h as i32);
             let [r, g, b, a] = list.clear.to_f32();
-            gl.clear_color(r, g, b, a);
+            gl.clear_color(r * a, g * a, b * a, a);
             gl.clear(glow::COLOR_BUFFER_BIT);
             gl.use_program(Some(s.program));
             let globals = Globals { viewport: [w as f32, h as f32], text_contrast: 0.5, pad: 0.0 };

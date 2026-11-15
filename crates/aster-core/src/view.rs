@@ -199,7 +199,7 @@ impl App {
             match self.rename.as_ref().filter(|n| n.tab == i) {
                 Some(edit) => {
                     let field = Rect::new(text_x - (5.0 * s).round(), r.y + (5.0 * s).round(), (text_end - text_x + 8.0 * s).max(0.0).round(), r.h - (10.0 * s).round());
-                    g.dl.round_rect(field, theme.background, (4.0 * s).round());
+                    g.dl.round_rect(field, theme.surface, (4.0 * s).round());
                     g.dl.outline(field, theme.accent, (4.0 * s).round(), (1.0 * s).round().max(1.0));
                     let w = g.text(text_x, y, &edit.text, ui, theme.text, (text_end - text_x).max(0.0));
                     let caret_h = (14.0 * s).round();
@@ -393,7 +393,7 @@ impl App {
             let style = FontStyle::new(FontFamily::Mono, px, false);
             let w = g.measure(&self.preedit.text, style);
             let r = Rect::new(cr.x, cr.y, w.max(m.w), m.h);
-            g.dl.rect(r, theme.background);
+            g.dl.rect(r, theme.surface);
             g.text(r.x, r.y + m.baseline, &self.preedit.text, style, theme.foreground, f32::MAX);
             g.dl.rect(Rect::new(r.x, r.y + under_y, w, thin), theme.foreground);
         }
@@ -505,7 +505,7 @@ impl App {
         let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
         let ty = baseline(g, geo.title, title);
         g.text(geo.title.x, ty, &format!("Paste {} lines?", lines.len()), title, theme.text, geo.title.w);
-        g.dl.round_rect(geo.preview, theme.background, (5.0 * s).round());
+        g.dl.round_rect(geo.preview, theme.surface, (5.0 * s).round());
         g.dl.outline(geo.preview, theme.overlay_border, (5.0 * s).round(), line);
         let mono = FontStyle::new(FontFamily::Mono, m.px, false);
         let inner = geo.preview.inset((10.0 * s).round(), (8.0 * s).round());
@@ -573,7 +573,7 @@ impl App {
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let (mx, my) = self.mouse;
-        g.dl.rect(geo.page, theme.background);
+        g.dl.rect(geo.page, theme.surface);
         let title = FontStyle::new(FontFamily::Ui, (20.0 * s).round(), true);
         let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
         let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
