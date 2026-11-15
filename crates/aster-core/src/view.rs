@@ -686,6 +686,7 @@ impl App {
             let fraction = if t.total > 0 { (t.done as f32 / t.total as f32).clamp(0.0, 1.0) } else { 0.0 };
             let (state, color) = match &t.state {
                 TransferState::Running => (format!("{} of {}  ·  click to cancel", human_size(t.done), human_size(t.total)), theme.text_dim),
+                TransferState::Editing { saves } => (format!("editing locally  ·  saved {saves} times  ·  click to stop"), theme.accent),
                 TransferState::Done(m) if !t.upload => (format!("{m}  ·  click to show"), theme.text_dim),
                 TransferState::Done(m) => (m.clone(), theme.text_dim),
                 TransferState::Failed(e) => (format!("{e}  ·  click to dismiss"), Color::rgb(0xD9534F)),
@@ -695,12 +696,12 @@ impl App {
                 g.dl.round_rect(Rect::new(bar.x, bar.y, (bar.w * fraction).max(bar.h), bar.h), if matches!(t.state, TransferState::Failed(_)) { Color::rgb(0xD9534F) } else { theme.accent }, bar.h / 2.0);
             }
             let y = r.y + (17.0 * s).round();
-            let arrow = if t.upload { "\u{2191}" } else { "\u{2193}" };
+            let arrow = if t.edit { "\u{270E}" } else if t.upload { "\u{2191}" } else { "\u{2193}" };
             let label = format!("{arrow} {}", t.name);
             let lw = g.text(r.x + pad, y, &label, ui, theme.text, r.w * 0.45);
             g.text(r.x + pad + lw + (14.0 * s).round(), y, &state, small, color, (r.w - lw - 3.0 * pad).max(0.0));
         }
-        let hint = "Enter open or download  ·  Backspace up  ·  F2 rename  ·  F7 new folder  ·  Del delete  ·  Ctrl+U upload  ·  drop files to upload";
+        let hint = "Enter open or download  ·  F4 edit  ·  Backspace up  ·  F2 rename  ·  F7 new folder  ·  Del delete  ·  Ctrl+U upload  ·  drop files to upload";
         let hy = baseline(g, geo.hint, small);
         g.text(geo.hint.x, hy, hint, small, theme.text_dim, geo.hint.w);
     }

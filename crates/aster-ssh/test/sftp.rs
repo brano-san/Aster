@@ -134,3 +134,30 @@ fn a_server_without_sftp_reports_it_once_asked() {
     ask(&pane, Request::List { path: String::new() });
     assert!(matches!(answer(&pane), Reply::Failed { id: None, error } if error.contains("SFTP")));
 }
+
+#[test]
+fn a_file_edited_locally_is_uploaded_after_each_save_until_editing_stops() {
+    let remote = temp_ssh_dir();
+    std::fs::write(remote.join("conf.ini"), "a=1").unwrap();
+    let (port, _) = serve_files(Some(remote.clone()));
+    let pane = logged_in(port);
+    let scratch = temp_ssh_dir();
+    ask(&pane, Request::Edit { id: 9, remote: "/conf.ini".into(), dir: scratch.clone() });
+    let Reply::Editing { id: 9, local } = answer(&pane) else { panic!("no editing reply") };
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), "a=1");
+    assert!(local.starts_with(&scratch));
+
+    std::fs::write(&local, "a=2\nb=3").unwrap();
+    assert_eq!(answer(&pane), Reply::Saved { id: 9, remote: "/conf.ini".into() });
+    assert_eq!(std::fs::read_to_string(remote.join("conf.ini")).unwrap(), "a=2\nb=3");
+
+    std::fs::write(&local, "a=4").unwrap();
+    assert_eq!(answer(&pane), Reply::Saved { id: 9, remote: "/conf.ini".into() });
+    assert_eq!(std::fs::read_to_string(remote.join("conf.ini")).unwrap(), "a=4");
+
+    ask(&pane, Request::Cancel { id: 9 });
+    assert!(matches!(answer(&pane), Reply::Failed { id: Some(9), .. }));
+    std::fs::write(&local, "a=5").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert_eq!(std::fs::read_to_string(remote.join("conf.ini")).unwrap(), "a=4", "nothing is uploaded after editing stops");
+}

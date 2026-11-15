@@ -21,6 +21,7 @@ pub enum FileRequest {
     Mkdir(String),
     Remove { path: String, dir: bool },
     Rename { from: String, to: String },
+    Edit { id: u64, remote: String },
     Cancel(u64),
 }
 
@@ -31,12 +32,15 @@ pub enum FileReply {
     Downloaded { id: u64, local: PathBuf },
     Uploaded { id: u64, remote: String },
     Changed { dir: String },
+    Editing { id: u64, local: PathBuf },
+    Saved { id: u64, remote: String },
     Failed { id: Option<u64>, error: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TransferState {
     Running,
+    Editing { saves: u32 },
     Done(String),
     Failed(String),
 }
@@ -47,6 +51,7 @@ pub struct Transfer {
     pub pane: PaneId,
     pub name: String,
     pub upload: bool,
+    pub edit: bool,
     pub done: u64,
     pub total: u64,
     pub state: TransferState,
@@ -274,7 +279,7 @@ impl App {
         let (pane, dir) = (page.pane, page.path.clone());
         let id = self.next_id();
         let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| local.display().to_string());
-        self.transfers.push(Transfer { id, pane, name, upload: true, done: 0, total: 0, state: TransferState::Running, local: Some(local.clone()) });
+        self.transfers.push(Transfer { id, pane, name, upload: true, edit: false, done: 0, total: 0, state: TransferState::Running, local: Some(local.clone()) });
         self.request(pane, FileRequest::Upload { id, local, dir });
         self.dirty = true;
     }
@@ -283,8 +288,17 @@ impl App {
         let Some(page) = self.files.as_ref() else { return };
         let (pane, remote) = (page.pane, join(&page.path, name));
         let id = self.next_id();
-        self.transfers.push(Transfer { id, pane, name: name.to_owned(), upload: false, done: 0, total: 0, state: TransferState::Running, local: None });
+        self.transfers.push(Transfer { id, pane, name: name.to_owned(), upload: false, edit: false, done: 0, total: 0, state: TransferState::Running, local: None });
         self.request(pane, FileRequest::Download { id, remote });
+        self.dirty = true;
+    }
+
+    fn edit_locally(&mut self, name: &str) {
+        let Some(page) = self.files.as_ref() else { return };
+        let (pane, remote) = (page.pane, join(&page.path, name));
+        let id = self.next_id();
+        self.transfers.push(Transfer { id, pane, name: name.to_owned(), upload: false, edit: true, done: 0, total: 0, state: TransferState::Running, local: None });
+        self.request(pane, FileRequest::Edit { id, remote });
         self.dirty = true;
     }
 
@@ -352,9 +366,31 @@ impl App {
                     self.browse(dir);
                 }
             }
+            FileReply::Editing { id, local } => {
+                if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
+                    t.done = t.total.max(t.done);
+                    t.state = TransferState::Editing { saves: 0 };
+                    t.local = Some(local.clone());
+                }
+                self.push(Effect::Open(local.display().to_string()));
+            }
+            FileReply::Saved { id, remote } => {
+                if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
+                    if let TransferState::Editing { saves } = &mut t.state {
+                        *saves += 1;
+                    }
+                }
+                let dir = parent(&remote);
+                if visible && self.files.as_ref().is_some_and(|p| p.path == dir) {
+                    self.browse(dir);
+                }
+            }
             FileReply::Failed { id: Some(id), error } => {
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
-                    t.state = TransferState::Failed(error);
+                    t.state = match (&t.state, error.as_str()) {
+                        (TransferState::Editing { saves }, "cancelled") => TransferState::Done(format!("editing stopped after {saves} saves")),
+                        _ => TransferState::Failed(error),
+                    };
                 }
             }
             FileReply::Failed { id: None, error } => {
@@ -453,6 +489,16 @@ impl App {
                 self.browse(path);
             }
             Key::F(7) => page.prompt = Some(Prompt::NewFolder(String::new())),
+            Key::F(4) => {
+                if let Some(e) = self.selected_entry().filter(|e| !e.dir) {
+                    self.edit_locally(&e.name);
+                }
+            }
+            Key::Char('E') if mods.ctrl => {
+                if let Some(e) = self.selected_entry().filter(|e| !e.dir) {
+                    self.edit_locally(&e.name);
+                }
+            }
             Key::F(2) => {
                 if let Some(e) = self.selected_entry() {
                     if let Some(page) = self.files.as_mut() {
@@ -502,7 +548,7 @@ impl App {
             let id = *id;
             let Some(t) = self.transfers.iter().find(|t| t.id == id).cloned() else { return };
             match (&t.state, &t.local) {
-                (TransferState::Running, _) => {
+                (TransferState::Running | TransferState::Editing { .. }, _) => {
                     self.request(t.pane, FileRequest::Cancel(id));
                 }
                 (TransferState::Done(_), Some(local)) if !t.upload => {

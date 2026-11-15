@@ -172,3 +172,29 @@ fn dropped_paths_are_quoted_for_the_shell_of_the_pane() {
     let wsl = Profile::new("local:wsl:u", "WSL", "wsl.exe", &[]);
     assert_eq!(crate::app::dropped_text(&wsl, &paths), "'/mnt/c/My Files/a.txt' /mnt/c/b.txt");
 }
+
+#[test]
+fn f4_edits_a_file_locally_opens_it_and_counts_saves_until_stopped() {
+    let (mut a, pane) = ssh_app();
+    a.run(Action::OpenFiles);
+    listed(&mut a, pane, "/etc");
+    a.take_effects();
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Down);
+    key(&mut a, Key::F(4));
+    let reqs = requests(&mut a);
+    let FileRequest::Edit { id, remote } = &reqs[0] else { panic!("{reqs:?}") };
+    assert_eq!(remote, "/etc/notes.txt");
+    let id = *id;
+    a.files_reply(pane, FileReply::Editing { id, local: "C:/tmp/aster-edit/1/notes.txt".into() });
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Open(p) if p.ends_with("notes.txt"))));
+    a.files_reply(pane, FileReply::Saved { id, remote: "/etc/notes.txt".into() });
+    a.files_reply(pane, FileReply::Saved { id, remote: "/etc/notes.txt".into() });
+    assert_eq!(a.transfers_of(pane)[0].state, TransferState::Editing { saves: 2 });
+    let (_, r) = a.files_geometry().unwrap().transfers[0];
+    a.take_effects();
+    a.on_event(Event::MouseDown { x: r.x + 5.0, y: r.y + 5.0, button: MouseButton::Left, clicks: 1 });
+    assert_eq!(requests(&mut a), [FileRequest::Cancel(id)]);
+    a.files_reply(pane, FileReply::Failed { id: Some(id), error: "cancelled".into() });
+    assert!(matches!(&a.transfers_of(pane)[0].state, TransferState::Done(m) if m.contains("2 saves")));
+}
