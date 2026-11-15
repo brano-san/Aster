@@ -278,6 +278,11 @@ impl<P: Platform> Handler<P> {
                     s.cancel_transfer();
                 }
             }
+            Effect::AcceptTransfer { pane } => {
+                if let Some(s) = self.sessions.get(&(id, pane)) {
+                    s.accept_transfer();
+                }
+            }
             Effect::Files { pane, request } => {
                 let downloads = P::downloads_dir().unwrap_or_else(std::env::temp_dir);
                 let sent = self.remotes.get(&(id, pane)).is_some_and(|r| r.send(aster_ssh::console::Input::Sftp(crate::remote::file_request(request, downloads))).is_ok());
@@ -356,7 +361,13 @@ impl<P: Platform> Handler<P> {
     fn drain_exits(&mut self) {
         while let Ok((wid, pane, note)) = self.note_rx.try_recv() {
             if let Some(s) = self.windows.get_mut(&wid) {
-                s.app.transfer_offered(pane, note == crate::zmodem::Note::Offered);
+                let state = match note {
+                    crate::zmodem::Note::AwaitingFiles => aster_core::app::PaneTransfer::AwaitingFiles,
+                    crate::zmodem::Note::Incoming => aster_core::app::PaneTransfer::Incoming,
+                    crate::zmodem::Note::Running => aster_core::app::PaneTransfer::Running,
+                    crate::zmodem::Note::Ended => aster_core::app::PaneTransfer::None,
+                };
+                s.app.transfer_offered(pane, state);
             }
         }
         while let Ok((wid, pane, reply)) = self.file_rx.try_recv() {

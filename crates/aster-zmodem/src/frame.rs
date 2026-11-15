@@ -122,17 +122,23 @@ impl Decoder {
     pub fn new() -> Self { Self { state: State::Seek(0), wide: false, escaped: false, cancels: 0 } }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Item> {
+        self.feed_counted(bytes).into_iter().map(|(_, item)| item).collect()
+    }
+
+    pub fn feed_counted(&mut self, bytes: &[u8]) -> Vec<(usize, Item)> {
         let mut out = Vec::new();
-        for &byte in bytes {
+        let mut items = Vec::new();
+        for (i, &byte) in bytes.iter().enumerate() {
             self.cancels = if byte == CAN { self.cancels + 1 } else { 0 };
             if self.cancels == 5 {
                 self.cancels = 0;
                 self.state = State::Seek(0);
                 self.escaped = false;
-                out.push(Item::Cancel);
-                continue;
+                items.push(Item::Cancel);
+            } else {
+                self.byte(byte, &mut items);
             }
-            self.byte(byte, &mut out);
+            out.extend(items.drain(..).map(|item| (i + 1, item)));
         }
         out
     }

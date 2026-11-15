@@ -165,8 +165,8 @@ impl App {
                     self.draw_hint(g, *rect, text);
                 }
             }
-            if let Some(typed) = self.offer(*id).map(str::to_owned) {
-                self.draw_offer(g, *rect, &typed);
+            if let Some((state, typed)) = self.offers.get(id).cloned() {
+                self.draw_offer(g, *rect, state, &typed);
             }
             if self.bell_flash(*id) {
                 g.dl.rect(*rect, theme.foreground.alpha(0x2C));
@@ -518,7 +518,13 @@ impl App {
         g.text(inner.x, y, text, ui, theme.text, inner.w);
     }
 
-    fn draw_offer<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, typed: &str) {
+    fn draw_offer<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, state: crate::app::PaneTransfer, typed: &str) {
+        use crate::app::PaneTransfer;
+        match state {
+            PaneTransfer::Incoming => return self.draw_hint(g, pane, "The remote side wants to send files. Enter receives them into Downloads, Esc refuses."),
+            PaneTransfer::Running => return self.draw_hint(g, pane, "Transfer in progress. Esc cancels."),
+            PaneTransfer::AwaitingFiles | PaneTransfer::None => {}
+        }
         let s = self.scale;
         let theme = self.theme;
         let h = (64.0 * s).round();

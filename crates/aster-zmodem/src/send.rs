@@ -44,12 +44,15 @@ pub struct Sender {
     wide: bool,
     goodbye: bool,
     failed: bool,
+    rest: Vec<u8>,
 }
 
 impl Sender {
     pub fn new(files: Vec<SendFile>) -> Self {
-        Self { files, decoder: Decoder::new(), state: State::Init, index: 0, position: 0, wide: false, goodbye: false, failed: false }
+        Self { files, decoder: Decoder::new(), state: State::Init, index: 0, position: 0, wide: false, goodbye: false, failed: false, rest: Vec::new() }
     }
+
+    pub fn rest(&mut self) -> Vec<u8> { std::mem::take(&mut self.rest) }
 
     fn next(&mut self) {
         self.state = if self.index == self.files.len() { State::Finish } else { State::Offer };
@@ -57,10 +60,10 @@ impl Sender {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<TxEvent> {
-        if self.failed { self.failed = false; return vec![TxEvent::Aborted]; }
+        if self.failed { self.failed = false; self.rest = bytes.to_vec(); return vec![TxEvent::Aborted]; }
         if self.finished() { return Vec::new(); }
         let mut out = Vec::new();
-        for item in self.decoder.feed(bytes) {
+        for (consumed, item) in self.decoder.feed_counted(bytes) {
             match item {
                 Item::Cancel => { self.state = State::Ended; out.push(TxEvent::Aborted); }
                 Item::Header(h) => match h.kind {
@@ -93,7 +96,7 @@ impl Sender {
                 },
                 _ => {}
             }
-            if self.finished() { break; }
+            if self.finished() { self.rest = bytes[consumed..].to_vec(); break; }
         }
         out
     }

@@ -120,3 +120,29 @@ fn abort_returns_the_cancel_sequence() {
     assert!(rx.finished());
     assert!(rx.feed(&file(b"a\0")).is_empty());
 }
+
+#[test]
+fn bytes_after_the_finish_are_kept_for_the_caller() {
+    let mut rx = Receiver::new();
+    let mut bytes = hex_header(Header::new(ZFIN, [0; 4]));
+    bytes.extend(b"OO\r\nuser@host:~$ ");
+    assert_eq!(rx.feed(&bytes), vec![reply(ZFIN, 0), RxEvent::Done]);
+    assert_eq!(rx.rest(), b"\r\x8aOO\r\nuser@host:~$ ");
+    assert!(rx.rest().is_empty(), "the rest is handed out once");
+}
+
+#[test]
+fn bytes_after_a_remote_cancel_are_kept_for_the_caller() {
+    let mut rx = active();
+    let mut bytes = vec![CAN; 5];
+    bytes.extend(b"cancelled\r\n");
+    assert_eq!(rx.feed(&bytes), vec![RxEvent::Aborted]);
+    assert_eq!(rx.rest(), b"cancelled\r\n");
+}
+
+#[test]
+fn nothing_is_left_over_while_the_session_runs() {
+    let mut rx = active();
+    rx.feed(&data(0, b"ab", ZCRCE));
+    assert!(rx.rest().is_empty());
+}
