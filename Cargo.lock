@@ -146,6 +146,7 @@ dependencies = [
  "aster-platform",
  "aster-platform-linux",
  "aster-platform-windows",
+ "aster-serial",
  "aster-ssh",
  "aster-vt",
  "aster-zmodem",

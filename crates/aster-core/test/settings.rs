@@ -317,7 +317,7 @@ fn a_new_ssh_profile_needs_only_a_name_and_a_destination() {
         key(&mut a, Key::Tab);
     }
     typed(&mut a, "deploy@prod");
-    key(&mut a, Key::Enter);
+    a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
     let p = config.profiles.iter().find(|p| p.name == "Prod").unwrap();
     assert_eq!((p.ssh.as_deref(), p.command.as_str(), p.args.as_slice()), (Some("deploy@prod"), "ssh", &["deploy@prod".to_owned()][..]));
@@ -348,4 +348,21 @@ fn ctrl_enter_makes_a_profile_the_default_and_custom_ones_delete_after_a_second_
     key(&mut a, Key::Delete);
     assert!(!a.config().profiles.iter().any(|p| p.name == "Mine"));
     assert_eq!(a.config().terminal.profile, "", "deleting the default profile falls back to automatic");
+}
+
+#[test]
+fn a_serial_profile_needs_only_a_name_and_a_port() {
+    let mut a = app();
+    select_profile(&mut a, "");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "Router console");
+    for _ in 0..5 {
+        key(&mut a, Key::Tab);
+    }
+    typed(&mut a, "COM3:9600,8N1");
+    key(&mut a, Key::Enter);
+    let config = saved(&mut a).expect("saved");
+    let p = config.profiles.iter().find(|p| p.name == "Router console").unwrap();
+    assert_eq!(p.serial.as_deref(), Some("COM3:9600,8N1"));
+    assert!(a.settings.as_ref().unwrap().profiles.iter().any(|r| r.detail == "serial COM3:9600,8N1"));
 }

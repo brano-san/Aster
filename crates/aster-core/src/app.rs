@@ -26,6 +26,7 @@ const BELL_GAP: Duration = Duration::from_millis(250);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
     pub ssh: Option<String>,
+    pub serial: Option<String>,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
@@ -306,7 +307,7 @@ impl App {
         if let Some(dir) = pane.terminal.lock().cwd() {
             return Some(dir.to_owned());
         }
-        let remote = pane.profile.id.starts_with("ssh:") || pane.profile.id.starts_with("local:wsl");
+        let remote = pane.profile.ssh.is_some() || pane.profile.serial.is_some() || pane.profile.id.starts_with("ssh:") || pane.profile.id.starts_with("local:wsl");
         if remote {
             return None;
         }
@@ -463,7 +464,7 @@ impl App {
             terminal.lock().set_cwd(inherited.clone());
         }
         let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
-        let launch = Launch { ssh: profile.ssh.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let launch = Launch { ssh: profile.ssh.clone(), serial: profile.serial.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0 });
         id
     }

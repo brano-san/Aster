@@ -2,6 +2,7 @@
 
 mod handler;
 mod remote;
+mod serial;
 mod session;
 mod zmodem;
 
