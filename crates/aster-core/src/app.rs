@@ -815,6 +815,7 @@ impl App {
                 self.effects.push(Effect::Close);
             }
             Event::Timer => self.on_timer(),
+            Event::GlobalHotkey => {}
         }
     }
 

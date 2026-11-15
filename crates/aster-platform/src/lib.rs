@@ -36,6 +36,42 @@ pub struct Placement {
     pub maximized: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DockSpec {
+    pub edge: Edge,
+    pub fill: f32,
+    pub space: f32,
+    pub on_top: bool,
+}
+
+pub fn dock_rect(work: (i32, i32, i32, i32), spec: DockSpec) -> (i32, i32, i32, i32) {
+    let (x, y, w, h) = work;
+    let fill = spec.fill.clamp(0.05, 1.0);
+    let space = spec.space.clamp(0.2, 1.0);
+    match spec.edge {
+        Edge::Top | Edge::Bottom => {
+            let (dw, dh) = ((w as f32 * space).round() as i32, (h as f32 * fill).round() as i32);
+            let dx = x + (w - dw) / 2;
+            let dy = if spec.edge == Edge::Top { y } else { y + h - dh };
+            (dx, dy, dw, dh)
+        }
+        Edge::Left | Edge::Right => {
+            let (dw, dh) = ((w as f32 * fill).round() as i32, (h as f32 * space).round() as i32);
+            let dy = y + (h - dh) / 2;
+            let dx = if spec.edge == Edge::Left { x } else { x + w - dw };
+            (dx, dy, dw, dh)
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
     pub title: String,
@@ -72,6 +108,11 @@ pub trait Window {
     fn set_dark(&self, dark: bool);
     fn set_timer(&self, ms: u32);
     fn request_attention(&self);
+    fn set_visible(&self, visible: bool);
+    fn is_visible(&self) -> bool;
+    fn is_foreground(&self) -> bool;
+    fn dock(&self, spec: Option<DockSpec>);
+    fn set_global_hotkey(&self, key: Option<(aster_core::input::Key, aster_core::input::Mods)>) -> bool;
 }
 
 pub trait WindowHandler<W: WindowSystem> {
@@ -142,3 +183,7 @@ pub trait Platform: 'static {
     fn open(target: &str);
     fn ssh_command() -> Option<String>;
 }
+
+#[cfg(test)]
+#[path = "../test/dock.rs"]
+mod tests;

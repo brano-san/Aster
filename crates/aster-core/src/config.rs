@@ -30,6 +30,17 @@ pub enum SchemeMode {
     Auto,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Dock {
+    #[default]
+    Off,
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct SearchOptions {
@@ -95,6 +106,12 @@ pub struct Appearance {
     pub cycle_tabs: bool,
     pub last_tab_closes_window: bool,
     pub ui_font: String,
+    pub dock: Dock,
+    pub dock_fill: f32,
+    pub dock_space: f32,
+    pub dock_always_on_top: bool,
+    pub dock_hide_on_blur: bool,
+    pub global_hotkey: String,
 }
 
 impl Default for Appearance {
@@ -106,6 +123,12 @@ impl Default for Appearance {
             cycle_tabs: true,
             last_tab_closes_window: true,
             ui_font: String::new(),
+            dock: Dock::Off,
+            dock_fill: 0.5,
+            dock_space: 1.0,
+            dock_always_on_top: true,
+            dock_hide_on_blur: false,
+            global_hotkey: "Ctrl-`".into(),
         }
     }
 }

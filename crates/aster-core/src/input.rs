@@ -87,6 +87,7 @@ pub enum Event {
     CloseRequested,
     Timer,
     SessionEnding,
+    GlobalHotkey,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
