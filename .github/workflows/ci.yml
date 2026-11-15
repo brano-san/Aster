@@ -28,8 +28,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p aster-gfx -p aster-vt -p aster-core -p aster-platform --all-targets -- -D warnings
-      - run: cargo test -p aster-gfx -p aster-vt -p aster-core -p aster-platform
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri libxkbcommon-x11-0 fonts-dejavu-core
+      - run: cargo build --workspace --release
+      - run: cargo test --workspace
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   deps-isolation:
     runs-on: ubuntu-24.04

@@ -14,6 +14,7 @@ aster-vt = { path = "crates/aster-vt" }
 aster-core = { path = "crates/aster-core" }
 aster-platform = { path = "crates/aster-platform" }
 aster-platform-windows = { path = "crates/aster-platform-windows" }
+aster-platform-linux = { path = "crates/aster-platform-linux" }
 
 alacritty_terminal = "0.26"
 crossbeam-channel = "0.5"

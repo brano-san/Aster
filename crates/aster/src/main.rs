@@ -59,8 +59,8 @@ fn main() {
     tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(tracing::Level::INFO).init();
     #[cfg(windows)]
     let result = run::<aster_platform_windows::Windows>();
-    #[cfg(not(windows))]
-    let result: Result<(), aster_platform::PlatformError> = Err(aster_platform::PlatformError::new(-1, "this platform is not supported yet"));
+    #[cfg(target_os = "linux")]
+    let result = run::<aster_platform_linux::Linux>();
     if let Err(e) = result {
         tracing::error!("{e}");
         std::process::exit(1);

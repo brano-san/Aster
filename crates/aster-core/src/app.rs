@@ -331,6 +331,10 @@ impl App {
         self.tabs.get(self.active).map(|t| t.focus)
     }
 
+    pub fn focused_terminal(&self) -> Option<Shared> {
+        self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.terminal.clone())
+    }
+
     fn split(&mut self, side: Side) {
         let Some(focus) = self.focused_pane() else { return };
         let profile = self.panes.get(&focus).map(|p| p.profile.clone()).or_else(|| self.default_profile());
