@@ -109,6 +109,29 @@ impl Platform for Windows {
         elevate::connect(base)
     }
 
+    fn ui_language() -> String {
+        use windows::Win32::Globalization::{GetUserDefaultLocaleName, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
+        let mut count = 0u32;
+        let mut len = 0u32;
+        let mut preferred = None;
+        if unsafe { GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, None, &mut len) }.is_ok() && len > 0 {
+            let mut buf = vec![0u16; len as usize];
+            if unsafe { GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &mut count, Some(windows::core::PWSTR(buf.as_mut_ptr())), &mut len) }.is_ok() {
+                let first = buf.split(|&c| c == 0).next().unwrap_or(&[]);
+                preferred = Some(String::from_utf16_lossy(first)).filter(|s| !s.is_empty());
+            }
+        }
+        preferred.unwrap_or_else(|| {
+            let mut buf = [0u16; 85];
+            let n = unsafe { GetUserDefaultLocaleName(&mut buf) };
+            if n > 1 {
+                String::from_utf16_lossy(&buf[..n as usize - 1])
+            } else {
+                "en".to_owned()
+            }
+        })
+    }
+
     fn beep() -> bool {
         unsafe { windows::Win32::System::Diagnostics::Debug::MessageBeep(windows::Win32::UI::WindowsAndMessaging::MB_OK) }.is_ok()
     }

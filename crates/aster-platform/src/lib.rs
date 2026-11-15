@@ -200,6 +200,7 @@ pub trait Platform: 'static {
     fn secret_get(key: &str) -> Option<String>;
     fn secret_set(key: &str, value: &str) -> bool;
     fn secret_delete(key: &str);
+    fn ui_language() -> String;
 }
 
 #[cfg(test)]
