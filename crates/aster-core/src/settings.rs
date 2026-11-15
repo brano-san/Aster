@@ -1,5 +1,6 @@
 use crate::app::{App, Effect};
 use crate::config::Config;
+use crate::i18n::{t, tf};
 use crate::input::{Key, Mods};
 use crate::keymap::{format_binding, Action, Chord};
 use aster_gfx::render::Rect;
@@ -41,6 +42,7 @@ const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("
 const BELLS: &[(&str, &str)] = &[("off", "Off"), ("visual", "Flash the pane"), ("audible", "System sound")];
 const BACKDROPS: &[(&str, &str)] = &[("none", "None"), ("acrylic", "Acrylic"), ("mica", "Mica")];
 const SSH_CLIENTS: &[(&str, &str)] = &[("native", "Built in"), ("system", "System OpenSSH")];
+const LANGUAGES: &[(&str, &str)] = &[("auto", "Automatic"), ("en", "English"), ("ru", "Russian")];
 const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
 const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
 
@@ -67,6 +69,7 @@ pub const SETTINGS: &[Setting] = &[
     item(SEARCH, "terminal.search-options.case-sensitive", "Match case", "Search tells upper and lower case apart", Control::Toggle),
     item(SEARCH, "terminal.search-options.regex", "Regular expressions", "Search queries are regular expressions", Control::Toggle),
     item(SEARCH, "terminal.search-options.whole-word", "Whole words", "Search matches whole words only", Control::Toggle),
+    item(APPEARANCE, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
     item(APPEARANCE, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Choice(SCHEME_MODES)),
     item(APPEARANCE, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
     item(APPEARANCE, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
@@ -204,10 +207,10 @@ pub fn section_of(item: usize) -> &'static str {
 
 fn item_matches(item: usize, query: &str) -> bool {
     match shortcut(item) {
-        Some(a) => found(&format!("{SHORTCUTS} hotkey {} {}", a.label(), a.id()), query),
+        Some(a) => found(&format!("{SHORTCUTS} {} hotkey {} {} {}", t(SHORTCUTS), a.source_label(), a.label(), a.id()), query),
         None => {
             let s = &SETTINGS[item];
-            found(&format!("{} {} {} {}", s.section, s.label, s.hint, s.key), query)
+            found(&format!("{} {} {} {} {} {} {}", s.section, t(s.section), s.label, t(s.label), s.hint, t(s.hint), s.key), query)
         }
     }
 }
@@ -233,15 +236,15 @@ impl SettingsPage {
         page
     }
 
-    fn refilter(&mut self) {
+    pub(crate) fn refilter(&mut self) {
         let actions = Action::all().count();
         let base = SETTINGS.len() + actions;
         let settings = (0..SETTINGS.len()).filter(|&i| item_matches(i, &self.query));
         let profiles = (0..self.profiles.len()).filter(|&k| {
             let p = &self.profiles[k];
-            found(&format!("{PROFILES} profile shell {} {} {}", p.name, p.detail, p.id), &self.query)
+            found(&format!("{PROFILES} {} profile shell {} {} {}", t(PROFILES), p.name, p.detail, p.id), &self.query)
         });
-        let new_row = found(&format!("{PROFILES} new profile add create"), &self.query).then_some(base + self.profiles.len());
+        let new_row = found(&format!("{PROFILES} {} new profile add create {}", t(PROFILES), t("New profile")), &self.query).then_some(base + self.profiles.len());
         let shortcuts = (SETTINGS.len()..base).filter(|&i| item_matches(i, &self.query));
         self.shown = settings.chain(profiles.map(|k| base + k)).chain(new_row).chain(shortcuts).collect();
         self.selected = 0;
@@ -433,7 +436,7 @@ impl App {
                 original: row.custom.then(|| p.id.clone()),
                 source: Some(p.id.clone()),
                 fields: [
-                    if row.custom { p.name.clone() } else { format!("{} (copy)", p.name) },
+                    if row.custom { p.name.clone() } else { tf("{name} (copy)", &[("name", &p.name)]) },
                     p.command.clone(),
                     join_args(&p.args),
                     p.cwd.clone().unwrap_or_default(),
@@ -462,10 +465,10 @@ impl App {
             app.dirty = true;
         };
         if name.is_empty() {
-            return fail(self, "The profile needs a name");
+            return fail(self, t("The profile needs a name"));
         }
         if command.is_empty() && ssh.is_empty() && serial.is_empty() {
-            return fail(self, "Give a command to run, an SSH destination or a serial port");
+            return fail(self, t("Give a command to run, an SSH destination or a serial port"));
         }
         let id = editor.original.clone().unwrap_or_else(|| {
             let base = format!("custom:{}", slug(&name));
@@ -569,9 +572,9 @@ impl App {
 
     pub fn setting_options(&self, control: Control) -> Vec<(String, String)> {
         match control {
-            Control::Choice(list) => list.iter().map(|(v, l)| ((*v).to_owned(), (*l).to_owned())).collect(),
+            Control::Choice(list) => list.iter().map(|(v, l)| ((*v).to_owned(), t(l).to_owned())).collect(),
             Control::Schemes => self.scheme_names().into_iter().map(|n| (n.clone(), n)).collect(),
-            Control::Profiles => std::iter::once((String::new(), "First available".to_owned())).chain(self.profiles.iter().map(|p| (p.id.clone(), p.name.clone()))).collect(),
+            Control::Profiles => std::iter::once((String::new(), t("First available").to_owned())).chain(self.profiles.iter().map(|p| (p.id.clone(), p.name.clone()))).collect(),
             _ => Vec::new(),
         }
     }
@@ -597,7 +600,7 @@ impl App {
     pub fn shortcut_text(&self, action: Action) -> String {
         let all: Vec<String> = self.keymap.bindings_of(action).map(format_binding).collect();
         if all.is_empty() {
-            "None".into()
+            t("None").to_owned()
         } else {
             all.join(", ")
         }
@@ -637,7 +640,7 @@ impl App {
         }
         if let Some(page) = self.settings.as_mut() {
             page.capture = None;
-            page.notice = (!taken.is_empty()).then(|| format!("{text} was taken from {}", taken.join(", ")));
+            page.notice = (!taken.is_empty()).then(|| tf("{shortcut} was taken from {actions}", &[("shortcut", &text), ("actions", &taken.join(", "))]));
         }
     }
 
@@ -777,12 +780,12 @@ impl App {
                             page.deleting = None;
                             return self.delete_profile(&r.id);
                         }
-                        page.notice = Some(format!("Press Del again to delete {}", r.name));
+                        page.notice = Some(tf("Press Del again to delete {name}", &[("name", &r.name)]));
                         page.deleting = Some(r.id);
                         return;
                     }
                     (Key::Delete, Some(_)) => {
-                        page.notice = Some("Detected profiles cannot be deleted; copy one with Enter instead".into());
+                        page.notice = Some(t("Detected profiles cannot be deleted; copy one with Enter instead").to_owned());
                         return;
                     }
                     _ => {}

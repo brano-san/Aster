@@ -48,3 +48,11 @@ fn round_trips_through_text() {
 fn bad_values_are_reported() {
     assert!(Config::parse("[terminal]\ncursor = \"triangle\"").is_err());
 }
+
+#[test]
+fn the_language_defaults_to_automatic_and_round_trips() {
+    assert_eq!(Config::default().appearance.language, "auto");
+    let config = Config::parse("[appearance]\nlanguage = \"ru\"\n").unwrap();
+    assert_eq!(config.appearance.language, "ru");
+    assert_eq!(Config::parse(&config.to_text()).unwrap().appearance.language, "ru");
+}

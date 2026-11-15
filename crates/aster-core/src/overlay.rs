@@ -1,4 +1,5 @@
 use crate::fuzzy::fuzzy;
+use crate::i18n::{t, tf};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,9 +48,9 @@ impl Overlay {
 
     pub fn placeholder(&self) -> &'static str {
         match self.kind {
-            OverlayKind::Commands => "Type a command",
-            OverlayKind::Profiles => "Select a profile",
-            OverlayKind::Schemes => "Select a color scheme",
+            OverlayKind::Commands => t("Type a command"),
+            OverlayKind::Profiles => t("Select a profile"),
+            OverlayKind::Schemes => t("Select a color scheme"),
         }
     }
 
@@ -61,7 +62,7 @@ impl Overlay {
         }
         self.shown = scored.into_iter().map(|(_, i, r)| (i, r)).collect();
         if let Some(target) = self.quick.then(|| crate::ssh::parse_target(&self.query)).flatten() {
-            self.items.push(Pick { label: format!("Connect to {}", target.display()), hint: "SSH".into(), value: format!("{QUICK}{}", self.query.trim()) });
+            self.items.push(Pick { label: tf("Connect to {target}", &[("target", &target.display())]), hint: "SSH".into(), value: format!("{QUICK}{}", self.query.trim()) });
             let at = if self.query.contains('@') || self.shown.is_empty() { 0 } else { self.shown.len() };
             self.shown.insert(at, (self.items.len() - 1, Vec::new()));
         }

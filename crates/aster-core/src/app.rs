@@ -175,6 +175,7 @@ pub struct App {
     title: String,
     cursor_icon: CursorIcon,
     ime_area: Rect,
+    system_language: String,
 }
 
 impl App {
@@ -244,8 +245,10 @@ impl App {
             title: String::new(),
             cursor_icon: CursorIcon::Default,
             ime_area: Rect::default(),
+            system_language: "en".to_owned(),
         };
         app.restyle();
+        app.apply_language();
         app.effects.push(Effect::Surface(app.config.appearance.backdrop));
         app
     }
@@ -360,6 +363,21 @@ impl App {
         probe(pid)
     }
 
+    pub fn set_system_language(&mut self, code: &str) {
+        self.system_language = code.to_owned();
+        self.apply_language();
+    }
+
+    pub fn system_language(&self) -> &str {
+        &self.system_language
+    }
+
+    fn apply_language(&mut self) {
+        let code = crate::i18n::resolve(&self.config.appearance.language, &self.system_language);
+        crate::i18n::set_language(code);
+        self.dirty = true;
+    }
+
     pub fn set_ssh(&mut self, command: Option<String>) {
         self.ssh = command;
     }
@@ -451,6 +469,7 @@ impl App {
             self.effects.push(Effect::Surface(config.appearance.backdrop));
         }
         self.config = config;
+        self.apply_language();
         let options = self.options();
         for p in self.panes.values() {
             p.terminal.lock().set_options(options);
@@ -1632,8 +1651,8 @@ impl App {
             self.close_pane(pane);
         } else {
             let text = match code {
-                Some(c) => format!("\r\n\x1b[0m\x1b[2m[Process exited with code {c}. Press any key to close.]\x1b[0m\r\n"),
-                None => "\r\n\x1b[0m\x1b[2m[Process exited. Press any key to close.]\x1b[0m\r\n".to_owned(),
+                Some(c) => format!("\r\n\x1b[0m\x1b[2m{}\x1b[0m\r\n", crate::i18n::tf("[Process exited with code {code}. Press any key to close.]", &[("code", &c.to_string())])),
+                None => format!("\r\n\x1b[0m\x1b[2m{}\x1b[0m\r\n", crate::i18n::t("[Process exited. Press any key to close.]")),
             };
             p.terminal.lock().feed(text.as_bytes());
             self.dirty = true;

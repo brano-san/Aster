@@ -366,3 +366,23 @@ fn a_serial_profile_needs_only_a_name_and_a_port() {
     assert_eq!(p.serial.as_deref(), Some("COM3:9600,8N1"));
     assert!(a.settings.as_ref().unwrap().profiles.iter().any(|r| r.detail == "serial COM3:9600,8N1"));
 }
+
+#[test]
+fn switching_the_language_setting_translates_the_interface_at_once() {
+    let mut a = app();
+    a.run(Action::Settings);
+    typed(&mut a, "language");
+    key(&mut a, Key::Right);
+    assert_eq!(a.config().appearance.language, "en");
+    assert_eq!(saved(&mut a).map(|c| c.appearance.language), Some("en".to_owned()));
+    key(&mut a, Key::Right);
+    assert_eq!(a.config().appearance.language, "ru");
+    assert_eq!(crate::i18n::language(), "ru");
+    let setting = a.settings.as_ref().unwrap().current().unwrap();
+    assert_eq!(a.setting_text(setting), "Русский");
+    assert_eq!(a.shortcut_text(Action::SplitLeft), "Нет");
+    key(&mut a, Key::Right);
+    assert_eq!(crate::i18n::language(), "en", "automatic follows the English system language");
+    assert_eq!(a.setting_text(setting), "Automatic");
+    crate::i18n::set_language("en");
+}

@@ -161,6 +161,7 @@ pub struct Appearance {
     pub dock_always_on_top: bool,
     pub dock_hide_on_blur: bool,
     pub global_hotkey: String,
+    pub language: String,
 }
 
 impl Default for Appearance {
@@ -180,6 +181,7 @@ impl Default for Appearance {
             dock_always_on_top: true,
             dock_hide_on_blur: false,
             global_hotkey: "Ctrl-`".into(),
+            language: "auto".into(),
         }
     }
 }
