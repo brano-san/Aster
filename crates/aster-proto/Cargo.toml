@@ -1,0 +1,10 @@
+[package]
+name = "aster-proto"
+description = "Stream processing for Aster sessions: newlines, input modes, hex view, login scripts, telnet, prompts, path quoting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+regex.workspace = true
