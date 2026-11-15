@@ -10,10 +10,11 @@ use glutin::api::egl::surface::Surface;
 use glutin::config::{Api, ColorBufferType, ConfigSurfaceTypes, ConfigTemplateBuilder, GlConfig};
 use glutin::context::{ContextApi, ContextAttributesBuilder, Robustness, Version};
 use glutin::error::ErrorKind;
+use glutin::platform::x11::X11GlConfigExt;
 use glutin::prelude::*;
 use glutin::surface::{SurfaceAttributesBuilder, SwapInterval, WindowSurface};
 use winit::raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -131,10 +132,85 @@ unsafe fn update(gl: &glow::Context, tex: glow::Texture, slot: Slot, rgba: &[u8]
     );
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Candidate {
+    alpha: u8,
+    transparent: bool,
+    rgb8: bool,
+    samples: u8,
+    depth: u8,
+    stencil: u8,
+}
+
+fn pick(candidates: &[Candidate]) -> Option<usize> {
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.rgb8 && c.samples <= 1)
+        .min_by_key(|(_, c)| (c.depth, c.stencil, !(c.alpha == 8 && c.transparent), c.alpha))
+        .map(|(i, _)| i)
+}
+
+fn transparent(config: &Config) -> bool {
+    config.alpha_size() == 8 && config.supports_transparency() == Some(true)
+}
+
+fn choose(display: &Display, surfaces: ConfigSurfaceTypes) -> Result<Config, PlatformError> {
+    let template = ConfigTemplateBuilder::new()
+        .with_alpha_size(0)
+        .with_depth_size(0)
+        .with_stencil_size(0)
+        .with_api(Api::GLES3)
+        .with_surface_type(surfaces)
+        .build();
+    let rgb8 = Some(ColorBufferType::Rgb { r_size: 8, g_size: 8, b_size: 8 });
+    let mut configs: Vec<Config> = unsafe { display.find_configs(template) }.map_err(err)?.collect();
+    let candidates: Vec<Candidate> = configs
+        .iter()
+        .map(|c| Candidate {
+            alpha: c.alpha_size(),
+            transparent: transparent(c),
+            rgb8: c.color_buffer_type() == rgb8,
+            samples: c.num_samples(),
+            depth: c.depth_size(),
+            stencil: c.stencil_size(),
+        })
+        .collect();
+    let i = pick(&candidates).ok_or_else(|| PlatformError::new(-1, "no 8-bit OpenGL ES 3 config"))?;
+    Ok(configs.swap_remove(i))
+}
+
+thread_local! {
+    static WINDOW_CONFIG: RefCell<Option<(Display, Config)>> = const { RefCell::new(None) };
+}
+
+fn window_config(raw: RawDisplayHandle) -> Result<(Display, Config), PlatformError> {
+    WINDOW_CONFIG.with_borrow_mut(|slot| {
+        if let Some(found) = slot {
+            return Ok(found.clone());
+        }
+        let display = unsafe { Display::new(raw) }.map_err(err)?;
+        let config = choose(&display, ConfigSurfaceTypes::WINDOW)?;
+        *slot = Some((display.clone(), config.clone()));
+        Ok((display, config))
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WindowVisual {
+    pub transparent: bool,
+    pub x11_visual: Option<u32>,
+}
+
+pub(crate) fn window_visual(raw: RawDisplayHandle) -> Option<WindowVisual> {
+    let (_, config) = window_config(raw).map_err(|e| tracing::warn!("window config: {e}")).ok()?;
+    Some(WindowVisual { transparent: transparent(&config), x11_visual: config.x11_visual().map(|v| v.visual_id() as u32) })
+}
+
 impl GlDevice {
     pub fn new(display: RawDisplayHandle) -> Result<Self, PlatformError> {
-        let display = unsafe { Display::new(display) }.map_err(err)?;
-        Self::with_display(display, ConfigSurfaceTypes::WINDOW)
+        let (display, config) = window_config(display)?;
+        Self::with_config(display, config)
     }
 
     pub fn headless() -> Result<Self, PlatformError> {
@@ -145,28 +221,16 @@ impl GlDevice {
             .or(devices.first())
             .ok_or_else(|| PlatformError::new(-1, "no EGL device"))?;
         let display = unsafe { Display::with_device(device, None) }.map_err(err)?;
-        Self::with_display(display, ConfigSurfaceTypes::empty())
+        let config = choose(&display, ConfigSurfaceTypes::empty())?;
+        Self::with_config(display, config)
     }
 
     pub fn config(&self) -> &Config {
         &self.shared.config
     }
 
-    fn with_display(display: Display, surfaces: ConfigSurfaceTypes) -> Result<Self, PlatformError> {
-        let _span = tracing::info_span!("gl_device").entered();
-        let template = ConfigTemplateBuilder::new()
-            .with_alpha_size(0)
-            .with_depth_size(0)
-            .with_stencil_size(0)
-            .with_api(Api::GLES3)
-            .with_surface_type(surfaces)
-            .build();
-        let rgb8 = Some(ColorBufferType::Rgb { r_size: 8, g_size: 8, b_size: 8 });
-        let config = unsafe { display.find_configs(template) }
-            .map_err(err)?
-            .filter(|c| c.color_buffer_type() == rgb8 && c.num_samples() <= 1)
-            .min_by_key(|c| (c.alpha_size(), c.depth_size(), c.stencil_size()))
-            .ok_or_else(|| PlatformError::new(-1, "no 8-bit OpenGL ES 3 config"))?;
+    fn with_config(display: Display, config: Config) -> Result<Self, PlatformError> {
+        let _span = tracing::info_span!("gl_device", transparent = transparent(&config)).entered();
         let attrs = |robustness| {
             ContextAttributesBuilder::new()
                 .with_context_api(ContextApi::Gles(Some(Version::new(3, 0))))
@@ -509,3 +573,7 @@ impl Drop for GlRenderer {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../test/gl.rs"]
+mod tests;
