@@ -2,6 +2,7 @@
 
 mod conpty;
 mod d3d;
+mod process;
 mod dwrite;
 mod shells;
 mod window;
@@ -64,6 +65,10 @@ impl Platform for Windows {
 
     fn home_dir() -> Option<PathBuf> {
         std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+
+    fn process_cwd(pid: u32) -> Option<String> {
+        process::current_directory(pid)
     }
 
     fn ssh_command() -> Option<String> {

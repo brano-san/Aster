@@ -216,6 +216,23 @@ fn new_panes_start_in_the_working_directory_of_the_focused_pane() {
 }
 
 #[test]
+fn a_shell_that_does_not_report_its_directory_is_asked_through_its_process() {
+    let (mut a, mut g) = app();
+    a.set_cwd_probe(Arc::new(|pid| (pid == 42).then(|| r"E:\probed".to_owned())));
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let pane = spawns(&a.take_effects())[0].0;
+    a.set_pane_pid(pane, 42);
+    key(&mut a, Key::Char('D'), CTRL_SHIFT);
+    a.frame(&mut g, false);
+    assert_eq!(spawns(&a.take_effects())[0].1.cwd.as_deref(), Some(r"E:\probed"));
+    a.panes[&pane].terminal.lock().feed(b"\x1b]7;file://pc/D:/work\x07");
+    let snapshot = a.snapshot();
+    let text = format!("{snapshot:?}");
+    assert!(text.contains(r"D:\\work") && text.contains(r"E:\\probed"), "{text}");
+}
+
+#[test]
 fn wsl_profiles_receive_a_unix_directory_through_their_cd_argument() {
     let wsl = Profile::new("local:wsl:u", "WSL", "wsl.exe", &["-d", "Ubuntu", "--cd", "~"]);
     let (args, cwd) = inherit_cwd(&wsl, Some("/srv/app".into()), Some(r"C:\home".into()));

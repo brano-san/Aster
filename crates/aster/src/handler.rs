@@ -158,6 +158,10 @@ impl<P: Platform> Handler<P> {
                 };
                 match P::spawn(&req) {
                     Ok(spawned) => {
+                        let pid = spawned.pty.pid();
+                        if let Some(s) = self.windows.get_mut(&id) {
+                            s.app.set_pane_pid(pane, pid);
+                        }
                         let waker = self.waker.clone();
                         let session = Session::start(id, pane, spawned, terminal, move || waker.wake(), self.exit_tx.clone());
                         self.sessions.insert((id, pane), session);
@@ -281,6 +285,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let (w, h) = window.size();
         app.set_viewport(w, h, window.scale());
         app.set_ssh(self.ssh.clone());
+        app.set_cwd_probe(Arc::new(P::process_cwd));
         let restored = (!self.pending.is_empty()).then(|| self.pending.remove(0)).is_some_and(|state| app.restore(&state));
         if !restored {
             app.open_default_tab();

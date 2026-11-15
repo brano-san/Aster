@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 pub type Shared = Arc<FairMutex<Terminal>>;
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
+pub type CwdProbe = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
 
 pub const BLINK: Duration = Duration::from_millis(530);
 
@@ -58,6 +59,7 @@ pub(crate) struct Pane {
     pub exited: Option<Option<u32>>,
     pub pending: Option<Launch>,
     pub queued: Vec<u8>,
+    pub pid: Option<u32>,
     pub size: Size,
     pub scroll_acc: f32,
 }
@@ -113,6 +115,7 @@ pub struct App {
     wake: Wake,
     home: Option<String>,
     ssh: Option<String>,
+    cwd_probe: Option<CwdProbe>,
     pub(crate) mouse: (f32, f32),
     pub(crate) drag: Drag,
     last_click: Option<(Instant, f32, f32, u8)>,
@@ -164,6 +167,7 @@ impl App {
             wake,
             home,
             ssh: None,
+            cwd_probe: None,
             mouse: (-1.0, -1.0),
             drag: Drag::None,
             last_click: None,
@@ -185,6 +189,29 @@ impl App {
         };
         app.restyle();
         app
+    }
+
+    pub fn set_cwd_probe(&mut self, probe: CwdProbe) {
+        self.cwd_probe = Some(probe);
+    }
+
+    pub fn set_pane_pid(&mut self, pane: PaneId, pid: u32) {
+        if let Some(p) = self.panes.get_mut(&pane) {
+            p.pid = Some(pid);
+        }
+    }
+
+    pub(crate) fn pane_cwd(&self, id: PaneId) -> Option<String> {
+        let pane = self.panes.get(&id)?;
+        if let Some(dir) = pane.terminal.lock().cwd() {
+            return Some(dir.to_owned());
+        }
+        let remote = pane.profile.id.starts_with("ssh:") || pane.profile.id.starts_with("local:wsl");
+        if remote {
+            return None;
+        }
+        let (probe, pid) = (self.cwd_probe.as_ref()?, pane.pid?);
+        probe(pid)
     }
 
     pub fn set_ssh(&mut self, command: Option<String>) {
@@ -304,7 +331,7 @@ impl App {
     }
 
     fn new_pane(&mut self, profile: Profile) -> PaneId {
-        let inherited = self.focused_pane().and_then(|p| self.panes.get(&p)).and_then(|p| p.terminal.lock().cwd().map(str::to_owned));
+        let inherited = self.focused_pane().and_then(|p| self.pane_cwd(p));
         self.new_pane_in(profile, inherited)
     }
 
@@ -329,7 +356,7 @@ impl App {
         }
         let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
         let launch = Launch { command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
-        self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), size, scroll_acc: 0.0 });
+        self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0 });
         id
     }
 

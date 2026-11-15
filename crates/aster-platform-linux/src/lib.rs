@@ -47,6 +47,10 @@ impl Platform for Linux {
         std::env::var_os("HOME").map(PathBuf::from)
     }
 
+    fn process_cwd(pid: u32) -> Option<String> {
+        std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
+    }
+
     fn ssh_command() -> Option<String> {
         std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("ssh")).find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
     }
