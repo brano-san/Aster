@@ -55,6 +55,18 @@ fn run<P: Platform>() -> Result<(), aster_platform::PlatformError> {
     windows.run(WindowOptions { title: "Aster".into(), placement, dark }, handler)
 }
 
+fn main() {
+    tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(tracing::Level::INFO).init();
+    #[cfg(windows)]
+    let result = run::<aster_platform_windows::Windows>();
+    #[cfg(not(windows))]
+    let result: Result<(), aster_platform::PlatformError> = Err(aster_platform::PlatformError::new(-1, "this platform is not supported yet"));
+    if let Err(e) = result {
+        tracing::error!("{e}");
+        std::process::exit(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,17 +77,5 @@ mod tests {
         assert_eq!(parse_placement(&format_placement(&p)), Some(p));
         assert_eq!(parse_placement("1 2 3"), None);
         assert_eq!(parse_placement(""), None);
-    }
-}
-
-fn main() {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(tracing::Level::INFO).init();
-    #[cfg(windows)]
-    let result = run::<aster_platform_windows::Windows>();
-    #[cfg(not(windows))]
-    let result: Result<(), aster_platform::PlatformError> = Err(aster_platform::PlatformError::new(-1, "this platform is not supported yet"));
-    if let Err(e) = result {
-        tracing::error!("{e}");
-        std::process::exit(1);
     }
 }
