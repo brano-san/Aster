@@ -74,3 +74,21 @@ fn toggles_persist_in_the_config_and_bad_regexes_are_flagged() {
     }
     assert!(a.search.as_ref().unwrap().missing);
 }
+
+#[test]
+fn dense_matches_draw_marks_along_the_right_edge() {
+    let (mut a, mut g) = ready();
+    a.open_search();
+    for c in "needle".chars() {
+        a.on_event(Event::Char(c));
+    }
+    let mut text = String::new();
+    for i in 0..3000 {
+        text.push_str(&format!("needle {i}\r\n"));
+    }
+    a.focused_terminal().unwrap().lock().feed(text.as_bytes());
+    a.frame(&mut g, false);
+    let pane = a.layout.panes[0].1;
+    let edge = g.dl.instances.iter().filter(|i| i.rect[0] >= pane.x + pane.w - 7.0 && i.rect[2] <= 7.0 && i.rect[3] <= 5.0).count();
+    assert!(edge > 50, "marks drawn: {edge}, count {}", a.search.as_ref().unwrap().count);
+}

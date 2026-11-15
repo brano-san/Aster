@@ -11,6 +11,7 @@ pub use alacritty_terminal::term::cell::{Cell, Flags};
 pub use alacritty_terminal::term::TermMode;
 pub use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 pub use palette::Palette;
+pub use search::{SearchStatus, VisibleMatch};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
@@ -102,16 +103,8 @@ pub struct Terminal {
     seq: u64,
     sniffer: osc::Sniffer,
     cwd: Option<String>,
-    search: Option<alacritty_terminal::term::search::RegexSearch>,
-    found: Option<alacritty_terminal::term::search::Match>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VisibleMatch {
-    pub line: usize,
-    pub start: usize,
-    pub end: usize,
-    pub current: bool,
+    search: Option<search::Search>,
+    scrollback: usize,
 }
 
 pub struct VisibleCell<'a> {
@@ -133,76 +126,51 @@ impl Terminal {
     pub fn new(size: Size, options: Options, sink: Sink) -> Self {
         let cell = Arc::new(AtomicU32::new(0));
         let listener = Listener { sink, cell: cell.clone() };
-        Self { term: Term::new(config(options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, sniffer: osc::Sniffer::default(), cwd: None, search: None, found: None }
+        Self { term: Term::new(config(options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, sniffer: osc::Sniffer::default(), cwd: None, search: None, scrollback: options.scrollback }
     }
 
     pub fn set_search(&mut self, query: &str, options: search::SearchOptions) -> Result<(), String> {
-        self.found = None;
         self.search = None;
         self.bump();
         if query.is_empty() {
             return Ok(());
         }
-        self.search = Some(search::compile(query, options)?);
+        let mut found = search::Search::new(search::compile(query, options)?);
+        found.refresh(&self.term);
+        self.search = Some(found);
         Ok(())
     }
 
     pub fn clear_search(&mut self) {
         self.search = None;
-        self.found = None;
         self.bump();
     }
 
     pub fn search_step(&mut self, older: bool) -> bool {
-        use alacritty_terminal::index::Direction;
-        let Some(mut regex) = self.search.take() else { return false };
-        let (origin, direction, side) = match (&self.found, older) {
-            (Some(m), true) => (*m.start(), Direction::Left, Side::Left),
-            (Some(m), false) => (*m.end(), Direction::Right, Side::Right),
-            (None, _) => (Point::new(self.term.bottommost_line(), Column(self.size.cols - 1)), Direction::Left, Side::Right),
-        };
-        let origin = match (&self.found, direction) {
-            (Some(_), Direction::Left) => origin.sub(&self.term, alacritty_terminal::index::Boundary::None, 1),
-            (Some(_), Direction::Right) => origin.add(&self.term, alacritty_terminal::index::Boundary::None, 1),
-            _ => origin,
-        };
-        let found = self.term.search_next(&mut regex, origin, direction, side, None);
-        self.search = Some(regex);
+        let Some(found) = self.search.as_mut() else { return false };
+        found.refresh(&self.term);
+        let Some(point) = found.step(older) else { return false };
+        self.term.scroll_to_point(point);
         self.bump();
-        match found {
-            Some(m) => {
-                self.term.scroll_to_point(*m.start());
-                self.found = Some(m);
-                true
-            }
-            None => false,
-        }
+        true
+    }
+
+    pub fn search_status(&mut self) -> Option<SearchStatus> {
+        let found = self.search.as_mut()?;
+        found.refresh(&self.term);
+        Some(found.status())
     }
 
     pub fn visible_matches(&mut self) -> Vec<VisibleMatch> {
-        use alacritty_terminal::index::Direction;
-        use alacritty_terminal::term::search::RegexIter;
-        let Some(mut regex) = self.search.take() else { return Vec::new() };
-        let offset = self.display_offset() as i32;
-        let top = Point::new(Line(-offset), Column(0));
-        let bottom = Point::new(Line(self.size.rows as i32 - 1 - offset), Column(self.size.cols - 1));
-        let current = self.found.clone();
-        let mut out = Vec::new();
-        for m in RegexIter::new(top, bottom, Direction::Right, &self.term, &mut regex).take(2000) {
-            let (s, e) = (*m.start(), *m.end());
-            let is_current = current.as_ref().is_some_and(|c| *c.start() == s && *c.end() == e);
-            for line in s.line.0..=e.line.0 {
-                let row = line + offset;
-                if row < 0 || row >= self.size.rows as i32 {
-                    continue;
-                }
-                let start = if line == s.line.0 { s.column.0 } else { 0 };
-                let end = if line == e.line.0 { e.column.0 + 1 } else { self.size.cols };
-                out.push(VisibleMatch { line: row as usize, start, end, current: is_current });
-            }
-        }
-        self.search = Some(regex);
-        out
+        let Some(found) = self.search.as_mut() else { return Vec::new() };
+        found.refresh(&self.term);
+        found.visible(self.term.grid().display_offset(), self.size.rows, self.size.cols)
+    }
+
+    pub fn search_marks(&mut self) -> Vec<(f32, bool)> {
+        let Some(found) = self.search.as_mut() else { return Vec::new() };
+        found.refresh(&self.term);
+        found.marks(self.term.grid().history_size(), self.size.rows)
     }
 
     pub fn cwd(&self) -> Option<&str> {
@@ -226,10 +194,12 @@ impl Terminal {
     }
 
     pub fn set_options(&mut self, options: Options) {
+        self.scrollback = options.scrollback;
         self.term.set_options(config(options));
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        let anchor = self.search.as_ref().map(|_| search::Search::anchor(&self.term, self.scrollback));
         let cwd = &mut self.cwd;
         self.sniffer.feed(bytes, |payload| {
             if let Some(dir) = osc::cwd(payload) {
@@ -237,6 +207,9 @@ impl Terminal {
             }
         });
         self.parser.advance(&mut self.term, bytes);
+        if let (Some(found), Some(anchor)) = (self.search.as_mut(), anchor) {
+            found.after_feed(&self.term, anchor);
+        }
         self.bump();
     }
 
@@ -256,6 +229,9 @@ impl Terminal {
         if size != self.size {
             self.size = size;
             self.term.resize(size);
+            if let Some(found) = self.search.as_mut() {
+                found.reset_index();
+            }
             self.bump();
         }
     }
@@ -361,6 +337,9 @@ impl Terminal {
 
     pub fn clear_history(&mut self) {
         self.term.grid_mut().clear_history();
+        if let Some(found) = self.search.as_mut() {
+            found.reset_index();
+        }
         self.bump();
     }
 
@@ -393,3 +372,7 @@ fn config(options: Options) -> Config {
 #[cfg(test)]
 #[path = "../test/terminal.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../test/search_stream.rs"]
+mod search_stream;

@@ -256,10 +256,13 @@ impl App {
         let theme = self.theme;
         let terminal = pane.terminal.clone();
         let mut t = terminal.lock();
-        let matches = if self.search.as_ref().is_some_and(|s| s.pane == id) { t.visible_matches() } else { Vec::new() };
-        if !matches.is_empty() {
-            if let Some(bar) = self.search.as_mut() {
-                bar.missing = false;
+        let searching = self.search.as_ref().is_some_and(|s| s.pane == id);
+        let (matches, marks) = if searching { (t.visible_matches(), t.search_marks()) } else { (Vec::new(), Vec::new()) };
+        if searching {
+            if let (Some(bar), Some(status)) = (self.search.as_mut(), t.search_status()) {
+                bar.current = status.current;
+                bar.count = status.count;
+                bar.missing = !bar.query.is_empty() && status.count == 0;
             }
         }
         let overrides = *t.colors();
@@ -283,8 +286,13 @@ impl App {
             }
         });
         for mt in &matches {
-            let color = if mt.current { Color::rgb(0xF0A030).alpha(0xC0) } else { Color::rgb(0xE5C07B).alpha(0x60) };
-            g.dl.rect(cell_rect(mt.line, mt.start, mt.end.saturating_sub(mt.start).max(1)), color);
+            let r = cell_rect(mt.line, mt.start, mt.end.saturating_sub(mt.start).max(1));
+            if mt.current {
+                g.dl.rect(r, rgb(selection_bg));
+                g.dl.outline(r, Color::rgb(0xF0A030), 0.0, (1.0 * s).round().max(1.0));
+            } else {
+                g.dl.rect(r, Color::rgb(0xE5C07B).alpha(0x58));
+            }
         }
         let cursor = t.cursor();
         let show_cursor = cursor.shape != CursorShape::Hidden;
@@ -379,6 +387,24 @@ impl App {
             let bw = (4.0 * s).round();
             g.dl.round_rect(Rect::new(track.right() - bw - 2.0 * s, ty, bw, th), theme.text_dim.alpha(0x90), bw / 2.0);
         }
+        if !marks.is_empty() {
+            let track = rect.inset(0.0, (4.0 * s).round());
+            let (mw, mh) = ((6.0 * s).round(), (2.0 * s).round().max(2.0));
+            let mut last = f32::MIN;
+            let mut current = None;
+            for (frac, is_current) in &marks {
+                let y = (track.y + frac * (track.h - mh)).round();
+                if *is_current {
+                    current = Some(y);
+                } else if y > last {
+                    g.dl.rect(Rect::new(track.right() - mw, y, mw, mh), Color::rgb(0xE5C07B).alpha(0xC0));
+                    last = y;
+                }
+            }
+            if let Some(y) = current {
+                g.dl.rect(Rect::new(track.right() - mw, y - 1.0, mw, mh + 2.0), Color::rgb(0xF0A030));
+            }
+        }
         g.dl.set_clip(None);
         if focused {
             self.set_ime_area(cr);
@@ -404,7 +430,17 @@ impl App {
         if bar.query.is_empty() {
             g.text(geo.field.x, y, "Search", ui, theme.text_dim, geo.field.w);
         }
-        let w = g.text(geo.field.x, y, &bar.query, ui, theme.text, geo.field.w);
+        let counter = (!bar.query.is_empty() && !bar.error).then(|| match bar.current {
+            Some(c) => format!("{c}/{}", bar.count),
+            None => format!("{}", bar.count),
+        });
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let cw = counter.as_ref().map_or(0.0, |c| g.measure(c, small));
+        if let Some(c) = &counter {
+            let cy = baseline(g, geo.field, small);
+            g.text(geo.field.right() - cw, cy, c, small, if bar.missing { Color::rgb(0xD9534F) } else { theme.text_dim }, cw + 1.0);
+        }
+        let w = g.text(geo.field.x, y, &bar.query, ui, theme.text, (geo.field.w - cw - 8.0 * s).max(0.0));
         let caret_h = (16.0 * s).round();
         g.dl.rect(Rect::new(geo.field.x + w + 1.0, geo.field.y + ((geo.field.h - caret_h) / 2.0).round(), (1.0 * s).round().max(1.0), caret_h), theme.accent);
         let options = self.config.terminal.search_options;
