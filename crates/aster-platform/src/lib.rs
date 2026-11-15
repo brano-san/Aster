@@ -1,0 +1,142 @@
+use aster_core::input::{CursorIcon, Event, HitArea};
+use aster_core::profile::Profile;
+use aster_gfx::atlas::Slot;
+use aster_gfx::render::{DrawList, Rect};
+use aster_gfx::text::TextBackend;
+use std::fmt;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone)]
+pub struct PlatformError {
+    pub code: i64,
+    pub message: String,
+}
+
+impl PlatformError {
+    pub fn new(code: i64, message: impl Into<String>) -> Self {
+        Self { code, message: message.into() }
+    }
+}
+
+impl fmt::Display for PlatformError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} (0x{:08X})", self.message, self.code as u32)
+    }
+}
+
+impl std::error::Error for PlatformError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Placement {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub maximized: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct WindowOptions {
+    pub title: String,
+    pub placement: Option<Placement>,
+    pub dark: bool,
+}
+
+pub type WindowId = u64;
+
+pub trait Waker: Clone + Send + Sync + 'static {
+    fn wake(&self);
+}
+
+pub trait Window {
+    fn id(&self) -> WindowId;
+    fn size(&self) -> (u32, u32);
+    fn scale(&self) -> f32;
+    fn request_redraw(&self);
+    fn set_title(&self, title: &str);
+    fn set_cursor(&self, cursor: CursorIcon);
+    fn minimize(&self);
+    fn toggle_maximize(&self);
+    fn is_maximized(&self) -> bool;
+    fn toggle_fullscreen(&self);
+    fn is_fullscreen(&self) -> bool;
+    fn close(&self);
+    fn activate(&self);
+    fn open_window(&self, opts: WindowOptions);
+    fn placement(&self) -> Placement;
+    fn clipboard_text(&self) -> Option<String>;
+    fn set_clipboard_text(&self, text: &str);
+    fn set_ime_area(&self, area: Rect);
+    fn is_dark_mode(&self) -> bool;
+    fn set_dark(&self, dark: bool);
+    fn set_timer(&self, ms: u32);
+    fn request_attention(&self);
+}
+
+pub trait WindowHandler<W: WindowSystem> {
+    fn created(&mut self, window: &W::Window);
+    fn event(&mut self, window: &W::Window, event: Event);
+    fn hit_test(&mut self, window: &W::Window, x: f32, y: f32) -> HitArea;
+    fn redraw(&mut self, window: &W::Window);
+    fn woken(&mut self, window: &W::Window);
+    fn destroyed(&mut self, window: &W::Window);
+}
+
+pub trait WindowSystem: Sized + 'static {
+    type Window: Window;
+    type Waker: Waker;
+    fn new() -> Result<Self, PlatformError>;
+    fn waker(&self) -> Self::Waker;
+    fn run<H: WindowHandler<Self>>(self, first: WindowOptions, handler: H) -> Result<(), PlatformError>;
+}
+
+#[derive(Debug)]
+pub enum RenderError {
+    DeviceLost,
+    Other(PlatformError),
+}
+
+pub trait Renderer: Sized {
+    type Window;
+    type Device: Send + 'static;
+    fn device(software: bool) -> Result<Self::Device, PlatformError>;
+    fn new(device: &Self::Device, window: &Self::Window, atlas_size: u32) -> Result<Self, PlatformError>;
+    fn resize(&mut self, width: u32, height: u32);
+    fn upload(&mut self, slot: Slot, rgba: &[u8]);
+    fn render(&mut self, list: &DrawList) -> Result<(), RenderError>;
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpawnRequest {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub env: Vec<(String, String)>,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+pub trait Pty: Send + Sync {
+    fn resize(&self, cols: u16, rows: u16);
+    fn kill(&self);
+    fn pid(&self) -> u32;
+}
+
+pub struct Spawned {
+    pub pty: Box<dyn Pty>,
+    pub reader: Box<dyn Read + Send>,
+    pub writer: Box<dyn Write + Send>,
+    pub wait: Box<dyn FnOnce() -> Option<u32> + Send>,
+}
+
+pub trait Platform: 'static {
+    type Windows: WindowSystem;
+    type Renderer: Renderer<Window = <Self::Windows as WindowSystem>::Window>;
+    type Text: TextBackend;
+    fn text() -> Result<Self::Text, PlatformError>;
+    fn shells() -> Vec<Profile>;
+    fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError>;
+    fn config_dir() -> Option<PathBuf>;
+    fn home_dir() -> Option<PathBuf>;
+}
