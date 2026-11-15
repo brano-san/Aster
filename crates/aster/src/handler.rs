@@ -153,7 +153,7 @@ impl<P: Platform> Handler<P> {
         match effect {
             Effect::Spawn { pane, launch, terminal } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
                 let destination = launch.ssh.unwrap_or_default();
-                let remote = crate::remote::connect(&destination, launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), P::home_dir());
+                let remote = crate::remote::connect(&destination, launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), P::home_dir(), self.config.ssh.share_connections);
                 let (files, tx, waker) = (remote.files, self.file_tx.clone(), self.waker.clone());
                 let spawned = std::thread::Builder::new().name(format!("aster-files-{pane}")).spawn(move || {
                     for reply in files {

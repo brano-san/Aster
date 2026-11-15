@@ -47,10 +47,17 @@ pub enum SshClient {
     System,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Ssh {
     pub client: SshClient,
+    pub share_connections: bool,
+}
+
+impl Default for Ssh {
+    fn default() -> Self {
+        Self { client: SshClient::Native, share_connections: true }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -97,7 +97,7 @@ pub fn file_request(request: FileRequest, downloads: PathBuf) -> sftp::Request {
     }
 }
 
-pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, home: Option<PathBuf>) -> Remote {
+pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, home: Option<PathBuf>, share: bool) -> Remote {
     let home = home.unwrap_or_default();
     let req = Request {
         destination: destination.to_owned(),
@@ -108,6 +108,7 @@ pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, 
         home,
         user: local_user(),
         use_agent: true,
+        share,
     };
     let conn = client::start(req);
     let exit = conn.exit;

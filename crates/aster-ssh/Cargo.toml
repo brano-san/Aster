@@ -11,5 +11,5 @@ aster-proto.workspace = true
 crossbeam-channel.workspace = true
 russh = { workspace = true, features = ["ring", "rsa", "flate2"] }
 russh-sftp.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "process", "io-util", "time", "sync", "macros", "fs"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "process", "io-util", "time", "sync", "macros", "fs"] }
 tracing.workspace = true

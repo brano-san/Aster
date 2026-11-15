@@ -109,3 +109,50 @@ fn a_jump_host_tunnels_to_the_target_and_each_hop_authenticates() {
     pane.send("exit\r");
     assert_eq!(pane.exit(), 7);
 }
+
+fn shared(port: u16, dir: PathBuf) -> Pane {
+    let mut req = request(format!("ann@127.0.0.1:{port}"), dir);
+    req.share = true;
+    Pane { conn: start(req), seen: String::new() }
+}
+
+#[test]
+fn tabs_to_the_same_host_share_one_login_until_the_last_one_closes() {
+    let (port, _) = serve();
+    let dir = temp_ssh_dir();
+    let mut first = shared(port, dir.clone());
+    first.wait_for("(yes/no)? ");
+    first.send("yes\r");
+    first.wait_for("password: ");
+    first.send("secret\r");
+    first.wait_for("welcome");
+
+    let mut second = shared(port, dir.clone());
+    second.wait_for("welcome");
+    assert!(!second.seen.contains("password"), "the second tab reuses the login: {:?}", second.seen);
+
+    first.send("exit\r");
+    assert_eq!(first.exit(), 7);
+    second.send("still\r");
+    second.wait_for("got:still");
+    second.conn.input.send(Input::Close).unwrap();
+    assert_eq!(second.exit(), 0);
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let mut third = shared(port, dir);
+    third.wait_for("password: ");
+}
+
+#[test]
+fn unshared_tabs_each_log_in() {
+    let (port, _) = serve();
+    let dir = temp_ssh_dir();
+    let mut first = connect_to(port, dir.clone());
+    first.wait_for("(yes/no)? ");
+    first.send("yes\r");
+    first.wait_for("password: ");
+    first.send("secret\r");
+    first.wait_for("welcome");
+    let mut second = connect_to(port, dir);
+    second.wait_for("password: ");
+}
