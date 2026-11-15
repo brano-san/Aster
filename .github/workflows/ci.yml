@@ -19,9 +19,23 @@ jobs:
       - run: cargo build --workspace --release
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          cargo build --profile dist -p aster
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} does not match the workspace version $version" }
+          New-Item -ItemType Directory -Force target/packages | Out-Null
+          Compress-Archive -Path target/dist/aster.exe, LICENSE, README.md -DestinationPath "target/packages/aster-$version-x86_64-windows.zip"
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: aster-windows
+          path: target/packages/*.zip
+          if-no-files-found: error
 
   linux:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -34,6 +48,24 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cargo build --profile dist -p aster
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version"
+            exit 1
+          fi
+          name="aster-$version-x86_64-linux"
+          mkdir -p "target/packages/$name"
+          cp target/dist/aster LICENSE README.md "target/packages/$name/"
+          tar -C target/packages -czf "target/packages/$name.tar.gz" "$name"
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v7
+        with:
+          name: aster-linux
+          path: target/packages/*.tar.gz
+          if-no-files-found: error
 
   deps-isolation:
     runs-on: ubuntu-24.04
@@ -52,3 +84,27 @@ jobs:
             fi
           done
           exit "$status"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, deps-isolation]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: aster-*
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" *.zip *.tar.gz --clobber
+          elif [ -f "docs/releases/${GITHUB_REF_NAME#v}.md" ]; then
+            gh release create "$GITHUB_REF_NAME" *.zip *.tar.gz --title "Aster ${GITHUB_REF_NAME#v}" --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md"
+          else
+            gh release create "$GITHUB_REF_NAME" *.zip *.tar.gz --title "Aster ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
