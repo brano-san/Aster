@@ -6,7 +6,9 @@ use crate::profile::Profile;
 use std::sync::Arc;
 
 fn app() -> App {
-    let profiles = vec![Profile::new("local:a", "Alpha", "a.exe", &[]), Profile::new("local:b", "Beta", "b.exe", &[])];
+    let mut alpha = Profile::new("local:a", "Alpha", "a.exe", &[]);
+    alpha.env.insert("MARK".into(), "1".into());
+    let profiles = vec![alpha, Profile::new("local:b", "Beta", "b.exe", &[])];
     let mut a = App::new(Config::default(), profiles, true, None, Arc::new(|| {}));
     a.set_viewport(1000, 700, 1.0);
     a
@@ -256,4 +258,94 @@ fn the_settings_shortcut_itself_can_be_captured() {
     a.on_event(Event::Key { key: Key::Char(','), mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true });
     assert!(a.settings_open());
     assert_eq!(a.shortcut_text(Action::Settings), "Ctrl-,");
+}
+
+fn select_profile(a: &mut App, name: &str) {
+    a.run(Action::Settings);
+    let page = a.settings.as_ref().unwrap();
+    let at = page.shown.iter().position(|&i| match page.profile_at(i) {
+        Some(p) => p.name == name,
+        None => name.is_empty() && page.is_new_profile(i),
+    }).expect("a profile row");
+    a.settings.as_mut().unwrap().selected = at;
+}
+
+fn ctrl(k: Key) -> Event {
+    Event::Key { key: k, mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true }
+}
+
+#[test]
+fn arguments_split_on_spaces_and_respect_quotes() {
+    assert_eq!(split_args(r#"-NoLogo -File "C:\My Scripts\a.ps1" ''"#), ["-NoLogo", "-File", r"C:\My Scripts\a.ps1", ""]);
+    assert_eq!(join_args(&["-d".into(), "My Distro".into()]), r#"-d "My Distro""#);
+}
+
+#[test]
+fn a_detected_profile_is_copied_into_an_editable_custom_one() {
+    let mut a = app();
+    select_profile(&mut a, "Alpha");
+    key(&mut a, Key::Enter);
+    let editor = a.settings.as_ref().unwrap().editor.clone().expect("editor");
+    assert_eq!(editor.fields[0], "Alpha (copy)");
+    assert_eq!(editor.original, None);
+    key(&mut a, Key::Tab);
+    key(&mut a, Key::Tab);
+    typed(&mut a, r#"-l "two words""#);
+    key(&mut a, Key::Tab);
+    typed(&mut a, r"D:\work");
+    a.on_event(ctrl(Key::Enter));
+    let config = saved(&mut a).expect("saved");
+    let custom = config.profiles.iter().find(|p| p.name == "Alpha (copy)").expect("custom profile");
+    assert_eq!(custom.id, "custom:alpha-copy");
+    assert_eq!(custom.args, ["-l", "two words"]);
+    assert_eq!(custom.cwd.as_deref(), Some(r"D:\work"));
+    assert_eq!(custom.env.get("MARK").map(String::as_str), Some("1"), "the copy keeps the environment of its source");
+    let page = a.settings.as_ref().unwrap();
+    assert!(page.editor.is_none());
+    assert_eq!(page.profile_at(page.shown[page.selected]).map(|p| p.custom), Some(true));
+}
+
+#[test]
+fn a_new_ssh_profile_needs_only_a_name_and_a_destination() {
+    let mut a = app();
+    select_profile(&mut a, "");
+    key(&mut a, Key::Enter);
+    a.on_event(ctrl(Key::Enter));
+    assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "a nameless profile is refused");
+    typed(&mut a, "Prod");
+    for _ in 0..4 {
+        key(&mut a, Key::Tab);
+    }
+    typed(&mut a, "deploy@prod");
+    key(&mut a, Key::Enter);
+    let config = saved(&mut a).expect("saved");
+    let p = config.profiles.iter().find(|p| p.name == "Prod").unwrap();
+    assert_eq!((p.ssh.as_deref(), p.command.as_str(), p.args.as_slice()), (Some("deploy@prod"), "ssh", &["deploy@prod".to_owned()][..]));
+}
+
+#[test]
+fn ctrl_enter_makes_a_profile_the_default_and_custom_ones_delete_after_a_second_press() {
+    let mut a = app();
+    select_profile(&mut a, "Beta");
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(a.config().terminal.profile, "local:b");
+    assert!(a.settings.as_ref().unwrap().profiles.iter().any(|p| p.default && p.name == "Beta"));
+    key(&mut a, Key::Delete);
+    assert!(a.settings.as_ref().unwrap().notice.as_deref().is_some_and(|n| n.contains("cannot be deleted")));
+
+    select_profile(&mut a, "");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "Mine");
+    key(&mut a, Key::Tab);
+    typed(&mut a, "bash");
+    a.on_event(ctrl(Key::Enter));
+    saved(&mut a);
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!(page.profile_at(page.shown[page.selected]).map(|p| p.name.as_str()), Some("Mine"));
+    a.on_event(ctrl(Key::Enter));
+    key(&mut a, Key::Delete);
+    assert!(a.config().profiles.iter().any(|p| p.name == "Mine"), "the first press only asks");
+    key(&mut a, Key::Delete);
+    assert!(!a.config().profiles.iter().any(|p| p.name == "Mine"));
+    assert_eq!(a.config().terminal.profile, "", "deleting the default profile falls back to automatic");
 }
