@@ -1,7 +1,7 @@
 use crate::err;
 use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Preedit};
 use aster_gfx::render::Rect;
-use aster_platform::{Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
+use aster_platform::{dock_rect, DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_USE_IMMERSIVE_DARK_MODE};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromRect, MonitorFromWindow, ScreenToClient, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, ScreenToClient, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
@@ -26,6 +26,7 @@ const WM_WAKE: u32 = WM_APP + 1;
 const WM_DESTROY_REQUEST: u32 = WM_APP + 2;
 const WM_OPEN_WINDOW: u32 = WM_APP + 3;
 const TIMER_ID: usize = 1;
+const HOTKEY_ID: i32 = 1;
 
 #[derive(Default)]
 pub(crate) struct FrameSync {
@@ -310,6 +311,72 @@ impl Window for Win32Window {
     fn set_timer(&self, ms: u32) {
         unsafe { SetTimer(Some(self.hwnd()), TIMER_ID, ms.max(1), None) };
     }
+
+    fn set_visible(&self, visible: bool) {
+        let h = self.hwnd();
+        unsafe {
+            if visible {
+                let _ = ShowWindow(h, if IsIconic(h).as_bool() { SW_RESTORE } else { SW_SHOW });
+                let _ = SetForegroundWindow(h);
+            } else {
+                let _ = ShowWindow(h, SW_HIDE);
+            }
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        let h = self.hwnd();
+        unsafe { IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() }
+    }
+
+    fn is_foreground(&self) -> bool {
+        unsafe { GetForegroundWindow() == self.hwnd() }
+    }
+
+    fn dock(&self, spec: Option<DockSpec>) {
+        let h = self.hwnd();
+        unsafe {
+            let Some(spec) = spec else {
+                let _ = SetWindowPos(h, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                return;
+            };
+            if IsZoomed(h).as_bool() {
+                let _ = ShowWindow(h, SW_RESTORE);
+            }
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if !GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+                return;
+            }
+            let r = mi.rcWork;
+            let (x, y, w, hgt) = dock_rect((r.left, r.top, r.right - r.left, r.bottom - r.top), spec);
+            let after = if spec.on_top { HWND_TOPMOST } else { HWND_NOTOPMOST };
+            let _ = SetWindowPos(h, Some(after), x, y, w, hgt, SWP_NOACTIVATE);
+        }
+    }
+
+    fn set_global_hotkey(&self, key: Option<(Key, Mods)>) -> bool {
+        unsafe {
+            let _ = UnregisterHotKey(Some(self.hub), HOTKEY_ID);
+            let Some((key, mods)) = key else { return true };
+            let Some(vk) = vk_of(key) else { return false };
+            let mut m = MOD_NOREPEAT;
+            if mods.ctrl {
+                m |= MOD_CONTROL;
+            }
+            if mods.alt {
+                m |= MOD_ALT;
+            }
+            if mods.shift {
+                m |= MOD_SHIFT;
+            }
+            if mods.meta {
+                m |= MOD_WIN;
+            }
+            RegisterHotKey(Some(self.hub), HOTKEY_ID, m, vk).is_ok()
+        }
+    }
 }
 
 fn fit_rect(r: RECT, area: RECT) -> RECT {
@@ -561,7 +628,7 @@ thread_local! {
 }
 
 unsafe extern "system" fn hub_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg != WM_WAKE && msg != WM_OPEN_WINDOW {
+    if msg != WM_WAKE && msg != WM_OPEN_WINDOW && msg != WM_HOTKEY {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
     match HUB.get() {
@@ -578,6 +645,15 @@ unsafe fn hub_dispatch<H: WindowHandler<Win32>>(ctx: *const (), msg: u32, lp: LP
         sh.wake_pending.store(false, Ordering::Release);
         sh.woken.set(true);
         sh.flush();
+        return;
+    }
+    if msg == WM_HOTKEY {
+        if let Some(n) = sh.nodes().first() {
+            n.send(Event::GlobalHotkey);
+            if n.window.redraw.get() {
+                n.redraw_now();
+            }
+        }
         return;
     }
     if sh.handler.try_borrow_mut().is_err() {
@@ -717,6 +793,41 @@ fn lparam_point(lp: LPARAM) -> POINT {
 fn mods() -> Mods {
     let down = |vk: VIRTUAL_KEY| unsafe { GetKeyState(vk.0 as i32) } < 0;
     Mods { ctrl: down(VK_CONTROL), shift: down(VK_SHIFT), alt: down(VK_MENU), meta: down(VK_LWIN) || down(VK_RWIN) }
+}
+
+pub(crate) fn vk_of(key: Key) -> Option<u32> {
+    let vk = match key {
+        Key::Up => VK_UP,
+        Key::Down => VK_DOWN,
+        Key::Left => VK_LEFT,
+        Key::Right => VK_RIGHT,
+        Key::PageUp => VK_PRIOR,
+        Key::PageDown => VK_NEXT,
+        Key::Home => VK_HOME,
+        Key::End => VK_END,
+        Key::Enter => VK_RETURN,
+        Key::Escape => VK_ESCAPE,
+        Key::Backspace => VK_BACK,
+        Key::Delete => VK_DELETE,
+        Key::Insert => VK_INSERT,
+        Key::Tab => VK_TAB,
+        Key::Space => VK_SPACE,
+        Key::F(n) if (1..=24).contains(&n) => VIRTUAL_KEY(VK_F1.0 + n as u16 - 1),
+        Key::Char('`') => VK_OEM_3,
+        Key::Char(';') => VK_OEM_1,
+        Key::Char('/') => VK_OEM_2,
+        Key::Char('[') => VK_OEM_4,
+        Key::Char('\\') => VK_OEM_5,
+        Key::Char(']') => VK_OEM_6,
+        Key::Char('\'') => VK_OEM_7,
+        Key::Char(',') => VK_OEM_COMMA,
+        Key::Char('.') => VK_OEM_PERIOD,
+        Key::Char('=') => VK_OEM_PLUS,
+        Key::Char('-') => VK_OEM_MINUS,
+        Key::Char(c) if c.is_ascii_uppercase() || c.is_ascii_digit() => VIRTUAL_KEY(c as u16),
+        _ => return None,
+    };
+    Some(vk.0 as u32)
 }
 
 fn map_key(vk: u16) -> Key {

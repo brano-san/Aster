@@ -6,7 +6,9 @@ use aster_core::panes::PaneId;
 use aster_core::profile::Profile;
 use aster_core::session::{SessionState, WindowState};
 use aster_gfx::text::Gfx;
-use aster_platform::{Platform, RenderError, Renderer, SpawnRequest, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
+use aster_core::config::Dock;
+use aster_core::keymap::Chord;
+use aster_platform::{DockSpec, Edge, Platform, RenderError, Renderer, SpawnRequest, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,6 +39,7 @@ pub struct Handler<P: Platform> {
     ssh: Option<String>,
     pending: Vec<WindowState>,
     session_saved: bool,
+    applied: Option<(String, Option<DockSpec>)>,
 }
 
 fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
@@ -72,7 +75,7 @@ impl<P: Platform> Handler<P> {
         let (exit_tx, exits) = unbounded();
         let config_stamp = stamp(&crate::config_path::<P>());
         let pending = if config.terminal.recover_tabs { load_session::<P>() } else { Vec::new() };
-        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, exit_tx, config_stamp, ssh, pending, session_saved: false }
+        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None }
     }
 
     fn save_config(&mut self, text: String) {
@@ -208,6 +211,38 @@ impl<P: Platform> Handler<P> {
         }
     }
 
+    fn dock_spec(&self) -> Option<DockSpec> {
+        let a = &self.config.appearance;
+        let edge = match a.dock {
+            Dock::Off => return None,
+            Dock::Top => Edge::Top,
+            Dock::Bottom => Edge::Bottom,
+            Dock::Left => Edge::Left,
+            Dock::Right => Edge::Right,
+        };
+        Some(DockSpec { edge, fill: a.dock_fill, space: a.dock_space, on_top: a.dock_always_on_top })
+    }
+
+    fn apply_window_prefs(&mut self, window: &Win<P>) {
+        if std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_CAPTURE_PREFS").is_none() {
+            return;
+        }
+        let wanted = (self.config.appearance.global_hotkey.clone(), self.dock_spec());
+        let before = self.applied.replace(wanted.clone());
+        if before.as_ref().map(|b| &b.0) != Some(&wanted.0) {
+            let chord = Chord::parse(&wanted.0);
+            if !wanted.0.trim().is_empty() && chord.is_none() {
+                tracing::warn!("global hotkey {:?} is not a valid key", wanted.0);
+            }
+            if !window.set_global_hotkey(chord.map(|c| (c.key, c.mods))) && chord.is_some() {
+                tracing::warn!("global hotkey {} is taken by another program or not supported here", wanted.0);
+            }
+        }
+        if before.map(|b| b.1) != Some(wanted.1) {
+            window.dock(wanted.1);
+        }
+    }
+
     fn save_session(&self) {
         if capturing() {
             return;
@@ -254,19 +289,41 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: app.is_dark() });
         }
         window.set_dark(app.is_dark());
+        let first = self.windows.is_empty();
         self.windows.insert(window.id(), State { app, gfx: Gfx::new(text, ATLAS), renderer: None });
+        if first {
+            self.apply_window_prefs(window);
+        }
         window.request_redraw();
     }
 
     fn event(&mut self, window: &Win<P>, event: Event) {
         if matches!(event, Event::Focus(true)) {
             self.reload_config();
+            if self.windows.keys().min() == Some(&window.id()) {
+                self.apply_window_prefs(window);
+            }
+        }
+        if matches!(event, Event::GlobalHotkey) {
+            if window.is_visible() && window.is_foreground() {
+                window.set_visible(false);
+            } else {
+                window.set_visible(true);
+                if let Some(spec) = self.dock_spec() {
+                    window.dock(Some(spec));
+                }
+                window.activate();
+            }
+            return;
+        }
+        if matches!(event, Event::Focus(false)) && self.config.appearance.dock_hide_on_blur && self.dock_spec().is_some() && self.windows.keys().min() == Some(&window.id()) {
+            window.set_visible(false);
         }
         if matches!(event, Event::SessionEnding) || (matches!(event, Event::CloseRequested) && self.windows.len() == 1) {
             self.save_session();
             self.session_saved = true;
         }
-        if matches!(event, Event::CloseRequested) && !window.is_fullscreen() {
+        if matches!(event, Event::CloseRequested) && !window.is_fullscreen() && self.dock_spec().is_none() {
             if let Some(path) = crate::state_path::<P>() {
                 let _ = std::fs::write(path, crate::format_placement(&window.placement()));
             }

@@ -174,6 +174,27 @@ impl Window for LinuxWindow {
     fn request_attention(&self) {
         self.raw.request_user_attention(Some(UserAttentionType::Informational));
     }
+
+    fn set_visible(&self, visible: bool) {
+        self.raw.set_visible(visible);
+        if visible {
+            self.raw.focus_window();
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        self.raw.is_visible().unwrap_or(true)
+    }
+
+    fn is_foreground(&self) -> bool {
+        self.raw.has_focus()
+    }
+
+    fn dock(&self, _spec: Option<aster_platform::DockSpec>) {}
+
+    fn set_global_hotkey(&self, _key: Option<(Key, Mods)>) -> bool {
+        false
+    }
 }
 
 fn cursor(icon: CursorIcon) -> WinitCursor {
