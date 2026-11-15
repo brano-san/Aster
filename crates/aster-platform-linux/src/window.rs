@@ -15,6 +15,7 @@ use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle};
 use winit::keyboard::{Key as WinitKey, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::monitor::Fullscreen;
+use winit::platform::x11::WindowAttributesX11;
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::window::{ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, ResizeDirection, Theme, UserAttentionType, WindowAttributes};
 
@@ -48,6 +49,7 @@ pub struct LinuxWindow {
     cursor: Cell<CursorIcon>,
     edge: Cell<Option<ResizeDirection>>,
     timer: Cell<Option<Instant>>,
+    translucent: bool,
 }
 
 impl LinuxWindow {
@@ -172,7 +174,7 @@ impl Window for LinuxWindow {
     }
 
     fn set_surface(&self, _backdrop: aster_core::config::Backdrop) -> aster_platform::Surface {
-        aster_platform::Surface::default()
+        aster_platform::Surface { translucent: self.translucent, backdrop: false }
     }
 
     fn request_attention(&self) {
@@ -464,6 +466,12 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
             Some(p) => attrs.with_surface_size(PhysicalSize::new(p.width as u32, p.height as u32)).with_maximized(p.maximized),
             None => attrs.with_surface_size(LogicalSize::new(DEFAULT_SIZE.0, DEFAULT_SIZE.1)),
         };
+        let visual = display().and_then(|d| d.display_handle().ok().map(|h| h.as_raw())).and_then(crate::gl::window_visual);
+        let translucent = visual.is_some_and(|v| v.transparent);
+        attrs = attrs.with_transparent(translucent);
+        if let Some(id) = visual.filter(|v| v.transparent).and_then(|v| v.x11_visual) {
+            attrs = attrs.with_platform_attributes(Box::new(WindowAttributesX11::default().with_x11_visual(id)));
+        }
         let raw: Arc<dyn winit::window::Window> = match el.create_window(attrs) {
             Ok(raw) => Arc::from(raw),
             Err(e) => {
@@ -487,6 +495,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
             cursor: Cell::new(CursorIcon::Default),
             edge: Cell::new(None),
             timer: Cell::new(None),
+            translucent,
         };
         self.nodes.push(Node { window, last_click: None, pointer: (0.0, 0.0) });
         let node = self.nodes.last().expect("node");
