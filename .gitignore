@@ -1,0 +1,14 @@
+/target/
+**/*.rs.bk
+*.pdb
+*.tmp
+*.swp
+*~
+.claude/
+.idea/
+.vscode/
+.vs/
+*.code-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
