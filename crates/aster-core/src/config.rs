@@ -23,6 +23,15 @@ pub enum RightClick {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+pub enum Bell {
+    Off,
+    #[default]
+    Visual,
+    Audible,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum SchemeMode {
     #[default]
     Dark,
@@ -63,6 +72,8 @@ pub struct Terminal {
     pub paste_on_middle_click: bool,
     pub bracketed_paste: bool,
     pub trim_whitespace_on_paste: bool,
+    pub warn_on_multiline_paste: bool,
+    pub bell: Bell,
     pub draw_bold_text_in_bright_colors: bool,
     pub word_separator: String,
     pub scroll_on_input: bool,
@@ -86,6 +97,8 @@ impl Default for Terminal {
             paste_on_middle_click: false,
             bracketed_paste: true,
             trim_whitespace_on_paste: true,
+            warn_on_multiline_paste: true,
+            bell: Bell::Visual,
             draw_bold_text_in_bright_colors: true,
             word_separator: " ()[]{}'\"".into(),
             scroll_on_input: true,

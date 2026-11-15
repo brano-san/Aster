@@ -36,6 +36,7 @@ const DOCK: &str = "Docked window";
 const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("underline", "Underline")];
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
 const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("auto", "Follow the system")];
+const BELLS: &[(&str, &str)] = &[("off", "Off"), ("visual", "Flash the pane"), ("audible", "System sound")];
 const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
 const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
 
@@ -49,12 +50,14 @@ pub const SETTINGS: &[Setting] = &[
     item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
     item(TERMINAL, "terminal.profile", "Default profile", "Shell for new tabs and windows", Control::Profiles),
     item(TERMINAL, "terminal.recover-tabs", "Restore tabs", "Reopen tabs, splits and their folders on start", Control::Toggle),
+    item(TERMINAL, "terminal.bell", "Bell", "What happens when a program rings the bell", Control::Choice(BELLS)),
     item(TERMINAL, "terminal.scroll-on-input", "Scroll on input", "Typing scrolls back to the bottom", Control::Toggle),
     item(INPUT, "terminal.copy-on-select", "Copy on select", "Selected text goes to the clipboard", Control::Toggle),
     item(INPUT, "terminal.right-click", "Right click", "What the right mouse button does", Control::Choice(RIGHT_CLICK)),
     item(INPUT, "terminal.paste-on-middle-click", "Paste on middle click", "The middle mouse button pastes", Control::Toggle),
     item(INPUT, "terminal.bracketed-paste", "Bracketed paste", "Programs can tell pasted text from typing", Control::Toggle),
     item(INPUT, "terminal.trim-whitespace-on-paste", "Trim pasted text", "Remove trailing whitespace from pasted text", Control::Toggle),
+    item(INPUT, "terminal.warn-on-multiline-paste", "Confirm multiline paste", "Ask before pasting several lines into a program that would run each one", Control::Toggle),
     item(INPUT, "terminal.word-separator", "Word separators", "Characters that end a word on double click", Control::Text),
     item(SEARCH, "terminal.search-options.case-sensitive", "Match case", "Search tells upper and lower case apart", Control::Toggle),
     item(SEARCH, "terminal.search-options.regex", "Regular expressions", "Search queries are regular expressions", Control::Toggle),

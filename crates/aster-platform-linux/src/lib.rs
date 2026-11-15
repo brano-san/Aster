@@ -51,6 +51,10 @@ impl Platform for Linux {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
     }
 
+    fn beep() -> bool {
+        false
+    }
+
     fn ssh_command() -> Option<String> {
         std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("ssh")).find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
     }

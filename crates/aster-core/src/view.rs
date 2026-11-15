@@ -153,6 +153,9 @@ impl App {
             if split && focus != Some(*id) {
                 g.dl.rect(*rect, theme.dim);
             }
+            if self.bell_flash(*id) {
+                g.dl.rect(*rect, theme.foreground.alpha(0x2C));
+            }
         }
         for sp in &layout.splitters {
             g.dl.rect(sp.rect, theme.divider);
@@ -162,6 +165,7 @@ impl App {
         if let Some(o) = self.overlay.clone() {
             self.draw_overlay(g, &o);
         }
+        self.draw_paste(g, m);
         self.draw_menu(g);
         self.mark_drawn();
     }
@@ -482,6 +486,49 @@ impl App {
                 SearchHit::Close => centered(g, r, G_CLOSE, FontStyle::new(FontFamily::Icons, (8.0 * s).round(), false), ink),
                 SearchHit::Field => {}
             }
+        }
+    }
+
+    fn draw_paste<B: TextBackend>(&mut self, g: &mut Gfx<B>, m: Metrics) {
+        use crate::paste::{BUTTONS, PREVIEW_LINES};
+        let Some(geo) = self.paste_geometry() else { return };
+        let Some(confirm) = self.paste_confirm.clone() else { return };
+        let s = self.scale;
+        let theme = self.theme;
+        let radius = (8.0 * s).round();
+        let line = (1.0 * s).round().max(1.0);
+        g.dl.rect(self.chrome.content, theme.shadow.alpha(0x40));
+        g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 6.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (18.0 * s).round());
+        g.dl.round_rect(geo.frame, theme.overlay, radius);
+        g.dl.outline(geo.frame, theme.overlay_border, radius, line);
+        let lines = confirm.lines();
+        let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
+        let ty = baseline(g, geo.title, title);
+        g.text(geo.title.x, ty, &format!("Paste {} lines?", lines.len()), title, theme.text, geo.title.w);
+        g.dl.round_rect(geo.preview, theme.background, (5.0 * s).round());
+        g.dl.outline(geo.preview, theme.overlay_border, (5.0 * s).round(), line);
+        let mono = FontStyle::new(FontFamily::Mono, m.px, false);
+        let inner = geo.preview.inset((10.0 * s).round(), (8.0 * s).round());
+        for (k, text) in lines.iter().take(PREVIEW_LINES).enumerate() {
+            let y = inner.y + k as f32 * m.h + m.baseline;
+            g.text(inner.x, y.round(), &text.replace('\t', "    "), mono, theme.text, inner.w);
+        }
+        if lines.len() > PREVIEW_LINES {
+            let y = inner.y + PREVIEW_LINES as f32 * m.h + m.baseline;
+            let ui = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), false);
+            g.text(inner.x, y.round(), &format!("and {} more", lines.len() - PREVIEW_LINES), ui, theme.text_dim, inner.w);
+        }
+        let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
+        let (mx, my) = self.mouse;
+        for (i, r) in geo.buttons.iter().enumerate() {
+            let chosen = confirm.button == i;
+            if chosen {
+                g.dl.round_rect(*r, theme.accent, (5.0 * s).round());
+            } else {
+                g.dl.round_rect(*r, if r.contains(mx, my) { theme.button_hover } else { theme.tab_active }, (5.0 * s).round());
+                g.dl.outline(*r, theme.overlay_border, (5.0 * s).round(), line);
+            }
+            centered(g, *r, BUTTONS[i], ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
         }
     }
 
