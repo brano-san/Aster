@@ -19,7 +19,7 @@ const fn rgb(hex: u32) -> Rgb {
 }
 
 impl Palette {
-    pub const ASTER_DARK: Palette = Palette {
+    pub const DARK: Palette = Palette {
         foreground: rgb(0xcacaca),
         background: rgb(0x171717),
         cursor: rgb(0xbbbbbb),
@@ -47,7 +47,7 @@ impl Palette {
         bold_is_bright: true,
     };
 
-    pub const ASTER_LIGHT: Palette = Palette {
+    pub const LIGHT: Palette = Palette {
         foreground: rgb(0x4d4d4c),
         background: rgb(0xffffff),
         cursor: rgb(0x4d4d4c),
@@ -144,7 +144,7 @@ impl Palette {
 
 impl Default for Palette {
     fn default() -> Self {
-        Self::ASTER_DARK
+        Self::DARK
     }
 }
 

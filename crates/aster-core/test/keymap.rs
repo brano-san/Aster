@@ -15,7 +15,7 @@ fn parses_binding_strings() {
     assert_eq!(chord("Ctrl-Alt-[").key, Key::Char('['));
     assert_eq!(chord("Shift-Insert").key, Key::Insert);
     assert_eq!(chord("⌘-Shift-D").mods, Mods { meta: true, shift: true, ..Mods::NONE });
-    assert_eq!(Chord::parse("Hyper-X"), None);
+    assert_eq!(Chord::parse("Fn-X"), None);
     assert_eq!(Chord::parse("Ctrl-Nope"), None);
 }
 

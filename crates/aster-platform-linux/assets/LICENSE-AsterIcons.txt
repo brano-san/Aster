@@ -1,6 +1,6 @@
 AsterIcons.ttf is a subset of FluentSystemIcons-Regular.ttf from Fluent UI System Icons
 (https://github.com/microsoft/fluentui-system-icons, commit 82ecf7cbdb43684403c7125efa160be04a33dca5),
-with the selected glyphs remapped to the Segoe Fluent Icons code points the interface uses.
+with the selected glyphs remapped to the Segoe Fluent Icons code points Aster uses.
 
 MIT License
 

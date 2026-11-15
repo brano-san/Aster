@@ -88,7 +88,7 @@ fn modes_reflect_escape_sequences() {
 
 #[test]
 fn palette_resolves_named_indexed_and_true_colors() {
-    let p = Palette::ASTER_DARK;
+    let p = Palette::DARK;
     let (mut t, _) = term(10, 2);
     t.feed(b"\x1b[31ma\x1b[1;32mb\x1b[38;5;196mc\x1b[38;2;1;2;3md\x1b[7me");
     let mut cells = Vec::new();

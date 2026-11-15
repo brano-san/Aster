@@ -9,13 +9,13 @@
 
 ## Fast, native GPU-accelerated terminal
 
-**Aster — терминал для Windows и Linux, написанный на Rust.** Никакого Electron или WebView: интерфейс и сетка символов отрисовываются **собственным нативным GPU-пайплайном** (Direct3D 11 + DirectComposition + DirectWrite на Windows, OpenGL ES 3.0 + EGL + HarfRust + Swash на Linux под Wayland и X11).
+**Aster — терминал для Windows и Linux, написанный на Rust.** Никакого браузерного движка или WebView: интерфейс и сетка символов отрисовываются **собственным нативным GPU-пайплайном** (Direct3D 11 + DirectComposition + DirectWrite на Windows, OpenGL ES 3.0 + EGL + HarfRust + Swash на Linux под Wayland и X11).
 
-Цель — лёгкий терминал со всем нужным: вкладки и разделение на панели, профили и автоопределение оболочек (PowerShell, CMD, WSL, Git Bash, MSYS2, Cygwin), SSH и SFTP, последовательный порт и Telnet, хранилище секретов, режим Quake, цветовые схемы и гибкие горячие клавиши. Полный список — в [docs/FEATURES.md](docs/FEATURES.md).
+Вкладки и разделение на панели, профили и автоопределение оболочек (PowerShell, CMD, WSL, Git Bash, MSYS2, Cygwin), SSH и SFTP, последовательный порт и Telnet, хранилище секретов, режим Quake, цветовые схемы и гибкие горячие клавиши. Полный список — в [docs/FEATURES.md](docs/FEATURES.md).
 
 ## Status
 
-Проект в ранней разработке. Уже есть: вкладки и панели, автоопределение оболочек, 191 цветовая схема, гибкие горячие клавиши, выделение и ссылки. SSH, восстановление сессий, режим Quake и экран настроек — следующий этап. Порядок работ — в [docs/PLAN.md](docs/PLAN.md), заметки к выпускам — в [docs/releases](docs/releases).
+Проект в ранней разработке. Уже есть: вкладки и панели, автоопределение оболочек, 191 цветовая схема, настраиваемые горячие клавиши с аккордами, поиск по буферу, выделение и ссылки. SSH, восстановление сессий, режим Quake и экран настроек — следующий этап. Порядок работ — в [docs/PLAN.md](docs/PLAN.md), заметки к выпускам — в [docs/releases](docs/releases).
 
 ## Getting Aster
 
@@ -52,7 +52,7 @@ cargo build --release -p aster
 ## Contributing
 
 * **Issue Tracker:** [GitHub Issues](https://github.com/brano-san/Aster/issues) — ошибки и предложения.
-* **Архитектура:** [ARCHITECTURE.md](ARCHITECTURE.md) — крейты, потоки и путь «ввод → кадр».
+* **Архитектура:** [ARCHITECTURE.md](ARCHITECTURE.md) — крейты, потоки, рендеринг и путь «ввод → кадр».
 
 ## License
 

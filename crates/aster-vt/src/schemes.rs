@@ -31,7 +31,7 @@ pub fn from_colors(foreground: Rgb, background: Rgb, cursor: Option<Rgb>, colors
     for (i, slot) in ansi.iter_mut().enumerate() {
         *slot = colors.get(i).copied().unwrap_or(colors[i % 8]);
     }
-    let base = Palette::ASTER_DARK;
+    let base = Palette::DARK;
     Some(Palette { foreground, background, cursor: cursor.unwrap_or(foreground), selection: mix(background, ansi[4], 0.35), ansi, ..base })
 }
 
@@ -62,7 +62,7 @@ pub fn parse_xresources(text: &str) -> Option<Palette> {
 }
 
 pub fn builtin() -> Vec<Scheme> {
-    let mut out = vec![Scheme { name: "Aster Dark".into(), palette: Palette::ASTER_DARK }, Scheme { name: "Aster Light".into(), palette: Palette::ASTER_LIGHT }];
+    let mut out = vec![Scheme { name: "Aster Dark".into(), palette: Palette::DARK }, Scheme { name: "Aster Light".into(), palette: Palette::LIGHT }];
     out.extend(COMMUNITY.iter().filter_map(|(name, text)| parse_xresources(text).map(|palette| Scheme { name: (*name).to_owned(), palette })));
     out
 }

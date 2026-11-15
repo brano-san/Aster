@@ -1,6 +1,6 @@
 # Архитектура Aster
 
-Aster — терминал на Rust с нативным GPU-рендерингом. Эмуляция терминала — `alacritty_terminal`, полный список возможностей в [docs/FEATURES.md](docs/FEATURES.md), порядок работ в [docs/PLAN.md](docs/PLAN.md).
+Aster — терминал на Rust с нативным GPU-рендерингом. Возможности перечислены в [docs/FEATURES.md](docs/FEATURES.md), порядок работ — в [docs/PLAN.md](docs/PLAN.md).
 
 ## Принципы
 
@@ -15,15 +15,15 @@ Aster — терминал на Rust с нативным GPU-рендеринг�
 |---|---|---|
 | `aster-gfx` | `Rect`, `Color`, `Instance`, `DrawList`, атлас полками, трейт `TextBackend` и `Gfx` (кэш разметки, глифов, метрик, очередь загрузок, `Gfx::cell` для клетки сетки), `Bitmap` | — |
 | `aster-vt` | `Terminal` поверх `alacritty_terminal::Term`: подача байтов, размер, выделение, прокрутка, снимок видимых клеток, курсор; `Palette` (схемы Aster Dark и Aster Light, куб 256 цветов, жирный как яркий, dim, inverse); события `VtEvent` (ответы в PTY, заголовок, звонок, OSC 52) | `alacritty_terminal` |
-| `aster-core` | `App` (вкладки, дерево панелей, сессии, мышь, выделение, селектор команд и профилей), `view` (геометрия заголовка и кадр), `keymap` (действия и привязки, аккорды), `keys` (кодирование клавиш xterm, мыши SGR и legacy, вставки), `config` (TOML), `panes`, `theme`, `overlay`, `fuzzy` | `aster-gfx`, `aster-vt` |
+| `aster-core` | `App` (вкладки, дерево панелей, сессии, мышь, выделение, селектор команд и профилей), `view` (геометрия заголовка и кадр), `keymap` (действия, привязки по умолчанию, аккорды), `keys` (кодирование клавиш xterm, мыши SGR и legacy, вставки), `config` (TOML), `panes`, `theme`, `overlay`, `fuzzy` | `aster-gfx`, `aster-vt` |
 | `aster-platform` | трейты `Window`, `WindowHandler`, `WindowSystem`, `Renderer`, `Pty`, `Platform`; `SpawnRequest`, `Spawned` | `aster-core`, `aster-gfx` |
-| `aster-platform-windows` | Win32-окно со своим заголовком, D3D11 + DirectComposition, DirectWrite с курсивом, ConPTY, автоопределение оболочек (PowerShell 5/7, CMD с PROMPT, сообщающим папку, WSL, Git Bash, Cygwin, MSYS2, Cmder, VS Developer Prompt), открытие ссылок через `ShellExecuteW` | `windows` |
+| `aster-platform-windows` | Win32-окно со своим заголовком, D3D11 + DirectComposition, DirectWrite с курсивом, ConPTY, автоопределение оболочек (PowerShell 5/7, CMD с PROMPT, сообщающим папку, WSL, Git Bash, Cygwin, MSYS2, VS Developer Prompt), открытие ссылок через `ShellExecuteW` | `windows` |
 | `aster-platform-linux` | окно на winit 0.31 (Wayland и X11, без системной рамки: перетаскивание и изменение размера за край из кода, двойной щелчок по заголовку), OpenGL ES 3 через EGL (`glutin` + `glow`, шейдер WGSL → GLSL через `naga`), текст на `harfrust` + `swash` + fontconfig с синтетическим курсивом, PTY через `openpty` + `fork` + `execvpe`, оболочка входа из passwd и `/etc/shells`, буфер обмена через data transfer winit, `xdg-open` | `winit`, `glutin`, `glow`, `harfrust`, `swash`, `libc` |
+| `aster-ssh` | разбор `~/.ssh/config` (`config::parse`): хосты, пользователь, порт, ключи, ProxyJump, ProxyCommand, пробросы, `Include`, шаблоны `Host *` | — |
+| `aster-vault` | хранилище секретов: JSON, зашифрованный мастер-паролем (Argon2id + XChaCha20-Poly1305), строка `aster-vault:1:<base64>` | `argon2`, `chacha20poly1305` |
 | `aster` | бинарник: `Handler` (окна, рендереры, применение эффектов), `Session` (потоки чтения, записи и ожидания PTY), конфиг и положение окна | все |
 
-**Правило изоляции.** `aster-gfx`, `aster-vt`, `aster-core`, `aster-platform` не зависят от крейта `windows` (windows-rs). Исключение — `windows-sys`, который `alacritty_terminal` тянет для своего модуля `tty`; Aster этот модуль не использует. CI проверяет правило задачей `deps-isolation`.
-
-Плановый крейт `aster-pty` из PLAN.md не понадобился: PTY — часть платформы (`Platform::spawn`), как окно и шрифты.
+**Правило изоляции.** `aster-gfx`, `aster-vt`, `aster-core`, `aster-platform` не зависят от крейта `windows` (windows-rs). Исключение — `windows-sys`, который `alacritty_terminal` тянет для своего модуля `tty`; Aster этот модуль не использует. CI проверяет правило задачей `deps-isolation`. PTY — часть платформы (`Platform::spawn`), как окно и шрифты.
 
 ## Потоки
 
@@ -58,14 +58,14 @@ Aster — терминал на Rust с нативным GPU-рендеринг�
 
 ## Цветовые схемы, текущая папка, ссылки
 
-- 191 схема сообщества лежит в `aster-vt/schemes` (формат Xresources), `build.rs` встраивает их; свои схемы — `[[color-schemes]]` в конфиге. Команда «Select color scheme» показывает схему при перемещении по списку, Esc возвращает прежнюю, Enter сохраняет конфиг.
+- 191 встроенная схема лежит в `aster-vt/schemes` (формат Xresources), `build.rs` встраивает их; свои схемы — `[[color-schemes]]` в конфиге. Команда «Select color scheme» показывает схему при перемещении по списку, Esc возвращает прежнюю, Enter сохраняет конфиг.
 - `aster-vt` сам разбирает OSC 7 (`file://`), OSC 9;9 и OSC 1337 `CurrentDir=`: `vte` их не обрабатывает. Новая вкладка и сплит стартуют в папке активной панели; для WSL unix-путь подставляется в аргумент `--cd`.
 - Ссылки (`aster-core/src/links.rs`): URL, пути Windows и Unix у начала слова; при наведении — подчёркивание и курсор-рука, щелчок без выделения открывает (суффикс `:строка:столбец` отбрасывается).
 - Конфиг перечитывается, когда окно получает фокус и файл изменился.
 
 ## Конфигурация
 
-`%APPDATA%\Aster\config.toml`, создаётся с умолчаниями при первом запуске. Разделы `[terminal]`, `[appearance]`, `[hotkeys]` (id действий и строки привязок: `"split-right" = ["Ctrl-Shift-S"]`), `[[profiles]]`. Умолчания (копирование при выделении, правый клик — копировать или вставить, 25 000 строк прокрутки).
+`%APPDATA%\Aster\config.toml`, создаётся с умолчаниями при первом запуске. Разделы `[terminal]`, `[appearance]`, `[hotkeys]` (id действий и строки привязок: `"split-right" = ["Ctrl-Shift-S"]`), `[[profiles]]`. Умолчания: копирование при выделении, правый клик — копировать или вставить, 25 000 строк прокрутки.
 
 ## Linux
 
@@ -79,7 +79,7 @@ Aster — терминал на Rust с нативным GPU-рендеринг�
 
 ## Тесты
 
-- `aster-gfx` — тесты на список примитивов, атлас и текстовый кэш.
+- `aster-gfx` — список примитивов, атлас и текстовый кэш.
 - `aster-vt` — печать, перенос, OSC, ответы DA, OSC 52, прокрутка, выделение, reflow, режимы, палитра.
 - `aster-core` — разбор привязок и аккорды, кодирование клавиш, мыши и вставки, конфиг, дерево панелей, селектор, сценарии `App`.
 - `aster-platform-windows` — кавычки аргументов, блок окружения, настоящий запуск `cmd.exe` через ConPTY с кодом выхода.
