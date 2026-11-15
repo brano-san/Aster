@@ -1,0 +1,11 @@
+[package]
+name = "aster-platform"
+description = "Platform traits for Aster: windows, renderer, text backend, pseudo terminals"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aster-core.workspace = true
+aster-gfx.workspace = true

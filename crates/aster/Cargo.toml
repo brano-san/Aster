@@ -1,0 +1,19 @@
+[package]
+name = "aster"
+description = "Aster terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+aster-core.workspace = true
+aster-gfx.workspace = true
+aster-platform.workspace = true
+aster-vt.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+aster-platform-windows.workspace = true
