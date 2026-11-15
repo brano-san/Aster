@@ -366,14 +366,14 @@ impl App {
             FileReply::Downloaded { id, local } => {
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
                     t.done = t.total.max(t.done);
-                    t.state = TransferState::Done(format!("saved to {}", local.display()));
+                    t.state = TransferState::Done(crate::i18n::tf("saved to {path}", &[("path", &local.display().to_string())]));
                     t.local = Some(local);
                 }
             }
             FileReply::Uploaded { id, remote } => {
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
                     t.done = t.total.max(t.done);
-                    t.state = TransferState::Done(format!("uploaded to {remote}"));
+                    t.state = TransferState::Done(crate::i18n::tf("uploaded to {path}", &[("path", &remote)]));
                 }
                 let dir = parent(&remote);
                 if visible && self.files.as_ref().is_some_and(|p| p.path == dir) {
@@ -402,7 +402,7 @@ impl App {
             FileReply::Failed { id: Some(id), error } => {
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
                     t.state = match (&t.state, error.as_str()) {
-                        (TransferState::Editing { saves }, "cancelled") => TransferState::Done(format!("editing stopped after {saves} saves")),
+                        (TransferState::Editing { saves }, "cancelled") => TransferState::Done(crate::i18n::tf("editing stopped after {saves} saves", &[("saves", &saves.to_string())])),
                         _ => TransferState::Failed(error),
                     };
                 }

@@ -126,11 +126,26 @@ impl Action {
         }
     }
 
-    pub fn label(&self) -> String {
+    fn label_template(&self) -> &'static str {
         match self {
-            Action::Tab(n) => format!("Switch to tab {n}"),
-            a => NAMED.iter().find(|(x, _, _)| x == a).map_or("", |(_, _, l)| l).to_owned(),
+            Action::Tab(_) => "Switch to tab {n}",
+            a => NAMED.iter().find(|(x, _, _)| x == a).map_or("", |(_, _, l)| l),
         }
+    }
+
+    fn label_number(&self) -> String {
+        match self {
+            Action::Tab(n) => n.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        crate::i18n::tf(self.label_template(), &[("n", &self.label_number())])
+    }
+
+    pub fn source_label(&self) -> String {
+        self.label_template().replace("{n}", &self.label_number())
     }
 
     pub fn from_id(id: &str) -> Option<Action> {

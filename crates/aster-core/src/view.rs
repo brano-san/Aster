@@ -1,4 +1,5 @@
 use crate::app::{App, Drag, Effect, Metrics};
+use crate::i18n::{t, tf};
 use crate::input::HitArea;
 use crate::overlay::{Overlay, VISIBLE};
 use crate::panes::PaneId;
@@ -156,9 +157,9 @@ impl App {
             }
             if let Some(prompt) = self.password_prompt(*id).cloned() {
                 let text = if prompt.offer {
-                    Some("Save this password for the next prompt here? Ctrl+Shift+Enter saves it; any other key dismisses")
+                    Some(t("Save this password for the next prompt here? Ctrl+Shift+Enter saves it; any other key dismisses"))
                 } else if prompt.saved == Some(true) && !prompt.submitted {
-                    Some("A saved password matches this prompt. Ctrl+Shift+Enter types it")
+                    Some(t("A saved password matches this prompt. Ctrl+Shift+Enter types it"))
                 } else {
                     None
                 };
@@ -463,7 +464,7 @@ impl App {
         let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
         let y = baseline(g, geo.field, ui);
         if bar.query.is_empty() {
-            g.text(geo.field.x, y, "Search", ui, theme.text_dim, geo.field.w);
+            g.text(geo.field.x, y, t("Search"), ui, theme.text_dim, geo.field.w);
         }
         let counter = (!bar.query.is_empty() && !bar.error).then(|| match bar.current {
             Some(c) => format!("{c}/{}", bar.count),
@@ -522,8 +523,8 @@ impl App {
     fn draw_offer<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, state: crate::app::PaneTransfer, typed: &str) {
         use crate::app::PaneTransfer;
         match state {
-            PaneTransfer::Incoming => return self.draw_hint(g, pane, "The remote side wants to send files. Enter receives them into Downloads, Esc refuses."),
-            PaneTransfer::Running => return self.draw_hint(g, pane, "Transfer in progress. Esc cancels."),
+            PaneTransfer::Incoming => return self.draw_hint(g, pane, t("The remote side wants to send files. Enter receives them into Downloads, Esc refuses.")),
+            PaneTransfer::Running => return self.draw_hint(g, pane, t("Transfer in progress. Esc cancels.")),
             PaneTransfer::AwaitingFiles | PaneTransfer::None => {}
         }
         let s = self.scale;
@@ -536,7 +537,7 @@ impl App {
         let pad = (14.0 * s).round();
         let first = Rect::new(r.x + pad, r.y + (6.0 * s).round(), r.w - 2.0 * pad, (24.0 * s).round());
         let y = baseline(g, first, ui);
-        g.text(first.x, y, "Send files: drop them here, or type a path and press Enter. Esc cancels.", ui, theme.text_dim, first.w);
+        g.text(first.x, y, t("Send files: drop them here, or type a path and press Enter. Esc cancels."), ui, theme.text_dim, first.w);
         let field = Rect::new(r.x + pad, first.bottom() + (2.0 * s).round(), r.w - 2.0 * pad, (26.0 * s).round());
         g.dl.round_rect(field, theme.surface, (4.0 * s).round());
         g.dl.outline(field, theme.accent, (4.0 * s).round(), (1.0 * s).round().max(1.0));
@@ -562,7 +563,7 @@ impl App {
         let lines = confirm.lines();
         let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
         let ty = baseline(g, geo.title, title);
-        g.text(geo.title.x, ty, &format!("Paste {} lines?", lines.len()), title, theme.text, geo.title.w);
+        g.text(geo.title.x, ty, &tf("Paste {count} lines?", &[("count", &lines.len().to_string())]), title, theme.text, geo.title.w);
         g.dl.round_rect(geo.preview, theme.surface, (5.0 * s).round());
         g.dl.outline(geo.preview, theme.overlay_border, (5.0 * s).round(), line);
         let mono = FontStyle::new(FontFamily::Mono, m.px, false);
@@ -574,7 +575,7 @@ impl App {
         if lines.len() > PREVIEW_LINES {
             let y = inner.y + PREVIEW_LINES as f32 * m.h + m.baseline;
             let ui = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), false);
-            g.text(inner.x, y.round(), &format!("and {} more", lines.len() - PREVIEW_LINES), ui, theme.text_dim, inner.w);
+            g.text(inner.x, y.round(), &tf("and {count} more", &[("count", &(lines.len() - PREVIEW_LINES).to_string())]), ui, theme.text_dim, inner.w);
         }
         let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
         let (mx, my) = self.mouse;
@@ -586,7 +587,7 @@ impl App {
                 g.dl.round_rect(*r, if r.contains(mx, my) { theme.button_hover } else { theme.tab_active }, (5.0 * s).round());
                 g.dl.outline(*r, theme.overlay_border, (5.0 * s).round(), line);
             }
-            centered(g, *r, BUTTONS[i], ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
+            centered(g, *r, t(BUTTONS[i]), ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
         }
     }
 
@@ -615,7 +616,7 @@ impl App {
             let hint_w = if hint.is_empty() { 0.0 } else { g.measure(&hint, small) };
             let pad = (12.0 * s).round();
             let y = baseline(g, *r, ui);
-            g.text(r.x + pad, y, label, ui, ink, (r.w - hint_w - 3.0 * pad).max(0.0));
+            g.text(r.x + pad, y, t(label), ui, ink, (r.w - hint_w - 3.0 * pad).max(0.0));
             if hint_w > 0.0 {
                 let hy = baseline(g, *r, small);
                 g.text(r.right() - pad - hint_w, hy, &hint, small, theme.text_dim, hint_w + 1.0);
@@ -641,7 +642,7 @@ impl App {
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
         let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
         let ty = baseline(g, geo.title, title);
-        g.text(geo.title.x, ty, &format!("Files on {}", page.host), title, theme.text, geo.title.w);
+        g.text(geo.title.x, ty, &tf("Files on {host}", &[("host", &page.host)]), title, theme.text, geo.title.w);
         if geo.close.contains(mx, my) {
             g.dl.round_rect(geo.close, theme.button_hover, radius);
         }
@@ -662,20 +663,20 @@ impl App {
             }
         };
         let (path_text, path_hint, editing) = match &page.prompt {
-            Some(Prompt::NewFolder(t)) => (t.clone(), "New folder name".to_owned(), true),
-            Some(Prompt::Rename { text, .. }) => (text.clone(), "New name".to_owned(), true),
-            Some(Prompt::GoTo(t)) => (t.clone(), "Go to folder".to_owned(), true),
-            Some(Prompt::Upload(t)) => (t.clone(), "Local file to upload".to_owned(), true),
-            Some(Prompt::Delete { name, dir: true }) => (String::new(), format!("Delete the folder {name} and everything in it? Enter to delete, Esc to keep"), false),
-            Some(Prompt::Delete { name, .. }) => (String::new(), format!("Delete {name}? Enter to delete, Esc to keep"), false),
-            Some(Prompt::Chmod { text, dir, .. }) => (text.clone(), if *dir { "Permissions in octal, applied to everything inside".to_owned() } else { "Permissions in octal, for example 644".to_owned() }, true),
-            None => (page.path.clone(), "Loading".to_owned(), false),
+            Some(Prompt::NewFolder(t)) => (t.clone(), crate::i18n::t("New folder name").to_owned(), true),
+            Some(Prompt::Rename { text, .. }) => (text.clone(), t("New name").to_owned(), true),
+            Some(Prompt::GoTo(t)) => (t.clone(), crate::i18n::t("Go to folder").to_owned(), true),
+            Some(Prompt::Upload(t)) => (t.clone(), crate::i18n::t("Local file to upload").to_owned(), true),
+            Some(Prompt::Delete { name, dir: true }) => (String::new(), tf("Delete the folder {name} and everything in it? Enter to delete, Esc to keep", &[("name", name)]), false),
+            Some(Prompt::Delete { name, .. }) => (String::new(), tf("Delete {name}? Enter to delete, Esc to keep", &[("name", name)]), false),
+            Some(Prompt::Chmod { text, dir, .. }) => (text.clone(), if *dir { t("Permissions in octal, applied to everything inside").to_owned() } else { t("Permissions in octal, for example 644").to_owned() }, true),
+            None => (page.path.clone(), t("Loading").to_owned(), false),
         };
         field(g, geo.path, &path_text, &path_hint, editing);
         if let Some(Prompt::Delete { .. }) = page.prompt {
             g.dl.outline(geo.path, Color::rgb(0xD9534F), radius, line);
         }
-        field(g, geo.filter, &page.query, "Filter", page.prompt.is_none());
+        field(g, geo.filter, &page.query, t("Filter"), page.prompt.is_none());
 
         g.dl.set_clip(Some(geo.list));
         let name_x = geo.list.x + (40.0 * s).round();
@@ -729,11 +730,11 @@ impl App {
         }
         g.dl.set_clip(None);
         let status = if page.loading && page.entries.is_empty() {
-            Some(("Loading".to_owned(), theme.text_dim))
+            Some((t("Loading").to_owned(), theme.text_dim))
         } else if let Some(e) = &page.error {
             Some((e.clone(), Color::rgb(0xD9534F)))
         } else if page.rows() == 0 {
-            Some((if page.query.is_empty() { "This folder is empty".to_owned() } else { "Nothing matches the filter".to_owned() }, theme.text_dim))
+            Some((if page.query.is_empty() { t("This folder is empty").to_owned() } else { t("Nothing matches the filter").to_owned() }, theme.text_dim))
         } else {
             None
         };
@@ -750,11 +751,11 @@ impl App {
             let bar = Rect::new(r.x + pad, r.bottom() - (6.0 * s).round(), r.w - 2.0 * pad, (3.0 * s).round().max(2.0));
             let fraction = if t.total > 0 { (t.done as f32 / t.total as f32).clamp(0.0, 1.0) } else { 0.0 };
             let (state, color) = match &t.state {
-                TransferState::Running => (format!("{} of {}  ·  click to cancel", human_size(t.done), human_size(t.total)), theme.text_dim),
-                TransferState::Editing { saves } => (format!("editing locally  ·  saved {saves} times  ·  click to stop"), theme.accent),
-                TransferState::Done(m) if !t.upload => (format!("{m}  ·  click to show"), theme.text_dim),
+                TransferState::Running => (tf("{done} of {total}  ·  click to cancel", &[("done", &human_size(t.done)), ("total", &human_size(t.total))]), theme.text_dim),
+                TransferState::Editing { saves } => (tf("editing locally  ·  saved {saves} times  ·  click to stop", &[("saves", &saves.to_string())]), theme.accent),
+                TransferState::Done(m) if !t.upload => (tf("{message}  ·  click to show", &[("message", m)]), theme.text_dim),
                 TransferState::Done(m) => (m.clone(), theme.text_dim),
-                TransferState::Failed(e) => (format!("{e}  ·  click to dismiss"), Color::rgb(0xD9534F)),
+                TransferState::Failed(e) => (tf("{error}  ·  click to dismiss", &[("error", e)]), Color::rgb(0xD9534F)),
             };
             g.dl.round_rect(bar, theme.overlay_border, bar.h / 2.0);
             if fraction > 0.0 {
@@ -766,7 +767,7 @@ impl App {
             let lw = g.text(r.x + pad, y, &label, ui, theme.text, r.w * 0.45);
             g.text(r.x + pad + lw + (14.0 * s).round(), y, &state, small, color, (r.w - lw - 3.0 * pad).max(0.0));
         }
-        let hint = "Enter open  ·  Ctrl+D download  ·  F4 edit  ·  F2 rename  ·  F7 new folder  ·  F9 permissions  ·  Del delete  ·  Ctrl+U or drop to upload";
+        let hint = t("Enter open  ·  Ctrl+D download  ·  F4 edit  ·  F2 rename  ·  F7 new folder  ·  F9 permissions  ·  Del delete  ·  Ctrl+U or drop to upload");
         let hy = baseline(g, geo.hint, small);
         g.text(geo.hint.x, hy, hint, small, theme.text_dim, geo.hint.w);
     }
@@ -792,13 +793,13 @@ impl App {
         let mut y = frame.y + pad;
         let head = Rect::new(frame.x + pad, y, frame.w - 2.0 * pad, (24.0 * s).round());
         let ty = baseline(g, head, title);
-        g.text(head.x, ty, if editor.original.is_some() { "Edit profile" } else { "New profile" }, title, theme.text, head.w);
+        g.text(head.x, ty, if editor.original.is_some() { t("Edit profile") } else { t("New profile") }, title, theme.text, head.w);
         y += (30.0 * s).round();
         let caret_h = (16.0 * s).round();
         for (i, label) in FIELDS.iter().enumerate() {
             let lr = Rect::new(frame.x + pad, y, frame.w - 2.0 * pad, label_h);
             let ly = baseline(g, lr, small);
-            g.text(lr.x, ly, label, small, theme.text_dim, lr.w);
+            g.text(lr.x, ly, t(label), small, theme.text_dim, lr.w);
             y += label_h;
             let fr = Rect::new(frame.x + pad, y, frame.w - 2.0 * pad, field_h);
             let focused = editor.focus == i;
@@ -816,7 +817,7 @@ impl App {
         let fy = baseline(g, foot, small);
         match &editor.error {
             Some(e) => g.text(foot.x, fy, e, small, Color::rgb(0xD9534F), foot.w),
-            None => g.text(foot.x, fy, "Tab next field  \u{b7}  Enter on the last field or Ctrl+Enter saves  \u{b7}  Esc cancels", small, theme.text_dim, foot.w),
+            None => g.text(foot.x, fy, t("Tab next field  ·  Enter on the last field or Ctrl+Enter saves  ·  Esc cancels"), small, theme.text_dim, foot.w),
         };
     }
 
@@ -834,14 +835,14 @@ impl App {
         let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
         let section = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), true);
         let ty = baseline(g, geo.title, title);
-        g.text(geo.title.x, ty, "Settings", title, theme.text, geo.title.w);
+        g.text(geo.title.x, ty, t("Settings"), title, theme.text, geo.title.w);
         let radius = (6.0 * s).round();
         g.dl.round_rect(geo.field, theme.overlay, radius);
         g.dl.outline(geo.field, if page.editing.is_none() { theme.accent } else { theme.overlay_border }, radius, line);
         let field_text = geo.field.inset((10.0 * s).round(), 0.0);
         let fy = baseline(g, field_text, ui);
         if page.query.is_empty() {
-            g.text(field_text.x, fy, "Search settings", ui, theme.text_dim, field_text.w);
+            g.text(field_text.x, fy, t("Search settings"), ui, theme.text_dim, field_text.w);
         }
         let qw = g.text(field_text.x, fy, &page.query, ui, theme.text, field_text.w);
         let caret_h = (16.0 * s).round();
@@ -853,7 +854,7 @@ impl App {
         }
         centered(g, geo.close, G_CLOSE, FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false), theme.text);
         if page.shown.is_empty() {
-            centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), "No settings match", ui, theme.text_dim);
+            centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), t("No settings match"), ui, theme.text_dim);
             return;
         }
         g.dl.set_clip(Some(geo.list));
@@ -865,7 +866,7 @@ impl App {
                 RowKind::Section(name) => {
                     let r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), row.rect.w, row.rect.h - (10.0 * s).round());
                     let y = baseline(g, r, section);
-                    g.text(r.x, y, name, section, theme.accent, r.w);
+                    g.text(r.x, y, t(name), section, theme.accent, r.w);
                 }
                 RowKind::Item(n) => {
                     let selected = n == page.selected;
@@ -882,7 +883,7 @@ impl App {
                         g.text(tx, row.rect.y + (25.0 * s).round(), &action.label(), ui, theme.text, tw);
                         let hint = match (&page.notice, selected) {
                             (Some(n), true) => n.clone(),
-                            (_, true) => "Enter to change  \u{b7}  Del to clear  \u{b7}  Shift+Del for the default".to_owned(),
+                            (_, true) => t("Enter to change  ·  Del to clear  ·  Shift+Del for the default").to_owned(),
                             _ => action.id(),
                         };
                         g.text(tx, row.rect.y + (43.0 * s).round(), &hint, small, if selected && page.notice.is_some() { theme.accent } else { theme.text_dim }, tw);
@@ -891,7 +892,7 @@ impl App {
                         g.dl.outline(c, if capturing { theme.accent } else { theme.overlay_border }, radius, line);
                         let inner = c.inset((10.0 * s).round(), 0.0);
                         let y = baseline(g, inner, ui);
-                        let (text, ink) = if capturing { ("Press the new shortcut".to_owned(), theme.text_dim) } else { (self.shortcut_text(action), theme.text) };
+                        let (text, ink) = if capturing { (t("Press the new shortcut").to_owned(), theme.text_dim) } else { (self.shortcut_text(action), theme.text) };
                         g.text(inner.x, y, &text, ui, ink, inner.w);
                         continue;
                     }
@@ -901,14 +902,14 @@ impl App {
                         let tw = (row.control.x - tx - 16.0 * s).max(0.0);
                         let (label, detail, badge) = match page.profile_at(item) {
                             Some(p) => {
-                                let kind = if p.custom { "Custom" } else { "Detected" };
-                                (p.name.clone(), p.detail.clone(), if p.default { format!("Default  \u{b7}  {kind}") } else { kind.to_owned() })
+                                let kind = if p.custom { t("Custom") } else { t("Detected") };
+                                (p.name.clone(), p.detail.clone(), if p.default { tf("Default  ·  {kind}", &[("kind", kind)]) } else { kind.to_owned() })
                             }
-                            None => ("New profile".to_owned(), "Create a profile with its own command, folder or SSH host".to_owned(), "+".to_owned()),
+                            None => (t("New profile").to_owned(), t("Create a profile with its own command, folder or SSH host").to_owned(), "+".to_owned()),
                         };
                         let hint = match (&page.notice, selected) {
                             (Some(n), true) => n.clone(),
-                            (_, true) if page.profile_at(item).is_some() => "Enter to edit  \u{b7}  Ctrl+Enter to make default  \u{b7}  Del to delete".to_owned(),
+                            (_, true) if page.profile_at(item).is_some() => t("Enter to edit  ·  Ctrl+Enter to make default  ·  Del to delete").to_owned(),
                             _ => detail,
                         };
                         g.text(tx, row.rect.y + (25.0 * s).round(), &label, ui, theme.text, tw);
@@ -923,8 +924,8 @@ impl App {
                     let setting = &SETTINGS[page.shown[n]];
                     let tx = row.rect.x + (14.0 * s).round();
                     let tw = (row.control.x - tx - 16.0 * s).max(0.0);
-                    g.text(tx, row.rect.y + (25.0 * s).round(), setting.label, ui, theme.text, tw);
-                    g.text(tx, row.rect.y + (43.0 * s).round(), setting.hint, small, theme.text_dim, tw);
+                    g.text(tx, row.rect.y + (25.0 * s).round(), t(setting.label), ui, theme.text, tw);
+                    g.text(tx, row.rect.y + (43.0 * s).round(), t(setting.hint), small, theme.text_dim, tw);
                     let c = row.control;
                     match setting.control {
                         Control::Toggle => {
@@ -1016,7 +1017,7 @@ impl App {
         g.dl.rect(Rect::new(geo.frame.x, geo.input.bottom(), geo.frame.w, (1.0 * s).round().max(1.0)), theme.overlay_border);
         if o.shown.is_empty() {
             let r = Rect::new(geo.frame.x, geo.input.bottom(), geo.frame.w, geo.frame.bottom() - geo.input.bottom());
-            centered(g, r, "No matches", ui, theme.text_dim);
+            centered(g, r, t("No matches"), ui, theme.text_dim);
             return;
         }
         let (mx, my) = self.mouse;

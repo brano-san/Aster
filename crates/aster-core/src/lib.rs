@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod files;
 pub mod fuzzy;
+pub mod i18n;
 pub mod input;
 pub mod keymap;
 pub mod keys;
