@@ -140,6 +140,7 @@ impl App {
             item("Close pane", Action::ClosePane, true),
             Entry::Separator,
             item("Search", Action::Search, true),
+            item("Remote files", Action::OpenFiles, self.focused_pane().is_some_and(|p| self.can_browse(p))),
             item("Settings", Action::Settings, true),
         ];
         self.open_menu(entries, x, y);

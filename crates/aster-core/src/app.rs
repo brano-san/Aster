@@ -54,6 +54,7 @@ pub enum Effect {
     Attention,
     Beep,
     Surface(crate::config::Backdrop),
+    Files { pane: PaneId, request: crate::files::FileRequest },
     ImeArea(Rect),
 }
 
@@ -132,6 +133,10 @@ pub struct App {
     pub(crate) menu: Option<crate::menu::Menu>,
     pub(crate) rename: Option<crate::tabs::Rename>,
     pub(crate) paste_confirm: Option<crate::paste::PasteConfirm>,
+    pub(crate) files: Option<crate::files::FilesPage>,
+    pub(crate) transfers: Vec<crate::files::Transfer>,
+    pub(crate) transfer_seq: u64,
+    pub(crate) last_dirs: HashMap<PaneId, String>,
     pub(crate) bell: Option<(PaneId, Instant)>,
     last_bell: Option<Instant>,
     bell_pane: Option<PaneId>,
@@ -194,6 +199,10 @@ impl App {
             menu: None,
             rename: None,
             paste_confirm: None,
+            files: None,
+            transfers: Vec::new(),
+            transfer_seq: 0,
+            last_dirs: HashMap::new(),
             bell: None,
             last_bell: None,
             bell_pane: None,
@@ -434,6 +443,9 @@ impl App {
 
     pub fn close_pane(&mut self, pane: PaneId) {
         let Some(ti) = self.tabs.iter().position(|t| t.root.contains(pane)) else { return };
+        if self.files.as_ref().is_some_and(|f| f.pane == pane) {
+            self.files = None;
+        }
         if self.search.as_ref().is_some_and(|s| s.pane == pane) {
             self.search = None;
         }
@@ -577,6 +589,9 @@ impl App {
         if self.rename.is_some() {
             return self.rename_text(&text.replace(['\r', '\n'], " "));
         }
+        if self.files.is_some() {
+            return self.files_text(&text.replace(['\r', '\n'], " "));
+        }
         if self.settings.is_some() {
             return self.settings_text(&text.replace(['\r', '\n'], " "));
         }
@@ -698,6 +713,7 @@ impl App {
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             Settings => self.open_settings(),
             RenameTab => self.start_rename(self.active),
+            OpenFiles => self.open_files(),
             CloseOtherTabs => self.close_tabs_except(|i, active| i == active),
             CloseTabsToRight => self.close_tabs_except(|i, active| i <= active),
             CloseTabsToLeft => self.close_tabs_except(|i, active| i >= active),
@@ -882,7 +898,7 @@ impl App {
     }
 
     pub(crate) fn terminal_has_focus(&self) -> bool {
-        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.paste_confirm.is_none()
+        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.paste_confirm.is_none() && self.files.is_none()
     }
 
     fn blinking(&self) -> bool {
@@ -946,8 +962,12 @@ impl App {
                 self.dirty = true;
             }
             Event::DroppedFiles(paths) => {
-                let text = paths.iter().map(|p| if p.contains(' ') { format!("\"{p}\"") } else { p.clone() }).collect::<Vec<_>>().join(" ");
-                self.write_focused(text.into_bytes());
+                if self.files.is_some() {
+                    self.files_dropped(paths);
+                } else if let Some(profile) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.profile.clone()) {
+                    let text = dropped_text(&profile, &paths);
+                    self.write_focused(text.into_bytes());
+                }
             }
             Event::CloseRequested | Event::SessionEnding => {
                 self.close_all();
@@ -959,7 +979,7 @@ impl App {
     }
 
     fn on_key(&mut self, key: Key, mods: Mods) {
-        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.settings.is_some();
+        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.settings.is_some() || self.files.is_some();
         self.swallow_char = false;
         self.swallow_control = modal && matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
         if self.overlay.is_some() {
@@ -974,6 +994,12 @@ impl App {
         }
         if self.rename.is_some() {
             return self.rename_key(key, mods);
+        }
+        if self.files.is_some() {
+            if self.keymap.press(Chord { key, mods }) == Outcome::Action(Action::OpenFiles) {
+                return self.close_files();
+            }
+            return self.files_key(key, mods);
         }
         if self.settings.is_some() {
             if self.keymap.press(Chord { key, mods }) == Outcome::Action(Action::Settings) {
@@ -1023,6 +1049,9 @@ impl App {
         }
         if self.rename.is_some() {
             return self.rename_text(&c.to_string());
+        }
+        if self.files.is_some() {
+            return self.files_text(&c.to_string());
         }
         if self.settings.is_some() {
             return self.settings_text(&c.to_string());
@@ -1143,7 +1172,7 @@ impl App {
             }
             _ => {}
         }
-        if self.settings.is_some() && self.chrome.content.contains(x, y) {
+        if (self.settings.is_some() || self.files.is_some()) && self.chrome.content.contains(x, y) {
             self.dirty = true;
             self.hover_link = None;
             self.set_cursor(CursorIcon::Default);
@@ -1237,6 +1266,13 @@ impl App {
             } else if button == MouseButton::Left {
                 return;
             }
+        }
+        if self.files.is_some() && self.chrome.content.contains(x, y) {
+            if button == MouseButton::Left {
+                let n = self.click_count(x, y, clicks);
+                self.files_click(x, y, n);
+            }
+            return;
         }
         if self.settings.is_some() && self.chrome.content.contains(x, y) {
             if button == MouseButton::Left {
@@ -1359,6 +1395,9 @@ impl App {
             o.step(if dy > 0.0 { -3 } else { 3 });
             self.dirty = true;
             return;
+        }
+        if self.files.is_some() {
+            return self.files_wheel(dy);
         }
         if self.settings.is_some() {
             return self.settings_wheel(dy);
@@ -1494,6 +1533,23 @@ impl App {
 
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
+    }
+}
+
+pub fn dropped_text(profile: &Profile, paths: &[String]) -> String {
+    use aster_proto::quote::{quote_paths, shell_kind, ShellKind};
+    let wsl = profile.id.starts_with("local:wsl");
+    let kind = if profile.ssh.is_some() || wsl { ShellKind::Unix } else { shell_kind(&profile.command) };
+    let paths: Vec<String> = paths.iter().map(|p| if wsl { wsl_path(p) } else { p.clone() }).collect();
+    quote_paths(&paths, kind)
+}
+
+pub fn wsl_path(path: &str) -> String {
+    let b = path.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        format!("/mnt/{}{}", (b[0] as char).to_ascii_lowercase(), path[2..].replace('\\', "/"))
+    } else {
+        path.to_owned()
     }
 }
 

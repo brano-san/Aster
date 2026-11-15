@@ -51,6 +51,15 @@ impl Platform for Linux {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
     }
 
+    fn downloads_dir() -> Option<PathBuf> {
+        let home = Self::home_dir()?;
+        let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
+        let listed = std::fs::read_to_string(config.join("user-dirs.dirs")).ok().and_then(|text| {
+            text.lines().find_map(|l| l.trim().strip_prefix("XDG_DOWNLOAD_DIR=")).map(|v| v.trim_matches('"').replace("$HOME", &home.to_string_lossy()))
+        });
+        Some(listed.map(PathBuf::from).unwrap_or_else(|| home.join("Downloads")))
+    }
+
     fn beep() -> bool {
         false
     }

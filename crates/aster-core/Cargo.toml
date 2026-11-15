@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+aster-proto.workspace = true
 aster-gfx.workspace = true
 aster-vt.workspace = true
 serde.workspace = true
