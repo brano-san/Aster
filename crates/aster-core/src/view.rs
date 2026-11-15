@@ -739,6 +739,55 @@ impl App {
         g.text(geo.hint.x, hy, hint, small, theme.text_dim, geo.hint.w);
     }
 
+    fn draw_profile_editor<B: TextBackend>(&mut self, g: &mut Gfx<B>, area: Rect, editor: &crate::settings::ProfileEditor) {
+        use crate::settings::FIELDS;
+        let s = self.scale;
+        let theme = self.theme;
+        let line = (1.0 * s).round().max(1.0);
+        let radius = (8.0 * s).round();
+        let w = (560.0 * s).min(area.w).round();
+        let field_h = (30.0 * s).round();
+        let label_h = (20.0 * s).round();
+        let pad = (18.0 * s).round();
+        let h = pad * 2.0 + (30.0 * s).round() + FIELDS.len() as f32 * (label_h + field_h + 8.0 * s) + (48.0 * s).round();
+        let frame = Rect::new((area.x + (area.w - w) / 2.0).round(), area.y + (6.0 * s).round(), w, h.round());
+        g.dl.shadow(Rect::new(frame.x, frame.y + 6.0 * s, frame.w, frame.h), theme.shadow, radius, (18.0 * s).round());
+        g.dl.round_rect(frame, theme.overlay, radius);
+        g.dl.outline(frame, theme.overlay_border, radius, line);
+        let title = FontStyle::new(FontFamily::Ui, (15.0 * s).round(), true);
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let mut y = frame.y + pad;
+        let head = Rect::new(frame.x + pad, y, frame.w - 2.0 * pad, (24.0 * s).round());
+        let ty = baseline(g, head, title);
+        g.text(head.x, ty, if editor.original.is_some() { "Edit profile" } else { "New profile" }, title, theme.text, head.w);
+        y += (30.0 * s).round();
+        let caret_h = (16.0 * s).round();
+        for (i, label) in FIELDS.iter().enumerate() {
+            let lr = Rect::new(frame.x + pad, y, frame.w - 2.0 * pad, label_h);
+            let ly = baseline(g, lr, small);
+            g.text(lr.x, ly, label, small, theme.text_dim, lr.w);
+            y += label_h;
+            let fr = Rect::new(frame.x + pad, y, frame.w - 2.0 * pad, field_h);
+            let focused = editor.focus == i;
+            g.dl.round_rect(fr, theme.surface, (5.0 * s).round());
+            g.dl.outline(fr, if focused { theme.accent } else { theme.overlay_border }, (5.0 * s).round(), line);
+            let inner = fr.inset((10.0 * s).round(), 0.0);
+            let fy = baseline(g, inner, ui);
+            let tw = g.text(inner.x, fy, &editor.fields[i], ui, theme.text, inner.w);
+            if focused {
+                g.dl.rect(Rect::new(inner.x + tw + 1.0, fr.y + ((fr.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
+            }
+            y += field_h + (8.0 * s).round();
+        }
+        let foot = Rect::new(frame.x + pad, y + (6.0 * s).round(), frame.w - 2.0 * pad, (24.0 * s).round());
+        let fy = baseline(g, foot, small);
+        match &editor.error {
+            Some(e) => g.text(foot.x, fy, e, small, Color::rgb(0xD9534F), foot.w),
+            None => g.text(foot.x, fy, "Tab next field  \u{b7}  Enter on the last field or Ctrl+Enter saves  \u{b7}  Esc cancels", small, theme.text_dim, foot.w),
+        };
+    }
+
     fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         use crate::settings::{part_at, Control, Part, RowKind, SETTINGS};
         let Some(geo) = self.settings_geometry() else { return };
@@ -814,6 +863,31 @@ impl App {
                         g.text(inner.x, y, &text, ui, ink, inner.w);
                         continue;
                     }
+                    let item = page.shown[n];
+                    if page.profile_at(item).is_some() || page.is_new_profile(item) {
+                        let tx = row.rect.x + (14.0 * s).round();
+                        let tw = (row.control.x - tx - 16.0 * s).max(0.0);
+                        let (label, detail, badge) = match page.profile_at(item) {
+                            Some(p) => {
+                                let kind = if p.custom { "Custom" } else { "Detected" };
+                                (p.name.clone(), p.detail.clone(), if p.default { format!("Default  \u{b7}  {kind}") } else { kind.to_owned() })
+                            }
+                            None => ("New profile".to_owned(), "Create a profile with its own command, folder or SSH host".to_owned(), "+".to_owned()),
+                        };
+                        let hint = match (&page.notice, selected) {
+                            (Some(n), true) => n.clone(),
+                            (_, true) if page.profile_at(item).is_some() => "Enter to edit  \u{b7}  Ctrl+Enter to make default  \u{b7}  Del to delete".to_owned(),
+                            _ => detail,
+                        };
+                        g.text(tx, row.rect.y + (25.0 * s).round(), &label, ui, theme.text, tw);
+                        g.text(tx, row.rect.y + (43.0 * s).round(), &hint, small, if selected && page.notice.is_some() { theme.accent } else { theme.text_dim }, tw);
+                        let c = row.control;
+                        let default = page.profile_at(item).is_some_and(|p| p.default);
+                        g.dl.round_rect(c, if default { theme.accent.alpha(0x30) } else { theme.overlay }, radius);
+                        g.dl.outline(c, theme.overlay_border, radius, line);
+                        centered(g, c, &badge, ui, if default { theme.text } else { theme.text_dim });
+                        continue;
+                    }
                     let setting = &SETTINGS[page.shown[n]];
                     let tx = row.rect.x + (14.0 * s).round();
                     let tw = (row.control.x - tx - 16.0 * s).max(0.0);
@@ -875,6 +949,10 @@ impl App {
             }
         }
         g.dl.set_clip(None);
+        if let Some(editor) = &page.editor {
+            self.draw_profile_editor(g, geo.list, editor);
+            return;
+        }
         if geo.height > geo.list.h {
             let track = geo.list;
             let thumb_h = (track.h * track.h / geo.height).max(24.0 * s);

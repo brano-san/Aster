@@ -120,6 +120,75 @@ fn found(hay: &str, query: &str) -> bool {
 }
 
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
+pub const PROFILES: &str = "Profiles";
+pub const FIELDS: [&str; 5] = ["Name", "Command", "Arguments", "Start folder", "SSH destination"];
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileRow {
+    pub id: String,
+    pub name: String,
+    pub detail: String,
+    pub custom: bool,
+    pub default: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileEditor {
+    pub original: Option<String>,
+    pub source: Option<String>,
+    pub fields: [String; 5],
+    pub focus: usize,
+    pub error: Option<String>,
+}
+
+pub fn split_args(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut any = false;
+    for c in text.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                any = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if any || !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                    any = false;
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if any || !current.is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+pub fn join_args(args: &[String]) -> String {
+    args.iter().map(|a| if a.is_empty() || a.contains(char::is_whitespace) { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ")
+}
+
+fn slug(name: &str) -> String {
+    let mut s = String::new();
+    for c in name.to_lowercase().chars() {
+        if c.is_alphanumeric() {
+            s.push(c);
+        } else if !s.ends_with('-') {
+            s.push('-');
+        }
+    }
+    let s = s.trim_matches('-').to_owned();
+    if s.is_empty() {
+        "profile".into()
+    } else {
+        s
+    }
+}
 
 pub fn shortcut(item: usize) -> Option<Action> {
     item.checked_sub(SETTINGS.len()).and_then(|k| Action::all().nth(k))
@@ -151,6 +220,9 @@ pub struct SettingsPage {
     pub editing: Option<String>,
     pub capture: Option<Action>,
     pub notice: Option<String>,
+    pub profiles: Vec<ProfileRow>,
+    pub editor: Option<ProfileEditor>,
+    pub deleting: Option<String>,
 }
 
 impl SettingsPage {
@@ -161,8 +233,16 @@ impl SettingsPage {
     }
 
     fn refilter(&mut self) {
-        let total = SETTINGS.len() + Action::all().count();
-        self.shown = (0..total).filter(|&i| item_matches(i, &self.query)).collect();
+        let actions = Action::all().count();
+        let base = SETTINGS.len() + actions;
+        let settings = (0..SETTINGS.len()).filter(|&i| item_matches(i, &self.query));
+        let profiles = (0..self.profiles.len()).filter(|&k| {
+            let p = &self.profiles[k];
+            found(&format!("{PROFILES} profile shell {} {} {}", p.name, p.detail, p.id), &self.query)
+        });
+        let new_row = found(&format!("{PROFILES} new profile add create"), &self.query).then_some(base + self.profiles.len());
+        let shortcuts = (SETTINGS.len()..base).filter(|&i| item_matches(i, &self.query));
+        self.shown = settings.chain(profiles.map(|k| base + k)).chain(new_row).chain(shortcuts).collect();
         self.selected = 0;
         self.scroll = 0.0;
     }
@@ -173,6 +253,30 @@ impl SettingsPage {
 
     pub fn current_shortcut(&self) -> Option<Action> {
         self.shown.get(self.selected).and_then(|&i| shortcut(i))
+    }
+
+    fn profile_base(&self) -> usize {
+        SETTINGS.len() + Action::all().count()
+    }
+
+    pub fn profile_at(&self, item: usize) -> Option<&ProfileRow> {
+        item.checked_sub(self.profile_base()).and_then(|k| self.profiles.get(k))
+    }
+
+    pub fn is_new_profile(&self, item: usize) -> bool {
+        item == self.profile_base() + self.profiles.len()
+    }
+
+    pub fn section(&self, item: usize) -> &'static str {
+        if self.profile_at(item).is_some() || self.is_new_profile(item) {
+            PROFILES
+        } else {
+            section_of(item)
+        }
+    }
+
+    pub fn current_item(&self) -> Option<usize> {
+        self.shown.get(self.selected).copied()
     }
 
     fn step(&mut self, delta: isize) {
@@ -243,8 +347,8 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
     let mut y = list.y - page.scroll;
     let mut section = "";
     for (n, &i) in page.shown.iter().enumerate() {
-        if section_of(i) != section {
-            section = section_of(i);
+        if page.section(i) != section {
+            section = page.section(i);
             rows.push(Row { kind: RowKind::Section(section), rect: Rect::new(x, y, width, section_h), control: Rect::default() });
             y += section_h;
         }
@@ -278,8 +382,176 @@ impl App {
 
     pub(crate) fn open_settings(&mut self) {
         self.overlay = None;
-        self.settings = Some(SettingsPage::new());
+        let mut page = SettingsPage { profiles: self.profile_rows(), ..SettingsPage::default() };
+        page.refilter();
+        self.settings = Some(page);
         self.dirty = true;
+    }
+
+    fn profile_rows(&self) -> Vec<ProfileRow> {
+        let default = self.default_profile().map(|p| p.id);
+        self.profiles
+            .iter()
+            .map(|p| ProfileRow {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                detail: match &p.ssh {
+                    Some(dest) => format!("ssh {dest}"),
+                    None => std::iter::once(p.command.clone())
+                        .chain(p.args.iter().enumerate().map(|(i, a)| if i > 0 && p.args[i - 1].eq_ignore_ascii_case("-EncodedCommand") { "\u{2026}".to_owned() } else { a.clone() }))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                },
+                custom: self.config.profiles.iter().any(|c| c.id == p.id),
+                default: default.as_deref() == Some(p.id.as_str()),
+            })
+            .collect()
+    }
+
+    fn refresh_profiles(&mut self, select: Option<&str>) {
+        let rows = self.profile_rows();
+        let Some(page) = self.settings.as_mut() else { return };
+        page.profiles = rows;
+        let query = page.query.clone();
+        page.refilter();
+        page.query = query;
+        if let Some(id) = select {
+            if let Some(at) = page.shown.iter().position(|&i| page.profile_at(i).is_some_and(|p| p.id == id)) {
+                page.selected = at;
+            }
+        }
+        self.reveal_selected();
+    }
+
+    fn open_editor(&mut self, item: usize) {
+        let Some(page) = self.settings.as_ref() else { return };
+        let editor = if let Some(row) = page.profile_at(item) {
+            let Some(p) = self.profiles.iter().find(|p| p.id == row.id) else { return };
+            ProfileEditor {
+                original: row.custom.then(|| p.id.clone()),
+                source: Some(p.id.clone()),
+                fields: [
+                    if row.custom { p.name.clone() } else { format!("{} (copy)", p.name) },
+                    p.command.clone(),
+                    join_args(&p.args),
+                    p.cwd.clone().unwrap_or_default(),
+                    p.ssh.clone().unwrap_or_default(),
+                ],
+                focus: 0,
+                error: None,
+            }
+        } else {
+            ProfileEditor::default()
+        };
+        if let Some(page) = self.settings.as_mut() {
+            page.editor = Some(editor);
+        }
+        self.dirty = true;
+    }
+
+    fn save_editor(&mut self) {
+        let Some(editor) = self.settings.as_ref().and_then(|p| p.editor.clone()) else { return };
+        let [name, command, args, cwd, ssh] = editor.fields.clone().map(|f| f.trim().to_owned());
+        let fail = |app: &mut App, error: &str| {
+            if let Some(e) = app.settings.as_mut().and_then(|p| p.editor.as_mut()) {
+                e.error = Some(error.to_owned());
+            }
+            app.dirty = true;
+        };
+        if name.is_empty() {
+            return fail(self, "The profile needs a name");
+        }
+        if command.is_empty() && ssh.is_empty() {
+            return fail(self, "Give a command to run or an SSH destination");
+        }
+        let id = editor.original.clone().unwrap_or_else(|| {
+            let base = format!("custom:{}", slug(&name));
+            let taken = |id: &str| self.profiles.iter().any(|p| p.id == id);
+            if !taken(&base) {
+                base
+            } else {
+                (2..).map(|n| format!("{base}-{n}")).find(|c| !taken(c)).unwrap_or(base)
+            }
+        });
+        let ssh = (!ssh.is_empty()).then_some(ssh);
+        let (command, args) = match (&ssh, command.is_empty()) {
+            (Some(dest), true) => ("ssh".to_owned(), vec![dest.clone()]),
+            _ => (command, split_args(&args)),
+        };
+        let mut profile = crate::profile::Profile { id: id.clone(), name, command, args, cwd: (!cwd.is_empty()).then_some(cwd), ssh: ssh.clone(), ..Default::default() };
+        if let Some(source) = editor.source.as_ref().and_then(|id| self.profiles.iter().find(|p| &p.id == id)) {
+            profile.env = source.env.clone();
+            profile.icon = source.icon.clone();
+            profile.color = source.color.clone();
+        }
+        if ssh.is_some() {
+            profile.icon = Some("ssh".into());
+        }
+        let mut config = self.config.clone();
+        match config.profiles.iter_mut().find(|p| p.id == id) {
+            Some(existing) => {
+                profile.env = existing.env.clone();
+                profile.color = existing.color.clone();
+                *existing = profile;
+            }
+            None => config.profiles.push(profile),
+        }
+        self.set_config(config);
+        self.push_save_config();
+        if let Some(page) = self.settings.as_mut() {
+            page.editor = None;
+        }
+        self.refresh_profiles(Some(&id));
+    }
+
+    fn make_default(&mut self, id: &str) {
+        let mut config = self.config.clone();
+        config.terminal.profile = id.to_owned();
+        if config != self.config {
+            self.set_config(config);
+            self.push_save_config();
+        }
+        self.refresh_profiles(Some(id));
+    }
+
+    fn delete_profile(&mut self, id: &str) {
+        let mut config = self.config.clone();
+        config.profiles.retain(|p| p.id != id);
+        if config.terminal.profile == id {
+            config.terminal.profile.clear();
+        }
+        self.set_config(config);
+        self.push_save_config();
+        self.refresh_profiles(None);
+    }
+
+    fn editor_key(&mut self, key: Key, mods: Mods) {
+        let Some(editor) = self.settings.as_mut().and_then(|p| p.editor.as_mut()) else { return };
+        self.dirty = true;
+        let last = FIELDS.len() - 1;
+        match key {
+            Key::Escape => {
+                if let Some(p) = self.settings.as_mut() {
+                    p.editor = None;
+                }
+            }
+            Key::Enter if mods.ctrl || editor.focus == last => self.save_editor(),
+            Key::Char('S') if mods.ctrl => self.save_editor(),
+            Key::Enter | Key::Down => editor.focus = (editor.focus + 1).min(last),
+            Key::Tab if mods.shift => editor.focus = editor.focus.saturating_sub(1),
+            Key::Tab => editor.focus = (editor.focus + 1) % FIELDS.len(),
+            Key::Up => editor.focus = editor.focus.saturating_sub(1),
+            Key::Backspace => {
+                let field = &mut editor.fields[editor.focus];
+                if mods.ctrl {
+                    field.clear();
+                } else {
+                    field.pop();
+                }
+            }
+            Key::Char('V') if mods.ctrl => self.push(Effect::RequestPaste),
+            _ => {}
+        }
     }
 
     pub(crate) fn close_settings(&mut self) {
@@ -485,6 +757,35 @@ impl App {
         if page.capture.is_some() {
             return self.capture_key(key, mods);
         }
+        if page.editor.is_some() {
+            return self.editor_key(key, mods);
+        }
+        if let Some(item) = page.current_item() {
+            let row = page.profile_at(item).cloned();
+            if row.is_some() || page.is_new_profile(item) {
+                if key != Key::Delete {
+                    page.deleting = None;
+                }
+                match (key, row) {
+                    (Key::Enter, Some(r)) if mods.ctrl => return self.make_default(&r.id),
+                    (Key::Enter, _) => return self.open_editor(item),
+                    (Key::Delete, Some(r)) if r.custom => {
+                        if page.deleting.as_deref() == Some(r.id.as_str()) {
+                            page.deleting = None;
+                            return self.delete_profile(&r.id);
+                        }
+                        page.notice = Some(format!("Press Del again to delete {}", r.name));
+                        page.deleting = Some(r.id);
+                        return;
+                    }
+                    (Key::Delete, Some(_)) => {
+                        page.notice = Some("Detected profiles cannot be deleted; copy one with Enter instead".into());
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         if key != Key::Other {
             page.notice = None;
         }
@@ -560,6 +861,11 @@ impl App {
         if clean.is_empty() {
             return;
         }
+        if let Some(editor) = page.editor.as_mut() {
+            editor.fields[editor.focus].push_str(&clean);
+            self.dirty = true;
+            return;
+        }
         match page.editing.as_mut() {
             Some(t) => t.push_str(&clean),
             None => {
@@ -593,6 +899,10 @@ impl App {
         let Some(page) = self.settings.as_mut() else { return };
         page.selected = n;
         page.notice = None;
+        let item = page.shown[n];
+        if page.profile_at(item).is_some() || page.is_new_profile(item) {
+            return self.open_editor(item);
+        }
         if let Some(action) = shortcut(page.shown[n]) {
             page.capture = Some(action);
             return;
