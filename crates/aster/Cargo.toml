@@ -12,6 +12,7 @@ aster-gfx.workspace = true
 aster-platform.workspace = true
 aster-ssh.workspace = true
 aster-zmodem.workspace = true
+aster-serial.workspace = true
 aster-vt.workspace = true
 crossbeam-channel.workspace = true
 tokio.workspace = true

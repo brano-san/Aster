@@ -122,7 +122,7 @@ fn found(hay: &str, query: &str) -> bool {
 
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
 pub const PROFILES: &str = "Profiles";
-pub const FIELDS: [&str; 5] = ["Name", "Command", "Arguments", "Start folder", "SSH destination"];
+pub const FIELDS: [&str; 6] = ["Name", "Command", "Arguments", "Start folder", "SSH destination", "Serial port"];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileRow {
@@ -137,7 +137,7 @@ pub struct ProfileRow {
 pub struct ProfileEditor {
     pub original: Option<String>,
     pub source: Option<String>,
-    pub fields: [String; 5],
+    pub fields: [String; 6],
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -396,9 +396,10 @@ impl App {
             .map(|p| ProfileRow {
                 id: p.id.clone(),
                 name: p.name.clone(),
-                detail: match &p.ssh {
-                    Some(dest) => format!("ssh {dest}"),
-                    None => std::iter::once(p.command.clone())
+                detail: match (&p.ssh, &p.serial) {
+                    (Some(dest), _) => format!("ssh {dest}"),
+                    (None, Some(spec)) => format!("serial {spec}"),
+                    (None, None) => std::iter::once(p.command.clone())
                         .chain(p.args.iter().enumerate().map(|(i, a)| if i > 0 && p.args[i - 1].eq_ignore_ascii_case("-EncodedCommand") { "\u{2026}".to_owned() } else { a.clone() }))
                         .collect::<Vec<_>>()
                         .join(" "),
@@ -437,6 +438,7 @@ impl App {
                     join_args(&p.args),
                     p.cwd.clone().unwrap_or_default(),
                     p.ssh.clone().unwrap_or_default(),
+                    p.serial.clone().unwrap_or_default(),
                 ],
                 focus: 0,
                 error: None,
@@ -452,7 +454,7 @@ impl App {
 
     fn save_editor(&mut self) {
         let Some(editor) = self.settings.as_ref().and_then(|p| p.editor.clone()) else { return };
-        let [name, command, args, cwd, ssh] = editor.fields.clone().map(|f| f.trim().to_owned());
+        let [name, command, args, cwd, ssh, serial] = editor.fields.clone().map(|f| f.trim().to_owned());
         let fail = |app: &mut App, error: &str| {
             if let Some(e) = app.settings.as_mut().and_then(|p| p.editor.as_mut()) {
                 e.error = Some(error.to_owned());
@@ -462,8 +464,8 @@ impl App {
         if name.is_empty() {
             return fail(self, "The profile needs a name");
         }
-        if command.is_empty() && ssh.is_empty() {
-            return fail(self, "Give a command to run or an SSH destination");
+        if command.is_empty() && ssh.is_empty() && serial.is_empty() {
+            return fail(self, "Give a command to run, an SSH destination or a serial port");
         }
         let id = editor.original.clone().unwrap_or_else(|| {
             let base = format!("custom:{}", slug(&name));
@@ -479,7 +481,7 @@ impl App {
             (Some(dest), true) => ("ssh".to_owned(), vec![dest.clone()]),
             _ => (command, split_args(&args)),
         };
-        let mut profile = crate::profile::Profile { id: id.clone(), name, command, args, cwd: (!cwd.is_empty()).then_some(cwd), ssh: ssh.clone(), ..Default::default() };
+        let mut profile = crate::profile::Profile { id: id.clone(), name, command, args, cwd: (!cwd.is_empty()).then_some(cwd), ssh: ssh.clone(), serial: (!serial.is_empty()).then_some(serial), ..Default::default() };
         if let Some(source) = editor.source.as_ref().and_then(|id| self.profiles.iter().find(|p| &p.id == id)) {
             profile.env = source.env.clone();
             profile.icon = source.icon.clone();

@@ -14,6 +14,8 @@ pub struct Profile {
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
     #[serde(skip)]
     pub builtin: bool,
 }
