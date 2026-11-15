@@ -181,3 +181,23 @@ fn ctrl_c_copies_a_selection_or_interrupts() {
     assert!(e.iter().any(|e| matches!(e, Effect::SetClipboard(t) if t.starts_with("hello"))));
     assert!(writes(&e).is_empty());
 }
+
+#[test]
+fn the_scheme_selector_previews_restores_on_escape_and_saves_on_enter() {
+    let (mut a, _) = app();
+    let before = a.theme.background;
+    a.run(Action::SelectColorScheme);
+    for c in "dracula".chars() {
+        a.on_event(Event::Char(c));
+    }
+    assert_ne!(a.theme.background, before, "the selection is previewed");
+    key(&mut a, Key::Escape, Mods::NONE);
+    assert_eq!(a.theme.background, before);
+    a.run(Action::SelectColorScheme);
+    for c in "dracula".chars() {
+        a.on_event(Event::Char(c));
+    }
+    key(&mut a, Key::Enter, Mods::NONE);
+    let saved = a.take_effects().into_iter().find_map(|e| if let Effect::SaveConfig(t) = e { Some(t) } else { None }).unwrap();
+    assert!(saved.contains("color-scheme = \"Dracula\""), "{saved}");
+}

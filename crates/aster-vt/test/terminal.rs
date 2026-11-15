@@ -112,3 +112,32 @@ fn palette_cube_and_gray_ramp() {
     assert_eq!(p.indexed(232), Rgb { r: 8, g: 8, b: 8 });
     assert_eq!(p.indexed(255), Rgb { r: 238, g: 238, b: 238 });
 }
+
+#[test]
+fn every_community_scheme_parses() {
+    let all = schemes::builtin();
+    assert_eq!(all.len(), 2 + schemes::COMMUNITY.len());
+    assert!(schemes::COMMUNITY.len() > 180);
+    let night = all.iter().find(|s| s.name == "3024 Night").unwrap();
+    assert_eq!(night.palette.background, Rgb { r: 0x09, g: 0x03, b: 0x00 });
+}
+
+#[test]
+fn xresources_defines_and_short_hex_are_resolved() {
+    let p = schemes::parse_xresources("#define bg #123
+*.foreground: #ffffff
+*.background: bg
+*.color0: #000000
+*.color1: #ff0000
+*.color2: #00ff00
+*.color3: #ffff00
+*.color4: #0000ff
+*.color5: #ff00ff
+*.color6: #00ffff
+*.color7: #eeeeee
+").unwrap();
+    assert_eq!(p.background, Rgb { r: 0x11, g: 0x22, b: 0x33 });
+    assert_eq!(p.ansi[9], Rgb { r: 255, g: 0, b: 0 }, "missing bright colors repeat the normal ones");
+    assert_eq!(p.cursor, p.foreground);
+    assert!(schemes::parse_xresources("*.foreground: #fff").is_none());
+}
