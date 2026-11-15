@@ -44,6 +44,12 @@ pub enum Edge {
     Right,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Surface {
+    pub translucent: bool,
+    pub backdrop: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DockSpec {
     pub edge: Edge,
@@ -108,6 +114,7 @@ pub trait Window {
     fn set_dark(&self, dark: bool);
     fn set_timer(&self, ms: u32);
     fn request_attention(&self);
+    fn set_surface(&self, backdrop: aster_core::config::Backdrop) -> Surface;
     fn set_visible(&self, visible: bool);
     fn is_visible(&self) -> bool;
     fn is_foreground(&self) -> bool;

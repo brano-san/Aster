@@ -216,6 +216,12 @@ impl<P: Platform> Handler<P> {
             Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()) }),
             Effect::Timer(ms) => window.set_timer(ms),
             Effect::Attention => window.request_attention(),
+            Effect::Surface(backdrop) => {
+                let got = window.set_surface(backdrop);
+                if let Some(s) = self.windows.get_mut(&id) {
+                    s.app.set_surface(got.translucent, got.backdrop);
+                }
+            }
             Effect::Beep => {
                 if !P::beep() {
                     if let Some(s) = self.windows.get_mut(&id) {
