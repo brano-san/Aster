@@ -49,6 +49,10 @@ pub enum Action {
     SelectColorScheme,
     Search,
     Settings,
+    RenameTab,
+    CloseOtherTabs,
+    CloseTabsToRight,
+    CloseTabsToLeft,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -96,6 +100,10 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::SelectColorScheme, "select-color-scheme", "Select color scheme"),
     (Action::Search, "search", "Search"),
     (Action::Settings, "settings", "Open settings"),
+    (Action::RenameTab, "rename-tab", "Rename tab"),
+    (Action::CloseOtherTabs, "close-other-tabs", "Close other tabs"),
+    (Action::CloseTabsToRight, "close-tabs-to-the-right", "Close tabs to the right"),
+    (Action::CloseTabsToLeft, "close-tabs-to-the-left", "Close tabs to the left"),
 ];
 
 impl Action {

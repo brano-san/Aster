@@ -68,6 +68,7 @@ pub(crate) struct Tab {
     pub root: Node,
     pub focus: PaneId,
     pub zoomed: Option<PaneId>,
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,7 +97,7 @@ pub struct App {
     detected: Vec<Profile>,
     schemes: Vec<Scheme>,
     scheme_before: Option<String>,
-    keymap: Keymap,
+    pub(crate) keymap: Keymap,
     pub(crate) palette: Palette,
     pub(crate) theme: Theme,
     pub(crate) tabs: Vec<Tab>,
@@ -123,6 +124,8 @@ pub struct App {
     pub(crate) hover_link: Option<HoverLink>,
     pub(crate) overlay: Option<Overlay>,
     pub(crate) settings: Option<crate::settings::SettingsPage>,
+    pub(crate) menu: Option<crate::menu::Menu>,
+    pub(crate) rename: Option<crate::tabs::Rename>,
     pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
     pub(crate) blink_on: bool,
@@ -176,6 +179,8 @@ impl App {
             hover_link: None,
             overlay: None,
             settings: None,
+            menu: None,
+            rename: None,
             search: None,
             swallow_char: false,
             blink_on: true,
@@ -365,7 +370,7 @@ impl App {
     pub fn open_tab(&mut self, profile: Profile) {
         let id = self.new_pane(profile);
         let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
-        self.tabs.insert(at, Tab { root: Node::Leaf(id), focus: id, zoomed: None });
+        self.tabs.insert(at, Tab { root: Node::Leaf(id), focus: id, zoomed: None, title: None });
         self.active = at;
         self.overlay = None;
         self.dirty = true;
@@ -485,6 +490,9 @@ impl App {
 
     pub fn tab_title(&self, index: usize) -> String {
         let Some(tab) = self.tabs.get(index) else { return String::new() };
+        if let Some(t) = &tab.title {
+            return t.clone();
+        }
         self.panes.get(&tab.focus).map(|p| p.title.clone().unwrap_or_else(|| p.profile.name.clone())).unwrap_or_default()
     }
 
@@ -529,6 +537,9 @@ impl App {
             o.insert(&text.replace(['\r', '\n'], " "));
             self.dirty = true;
             return;
+        }
+        if self.rename.is_some() {
+            return self.rename_text(&text.replace(['\r', '\n'], " "));
         }
         if self.settings.is_some() {
             return self.settings_text(&text.replace(['\r', '\n'], " "));
@@ -603,6 +614,10 @@ impl App {
             Search => self.open_search(),
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             Settings => self.open_settings(),
+            RenameTab => self.start_rename(self.active),
+            CloseOtherTabs => self.close_tabs_except(|i, active| i == active),
+            CloseTabsToRight => self.close_tabs_except(|i, active| i <= active),
+            CloseTabsToLeft => self.close_tabs_except(|i, active| i >= active),
             ToggleFullscreen => self.effects.push(Effect::ToggleFullscreen),
             NewTab => self.open_default_tab(),
             NewWindow => self.effects.push(Effect::NewWindow),
@@ -783,8 +798,12 @@ impl App {
         self.dirty = true;
     }
 
+    pub(crate) fn terminal_has_focus(&self) -> bool {
+        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none()
+    }
+
     fn blinking(&self) -> bool {
-        self.config.terminal.cursor_blink && self.focused && self.overlay.is_none() && self.settings.is_none()
+        self.config.terminal.cursor_blink && self.terminal_has_focus()
     }
 
     pub fn on_timer(&mut self) {
@@ -859,6 +878,12 @@ impl App {
             return;
         }
         self.swallow_char = false;
+        if self.menu.is_some() {
+            return self.menu_key(key);
+        }
+        if self.rename.is_some() {
+            return self.rename_key(key, mods);
+        }
         if self.settings.is_some() {
             if self.keymap.press(Chord { key, mods }) == Outcome::Action(Action::Settings) {
                 return self.close_settings();
@@ -898,6 +923,12 @@ impl App {
             }
             self.preview_scheme();
             return;
+        }
+        if self.menu.is_some() {
+            return;
+        }
+        if self.rename.is_some() {
+            return self.rename_text(&c.to_string());
         }
         if self.settings.is_some() {
             return self.settings_text(&c.to_string());
@@ -945,7 +976,7 @@ impl App {
         true
     }
 
-    fn set_cursor(&mut self, c: CursorIcon) {
+    pub(crate) fn set_cursor(&mut self, c: CursorIcon) {
         if self.cursor_icon != c {
             self.cursor_icon = c;
             self.effects.push(Effect::Cursor(c));
@@ -959,6 +990,9 @@ impl App {
 
     fn on_move(&mut self, x: f32, y: f32) {
         self.mouse = (x, y);
+        if self.menu.is_some() {
+            return self.menu_hover(x, y);
+        }
         let hover = self.hit_test(x, y);
         if hover != self.hover {
             self.hover = hover;
@@ -1096,6 +1130,17 @@ impl App {
             }
             return;
         }
+        if self.menu.is_some() {
+            return self.menu_click(x, y);
+        }
+        if let Some(r) = self.rename.as_ref() {
+            let inside = self.chrome.tabs.get(r.tab).is_some_and(|t| t.rect.contains(x, y));
+            if !inside {
+                self.commit_rename();
+            } else if button == MouseButton::Left {
+                return;
+            }
+        }
         if self.settings.is_some() && self.chrome.content.contains(x, y) {
             if button == MouseButton::Left {
                 self.settings_click(x, y);
@@ -1119,10 +1164,12 @@ impl App {
                 match button {
                     MouseButton::Middle => self.close_tab(i),
                     MouseButton::Left if self.chrome.tabs[i].close.contains(x, y) => self.drag = Drag::TabClose(i),
+                    MouseButton::Left if self.click_count(x, y, clicks) >= 2 => self.start_rename(i),
                     MouseButton::Left => {
                         self.activate(i);
                         self.drag = Drag::Tab { index: i, start_x: x, moved: false };
                     }
+                    MouseButton::Right => self.open_tab_menu(i, x, y),
                     _ => {}
                 }
             }
@@ -1159,7 +1206,8 @@ impl App {
                 self.drag = Drag::Select { pane };
             }
             MouseButton::Right => match self.config.terminal.right_click {
-                RightClick::Clipboard | RightClick::Menu => {
+                RightClick::Menu => self.open_terminal_menu(x, y),
+                RightClick::Clipboard => {
                     if self.copy() {
                         self.clear_selection(pane);
                     } else {
@@ -1207,6 +1255,9 @@ impl App {
 
     fn on_wheel(&mut self, dy: f32) {
         let (x, y) = self.mouse;
+        if self.menu.is_some() {
+            return self.close_menu();
+        }
         if let Some(o) = self.overlay.as_mut() {
             o.step(if dy > 0.0 { -3 } else { 3 });
             self.dirty = true;

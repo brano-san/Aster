@@ -597,6 +597,7 @@ fn capture_batch(keys: &str) -> Vec<Event> {
         .filter(|k| !k.is_empty())
         .flat_map(|k| match k.strip_prefix('\'') {
             Some(text) => text.chars().map(Event::Char).collect::<Vec<_>>(),
+            None if k.contains('@') => capture_click(k),
             None => {
                 let key = capture_key(k);
                 let produced = match key {
@@ -611,6 +612,23 @@ fn capture_batch(keys: &str) -> Vec<Event> {
             }
         })
         .collect()
+}
+
+fn capture_click(text: &str) -> Vec<Event> {
+    let Some((kind, at)) = text.split_once('@') else { return Vec::new() };
+    let Some((x, y)) = at.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))) else { return Vec::new() };
+    let (button, clicks) = match kind {
+        "RightClick" => (MouseButton::Right, 1),
+        "MiddleClick" => (MouseButton::Middle, 1),
+        "DoubleClick" => (MouseButton::Left, 2),
+        _ => (MouseButton::Left, 1),
+    };
+    let mut events = vec![Event::MouseMove { x, y }];
+    for n in 1..=clicks {
+        events.push(Event::MouseDown { x, y, button, clicks: n });
+        events.push(Event::MouseUp { x, y, button });
+    }
+    events
 }
 
 fn capture_key(text: &str) -> Event {
