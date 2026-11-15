@@ -104,6 +104,7 @@ dependencies = [
  "aster-platform",
  "aster-platform-linux",
  "aster-platform-windows",
+ "aster-ssh",
  "aster-vt",
  "crossbeam-channel",
  "tracing",

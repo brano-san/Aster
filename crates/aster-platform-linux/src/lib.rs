@@ -47,6 +47,10 @@ impl Platform for Linux {
         std::env::var_os("HOME").map(PathBuf::from)
     }
 
+    fn ssh_command() -> Option<String> {
+        std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("ssh")).find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
+    }
+
     fn open(target: &str) {
         let target = target.to_owned();
         let _ = std::thread::Builder::new().name("aster-open".into()).spawn(move || {

@@ -112,6 +112,7 @@ pub struct App {
     sender: Sender<(PaneId, VtEvent)>,
     wake: Wake,
     home: Option<String>,
+    ssh: Option<String>,
     pub(crate) mouse: (f32, f32),
     pub(crate) drag: Drag,
     last_click: Option<(Instant, f32, f32, u8)>,
@@ -162,6 +163,7 @@ impl App {
             sender,
             wake,
             home,
+            ssh: None,
             mouse: (-1.0, -1.0),
             drag: Drag::None,
             last_click: None,
@@ -183,6 +185,10 @@ impl App {
         };
         app.restyle();
         app
+    }
+
+    pub fn set_ssh(&mut self, command: Option<String>) {
+        self.ssh = command;
     }
 
     pub fn profiles(&self) -> &[Profile] {
@@ -650,6 +656,9 @@ impl App {
             OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), hint: String::new(), value: n }).collect(),
         };
         let mut overlay = Overlay::new(kind, items);
+        if kind == OverlayKind::Profiles && self.ssh.is_some() {
+            overlay = overlay.with_quick_connect();
+        }
         if kind == OverlayKind::Schemes {
             let current = self.current_scheme();
             if let Some(at) = overlay.shown.iter().position(|(i, _)| overlay.items[*i].value.eq_ignore_ascii_case(&current)) {
@@ -668,6 +677,12 @@ impl App {
             OverlayKind::Commands => {
                 if let Some(a) = Action::from_id(&value) {
                     self.run(a);
+                }
+            }
+            OverlayKind::Profiles if value.starts_with(crate::overlay::QUICK) => {
+                let target = crate::ssh::parse_target(&value[crate::overlay::QUICK.len()..]);
+                if let (Some(t), Some(ssh)) = (target, self.ssh.clone()) {
+                    self.open_tab(t.profile(&ssh));
                 }
             }
             OverlayKind::Profiles => {
@@ -1183,7 +1198,7 @@ impl App {
                 }
                 VtEvent::Title(t) => {
                     if let Some(p) = self.panes.get_mut(&pane) {
-                        p.title = Some(t).filter(|t| !t.trim().is_empty());
+                        p.title = Some(t).filter(|t| !t.trim().is_empty() && !is_program_path(t));
                     }
                 }
                 VtEvent::ResetTitle => {
@@ -1271,6 +1286,12 @@ pub(crate) struct HoverLink {
     pub start: usize,
     pub end: usize,
     pub target: String,
+}
+
+pub fn is_program_path(title: &str) -> bool {
+    let t = title.trim().to_ascii_lowercase();
+    let bytes = t.as_bytes();
+    bytes.len() > 3 && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/') && t.ends_with(".exe")
 }
 
 pub fn open_target(target: &str) -> String {

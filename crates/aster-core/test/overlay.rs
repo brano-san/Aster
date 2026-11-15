@@ -28,3 +28,17 @@ fn stepping_wraps_by_one_and_clamps_by_pages() {
     o.step(8);
     assert_eq!(o.selected, 3);
 }
+
+#[test]
+fn quick_connect_offers_an_ssh_target_typed_into_the_selector() {
+    let mut o = Overlay::new(OverlayKind::Profiles, items()).with_quick_connect();
+    o.insert("root@db1:2222");
+    assert_eq!(o.selected_value().as_deref(), Some("quick:root@db1:2222"));
+    o.backspace(true);
+    o.insert("split");
+    assert_ne!(o.selected_value().as_deref(), Some("quick:split"), "a plain word keeps profiles first");
+    assert!(o.shown.iter().any(|(i, _)| o.items[*i].value == "quick:split"));
+    o.backspace(true);
+    o.insert("two words");
+    assert!(o.items.iter().all(|p| !p.value.starts_with(QUICK)));
+}

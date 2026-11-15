@@ -140,4 +140,5 @@ pub trait Platform: 'static {
     fn config_dir() -> Option<PathBuf>;
     fn home_dir() -> Option<PathBuf>;
     fn open(target: &str);
+    fn ssh_command() -> Option<String>;
 }
