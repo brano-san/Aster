@@ -314,7 +314,7 @@ impl App {
             let x = ox + v.col as f32 * m.w;
             let y = oy + v.line as f32 * m.h;
             let c = v.cell.c;
-            if c != ' ' && c != '\t' && !flags.contains(Flags::HIDDEN) {
+            if c != ' ' && c != '\t' && !flags.contains(Flags::HIDDEN) && !g.cell_box(x, y, c, m.w as u32, m.h as u32, rgb(fg)) {
                 let style = FontStyle::new(FontFamily::Mono, px, flags.contains(Flags::BOLD)).italic(flags.contains(Flags::ITALIC));
                 g.cell(x, y + m.baseline, c, style, rgb(fg));
             }

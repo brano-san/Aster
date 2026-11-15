@@ -1,4 +1,5 @@
 pub mod atlas;
+pub mod boxdraw;
 pub mod hash;
 pub mod render;
 pub mod text;
