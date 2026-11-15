@@ -80,19 +80,46 @@ fn wsl_distros() -> Vec<String> {
     names
 }
 
+const POWERSHELL_HOOK: &str = r#"$global:__AsterPrompt = $function:prompt
+function global:prompt {
+    $l = $executionContext.SessionState.Path.CurrentLocation
+    if ($l.Provider.Name -eq 'FileSystem') { [Console]::Write("$([char]27)]9;9;`"$($l.ProviderPath)`"$([char]27)\") }
+    & $global:__AsterPrompt
+}"#;
+
+pub(crate) fn encode_command(script: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+fn powershell(id: &str, name: &str, exe: &Path) -> Profile {
+    let hook = encode_command(POWERSHELL_HOOK);
+    let mut profile = Profile::new(id, name, &path_str(exe), &["-NoLogo", "-NoExit", "-EncodedCommand", &hook]);
+    profile.icon = Some("powershell".into());
+    profile
+}
+
 pub fn detect() -> Vec<Profile> {
     let sys = system32();
     let mut out = Vec::new();
     if let Some(p) = pwsh() {
-        let mut profile = Profile::new("local:pwsh", "PowerShell", &path_str(&p), &["-nologo"]);
-        profile.icon = Some("powershell".into());
-        out.push(profile);
+        out.push(powershell("local:pwsh", "PowerShell", &p));
     }
     let windows_ps = sys.join(r"WindowsPowerShell\v1.0\powershell.exe");
     if windows_ps.is_file() {
-        let mut profile = Profile::new("local:powershell", "Windows PowerShell", &path_str(&windows_ps), &["-nologo"]);
-        profile.icon = Some("powershell".into());
-        out.push(profile);
+        out.push(powershell("local:powershell", "Windows PowerShell", &windows_ps));
     }
     let mut cmd = Profile::new("local:cmd", "CMD", &path_str(&sys.join("cmd.exe")), &[]);
     cmd.icon = Some("cmd".into());

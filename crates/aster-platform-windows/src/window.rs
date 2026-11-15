@@ -25,6 +25,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const WM_WAKE: u32 = WM_APP + 1;
 const WM_DESTROY_REQUEST: u32 = WM_APP + 2;
 const WM_OPEN_WINDOW: u32 = WM_APP + 3;
+const WM_CAPTURE_KEYS: u32 = WM_APP + 4;
+const CAPTURE_WAIT_MS: u64 = 1500;
 const TIMER_ID: usize = 1;
 const HOTKEY_ID: i32 = 1;
 
@@ -548,8 +550,18 @@ impl<H: WindowHandler<Win32>> Shared<H> {
         if hidden {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             if let Ok(keys) = std::env::var("ASTER_CAPTURE_KEYS") {
-                node.queue.borrow_mut().extend(capture_keys(&keys));
+                let mut batches = capture_keys(&keys).into_iter();
+                node.queue.borrow_mut().extend(batches.next().unwrap_or_default());
                 self.woken.set(true);
+                let rest: Vec<Vec<Event>> = batches.collect();
+                let hub = self.hub.0 as isize;
+                std::thread::spawn(move || {
+                    for batch in rest {
+                        std::thread::sleep(std::time::Duration::from_millis(CAPTURE_WAIT_MS));
+                        let p = Box::into_raw(Box::new(batch));
+                        let _ = PostMessageW(Some(HWND(hub as _)), WM_CAPTURE_KEYS, WPARAM(0), LPARAM(p as isize));
+                    }
+                });
             }
         } else {
             cloak(hwnd, true);
@@ -576,7 +588,11 @@ impl<H: WindowHandler<Win32>> Shared<H> {
     }
 }
 
-fn capture_keys(keys: &str) -> Vec<Event> {
+fn capture_keys(keys: &str) -> Vec<Vec<Event>> {
+    keys.split(";Wait").map(capture_batch).collect()
+}
+
+fn capture_batch(keys: &str) -> Vec<Event> {
     keys.split(';')
         .filter(|k| !k.is_empty())
         .flat_map(|k| match k.strip_prefix('\'') {
@@ -628,12 +644,13 @@ thread_local! {
 }
 
 unsafe extern "system" fn hub_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg != WM_WAKE && msg != WM_OPEN_WINDOW && msg != WM_HOTKEY {
+    if msg != WM_WAKE && msg != WM_OPEN_WINDOW && msg != WM_HOTKEY && msg != WM_CAPTURE_KEYS {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
     match HUB.get() {
         Some((ctx, dispatch)) => dispatch(ctx, msg, lp),
         None if msg == WM_OPEN_WINDOW => drop(Box::from_raw(lp.0 as *mut WindowOptions)),
+        None if msg == WM_CAPTURE_KEYS => drop(Box::from_raw(lp.0 as *mut Vec<Event>)),
         None => {}
     }
     LRESULT(0)
@@ -645,6 +662,18 @@ unsafe fn hub_dispatch<H: WindowHandler<Win32>>(ctx: *const (), msg: u32, lp: LP
         sh.wake_pending.store(false, Ordering::Release);
         sh.woken.set(true);
         sh.flush();
+        return;
+    }
+    if msg == WM_CAPTURE_KEYS {
+        let batch = *Box::from_raw(lp.0 as *mut Vec<Event>);
+        if let Some(n) = sh.nodes().first() {
+            for ev in batch {
+                n.send(ev);
+            }
+            if n.window.redraw.get() {
+                n.redraw_now();
+            }
+        }
         return;
     }
     if msg == WM_HOTKEY {

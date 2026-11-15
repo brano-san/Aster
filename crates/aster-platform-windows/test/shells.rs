@@ -12,3 +12,9 @@ fn detection_always_finds_cmd_with_a_directory_reporting_prompt_and_unique_ids()
     assert_eq!(ids.len(), all.len());
     assert!(all.iter().all(|p| p.builtin && !p.name.is_empty()));
 }
+
+#[test]
+fn commands_are_encoded_as_base64_utf16() {
+    assert_eq!(encode_command("dir"), "ZABpAHIA");
+    assert_eq!(encode_command("ab"), "YQBiAA==");
+}
