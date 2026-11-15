@@ -133,7 +133,8 @@ impl App {
         let (w, h) = self.size;
         self.chrome = chrome(w, h, s, self.tabs.len());
         let theme = self.theme;
-        g.begin(theme.chrome);
+        g.begin(Color::rgba(0));
+        g.dl.rect(self.chrome.tab_bar, theme.chrome);
         self.draw_tab_bar(g, maximized);
         let content = self.chrome.content;
         g.dl.rect(content, theme.background);
