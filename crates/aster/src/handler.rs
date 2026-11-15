@@ -162,6 +162,11 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     }
 
     fn event(&mut self, window: &Win<P>, event: Event) {
+        if matches!(event, Event::CloseRequested) && !window.is_fullscreen() {
+            if let Some(path) = crate::state_path::<P>() {
+                let _ = std::fs::write(path, crate::format_placement(&window.placement()));
+            }
+        }
         if let Some(s) = self.windows.get_mut(&window.id()) {
             s.app.on_event(event);
         }

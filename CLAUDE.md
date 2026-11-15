@@ -4,13 +4,13 @@ Native GPU-accelerated terminal in Rust. Rendering uses its own pipeline (D3D11 
 
 ## Docs (`docs/`, RU) — read before coding
 
-Always: `docs/PLAN.md` (stages, tasks, decisions), `ARCHITECTURE.md` (crates, threads, render path). As needed: `docs/FEATURES.md` (full feature checklist). Tick features in `FEATURES.md` in the same commit that ships them.
+Always: `docs/PLAN.md` (stages, tasks, decisions, status), `ARCHITECTURE.md` (crates, threads, input → PTY → frame path, capture-based visual checks). As needed: `docs/FEATURES.md` (full feature checklist). Tick features in `FEATURES.md` in the same commit that ships them.
 
 
 ## Code
 
 - Never write code comments. Zero comments anywhere in this repository: no `//`, `///`, `//!`, `/* */` in Rust, HLSL or WGSL, no `#` comments in TOML/YAML/PowerShell. Names and structure carry the meaning; prose belongs in README.md, ARCHITECTURE.md and docs/.
-- `aster-gfx` (OS-independent part), `aster-core`, `aster-vt`, `aster-proto`, `aster-vault` never depend on `windows*` crates, directly or transitively. OS code lives only in platform crates under `#![cfg(...)]`. CI job `deps-isolation` enforces it.
+- `aster-gfx`, `aster-vt`, `aster-core`, `aster-platform` (and later `aster-proto`, `aster-vault`) never depend on the `windows` crate (windows-rs), directly or transitively; `windows-sys` pulled by `alacritty_terminal` for its unused tty module is the only allowed exception. OS code lives only in platform crates under `#![cfg(...)]`. CI job `deps-isolation` enforces it.
 - The core builds a `DrawList`, the platform draws it. No OS calls from core crates; effects go out through queues.
 - UI thread never blocks on I/O or on the PTY. Reading the PTY, parsing and writing happen on worker threads.
 - Redraw only on change.
