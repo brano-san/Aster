@@ -667,7 +667,7 @@ impl App {
         let elevated = self.panes.get(&tab.focus).is_some_and(|p| p.profile.elevated);
         if elevated {
             let base = self.panes.get(&tab.focus).map(|p| p.title.clone().unwrap_or_else(|| p.profile.name.clone())).unwrap_or_default();
-            return format!("Administrator: {base}");
+            return crate::i18n::tf("Administrator: {title}", &[("title", &base)]);
         }
         self.panes.get(&tab.focus).map(|p| p.title.clone().unwrap_or_else(|| p.profile.name.clone())).unwrap_or_default()
     }

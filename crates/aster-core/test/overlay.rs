@@ -42,3 +42,18 @@ fn quick_connect_offers_an_ssh_target_typed_into_the_selector() {
     o.insert("two words");
     assert!(o.items.iter().all(|p| !p.value.starts_with(QUICK)));
 }
+
+#[test]
+fn translated_commands_are_still_found_by_their_english_names() {
+    crate::i18n::set_language("ru");
+    let actions = [crate::keymap::Action::NewTab, crate::keymap::Action::NewAdminTab];
+    let picks = actions.iter().map(|a| Pick { label: a.label(), hint: String::new(), value: a.id() }).collect();
+    let mut o = Overlay::new(OverlayKind::Commands, picks);
+    o.insert("administrator");
+    assert_eq!(o.selected_value().as_deref(), Some("new-admin-tab"));
+    assert!(o.shown[0].1.is_empty(), "the translated label is not highlighted for an English match");
+    o.backspace(true);
+    o.insert("администратора");
+    assert_eq!(o.selected_value().as_deref(), Some("new-admin-tab"));
+    crate::i18n::set_language("en");
+}

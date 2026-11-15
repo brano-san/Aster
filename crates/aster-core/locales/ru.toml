@@ -231,3 +231,7 @@
 "Create a profile with its own command, folder or SSH host" = "Создать профиль со своей командой, папкой или хостом SSH"
 "Enter to edit  ·  Ctrl+Enter to make default  ·  Del to delete" = "Enter изменить  ·  Ctrl+Enter сделать по умолчанию  ·  Del удалить"
 "No matches" = "Совпадений нет"
+"New administrator tab" = "Новая вкладка администратора"
+"Duplicate tab as administrator" = "Дублировать вкладку от имени администратора"
+"Duplicate as administrator" = "Дублировать от имени администратора"
+"Administrator: {title}" = "Администратор: {title}"

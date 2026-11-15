@@ -56,7 +56,14 @@ impl Overlay {
 
     fn refilter(&mut self) {
         self.items.truncate(self.base);
-        let mut scored: Vec<(i32, usize, Vec<Range<usize>>)> = self.items.iter().enumerate().filter_map(|(i, p)| fuzzy(&self.query, &p.label).map(|m| (m.score, i, m.ranges))).collect();
+        let commands = matches!(self.kind, OverlayKind::Commands);
+        let english = |p: &Pick| commands.then(|| crate::keymap::Action::from_id(&p.value)).flatten().map(|a| a.source_label()).filter(|e| *e != p.label);
+        let mut scored: Vec<(i32, usize, Vec<Range<usize>>)> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| fuzzy(&self.query, &p.label).map(|m| (m.score, i, m.ranges)).or_else(|| english(p).and_then(|e| fuzzy(&self.query, &e)).map(|m| (m.score, i, Vec::new()))))
+            .collect();
         if !self.query.trim().is_empty() {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         }
