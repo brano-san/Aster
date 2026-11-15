@@ -257,6 +257,27 @@ impl<B: TextBackend> Gfx<B> {
         }
     }
 
+    pub fn cell_box(&mut self, x: f32, y: f32, c: char, w: u32, h: u32, color: Color) -> bool {
+        if !crate::boxdraw::is_procedural(c) || w > u16::MAX as u32 || h > u8::MAX as u32 {
+            return false;
+        }
+        let key = GlyphKey { font: u16::MAX, id: c as u16, size_q: w as u16, subpx: h as u8 };
+        let (_, mut ctx) = self.split();
+        let gs = match ctx.glyphs.get(&key) {
+            Some(s) => *s,
+            None => {
+                let s = crate::boxdraw::rasterize(c, w, h).and_then(|mask| ctx.store(w, h, &mask));
+                ctx.glyphs.insert(key, s);
+                s
+            }
+        };
+        if let Some(gs) = gs {
+            let size = ctx.atlas.size();
+            ctx.dl.glyph(Rect::new(x, y, w as f32, h as f32), uv(gs.slot, size), color);
+        }
+        true
+    }
+
     pub fn has_image(&self, key: u64) -> bool {
         self.images.contains_key(&key)
     }
@@ -355,6 +376,19 @@ impl<B: TextBackend> GlyphCtx<'_, B> {
                 self.dl.glyph(r, uv(gs.slot, self.atlas.size()), color);
             }
         }
+    }
+
+    fn store(&mut self, w: u32, h: u32, mask: &[u8]) -> Option<GlyphSlot> {
+        let slot = match self.atlas.alloc(w, h) {
+            Some(s) => s,
+            None => {
+                self.reset();
+                self.atlas.alloc(w, h)?
+            }
+        };
+        self.uploads.rects.push((slot, self.uploads.data.len()));
+        self.uploads.data.extend(mask.iter().flat_map(|&a| [a, a, a, a]));
+        Some(GlyphSlot { slot, left: 0, top: 0, color: false })
     }
 
     fn reset(&mut self) {
