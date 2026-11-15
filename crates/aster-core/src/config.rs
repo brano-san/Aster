@@ -99,8 +99,8 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             color_scheme_mode: SchemeMode::Dark,
-            color_scheme: "Tabby Default".into(),
-            light_color_scheme: "Tabby Default Light".into(),
+            color_scheme: "Aster Dark".into(),
+            light_color_scheme: "Aster Light".into(),
             cycle_tabs: true,
             last_tab_closes_window: true,
             ui_font: String::new(),

@@ -1,4 +1,3 @@
-mod tabby;
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::STANDARD;
@@ -140,10 +139,6 @@ impl Vault {
             .map_err(|_| VaultError::WrongPassphrase)?;
         serde_json::from_slice(&plaintext)
             .map_err(|error| VaultError::Corrupted(format!("invalid contents: {error}")))
-    }
-
-    pub fn import_tabby(stored_json: &str, passphrase: &str) -> Result<Vault, VaultError> {
-        tabby::import(stored_json, passphrase)
     }
 }
 

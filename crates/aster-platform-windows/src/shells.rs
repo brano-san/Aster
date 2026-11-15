@@ -113,7 +113,6 @@ pub fn detect() -> Vec<Profile> {
     }
     out.extend(cygwin());
     out.extend(msys2(&sys));
-    out.extend(cmder(&sys, &windows_ps));
     out.extend(visual_studio(&sys));
     out
 }
@@ -149,17 +148,6 @@ fn msys2(sys: &Path) -> Vec<Profile> {
             p
         })
         .collect()
-}
-
-fn cmder(sys: &Path, powershell: &Path) -> Vec<Profile> {
-    let Some(root) = std::env::var_os("CMDER_ROOT").map(PathBuf::from).filter(|p| p.is_dir()) else { return Vec::new() };
-    let init = path_str(&root.join(r"vendor\init.bat"));
-    let profile_ps1 = path_str(&root.join(r"vendor\profile.ps1"));
-    let mut cmd = Profile::new("local:cmder", "Cmder", &path_str(&sys.join("cmd.exe")), &["/k", &init]);
-    cmd.env.insert("CMDER_ROOT".into(), path_str(&root));
-    let invoke = format!("Invoke-Expression '. ''{profile_ps1}'''");
-    let ps = Profile::new("local:cmder-powershell", "Cmder PowerShell", &path_str(powershell), &["-ExecutionPolicy", "Bypass", "-nologo", "-noprofile", "-noexit", "-command", &invoke]);
-    vec![cmd, ps]
 }
 
 fn visual_studio(sys: &Path) -> Vec<Profile> {

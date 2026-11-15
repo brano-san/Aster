@@ -1,12 +1,12 @@
 # Aster
 
-Native GPU-accelerated terminal in Rust, feature parity target: Tabby. Rendering is the Flit pipeline (D3D11 + DirectComposition + DirectWrite on Windows, OpenGL ES 3 + EGL + HarfRust + Swash on Linux).
+Native GPU-accelerated terminal in Rust. Rendering: D3D11 + DirectComposition + DirectWrite on Windows, OpenGL ES 3 + EGL + HarfRust + Swash on Linux.
 
 ## Docs (`docs/`, RU) — read before coding
 
-Always: `docs/PLAN.md` (stages, tasks, decisions, status), `ARCHITECTURE.md` (crates, threads, input → PTY → frame path, capture-based visual checks). As needed: `docs/FEATURES.md` (full feature checklist with Tabby config keys), `docs/GPU-SHARED-LIB.md` (what came from Flit and why). Tick features in `FEATURES.md` in the same commit that ships them.
+Always: `docs/PLAN.md` (stages, tasks, decisions, status), `ARCHITECTURE.md` (crates, threads, input → PTY → frame path, capture-based visual checks). As needed: `docs/FEATURES.md` (full feature checklist with config keys). Tick features in `FEATURES.md` in the same commit that ships them.
 
-Reference sources: Tabby at `D:\ToDelete\tabby` (behavior, defaults, hotkeys), Flit at `D:\Projects\Flit` (rendering, window, widgets, conventions).
+The project is self-contained: docs, code, UI strings, tests and commit messages never mention other applications or terminals. Third-party code enters only as crates.io dependencies or bundled fonts with their licenses.
 
 ## Code
 

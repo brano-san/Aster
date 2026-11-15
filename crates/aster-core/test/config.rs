@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn an_empty_file_gives_the_tabby_defaults() {
+fn an_empty_file_gives_the_defaults() {
     let c = Config::parse("").unwrap();
     assert_eq!(c, Config::default());
     assert_eq!(c.terminal.scrollback_lines, 25_000);

@@ -200,7 +200,7 @@ impl App {
             SchemeMode::Auto => self.system_dark,
         };
         let name = if dark { self.config.appearance.color_scheme.clone() } else { self.config.appearance.light_color_scheme.clone() };
-        let fallback = if dark { Palette::TABBY_DARK } else { Palette::TABBY_LIGHT };
+        let fallback = if dark { Palette::DARK } else { Palette::LIGHT };
         let mut palette = self.scheme(&name).unwrap_or(fallback);
         palette.bold_is_bright = self.config.terminal.draw_bold_text_in_bright_colors;
         self.palette = palette;

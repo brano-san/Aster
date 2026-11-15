@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-pub const SANS: &[u8] = include_bytes!("../assets/FlitSans.ttf");
-pub const ICONS: &[u8] = include_bytes!("../assets/FlitIcons.ttf");
+pub const SANS: &[u8] = include_bytes!("../assets/AsterSans.ttf");
+pub const ICONS: &[u8] = include_bytes!("../assets/AsterIcons.ttf");
 
 const CACHE_HEADER: &str = "aster-fonts 1";
 const WEIGHT_REGULAR: c_int = 80;

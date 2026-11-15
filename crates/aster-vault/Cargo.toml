@@ -1,19 +1,15 @@
 [package]
 name = "aster-vault"
-description = "Secret vault for Aster: sealed storage and Tabby vault import"
+description = "Secret vault for Aster: secrets sealed with a master passphrase"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-aes = "0.9"
 argon2 = "0.6"
 base64 = "0.23"
-cbc = { version = "0.2", features = ["alloc"] }
 chacha20poly1305 = "0.11"
 getrandom = "0.4"
-pbkdf2 = "0.13"
 serde.workspace = true
 serde_json = "1"
-sha2 = "0.11"

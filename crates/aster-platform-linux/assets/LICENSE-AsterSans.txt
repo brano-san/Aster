@@ -1,4 +1,4 @@
-FlitSans.ttf is a renamed subset of DejaVu Sans 2.37 (https://dejavu-fonts.github.io/):
+AsterSans.ttf is a renamed subset of DejaVu Sans 2.37 (https://dejavu-fonts.github.io/):
 Latin, Greek, Cyrillic, combining marks and common punctuation, without hinting and OpenType layout tables.
 
 Fonts are (c) Bitstream (see below). DejaVu changes are in public domain.
