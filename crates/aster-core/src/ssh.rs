@@ -69,6 +69,7 @@ impl Target {
         let mut p = Profile::new(&format!("ssh:{name}"), &name, ssh, &[]);
         p.args = self.args();
         p.icon = Some("ssh".into());
+        p.ssh = Some(name);
         p
     }
 }
@@ -76,6 +77,7 @@ impl Target {
 pub fn host_profile(alias: &str, ssh: &str) -> Profile {
     let mut p = Profile::new(&format!("ssh:{alias}"), &format!("SSH: {alias}"), ssh, &[alias]);
     p.icon = Some("ssh".into());
+    p.ssh = Some(alias.to_owned());
     p
 }
 

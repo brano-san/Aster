@@ -41,6 +41,20 @@ pub enum SchemeMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+pub enum SshClient {
+    #[default]
+    Native,
+    System,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Ssh {
+    pub client: SshClient,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum Backdrop {
     #[default]
     None,
@@ -174,6 +188,7 @@ pub struct CustomScheme {
 pub struct Config {
     pub terminal: Terminal,
     pub appearance: Appearance,
+    pub ssh: Ssh,
     pub hotkeys: BTreeMap<String, Vec<String>>,
     pub profiles: Vec<Profile>,
     pub color_schemes: Vec<CustomScheme>,

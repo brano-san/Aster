@@ -12,6 +12,8 @@ pub struct Profile {
     pub env: BTreeMap<String, String>,
     pub icon: Option<String>,
     pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<String>,
     #[serde(skip)]
     pub builtin: bool,
 }

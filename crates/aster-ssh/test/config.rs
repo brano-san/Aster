@@ -204,3 +204,15 @@ fn non_numeric_port_ignored() {
     let entries = run("Host a\n  Port abc\n  Port 70000\n  Port 22\n", &[]);
     assert_eq!(entries[0].port, Some(22));
 }
+
+#[test]
+fn resolving_an_unlisted_host_applies_wildcards_and_first_values_win() {
+    let text = "Host *.lan\n  User pi\n  Port 2200\nHost *\n  User root\n  IdentityFile ~/.ssh/work\n";
+    let entry = resolve(text, Path::new("/ssh"), Path::new("/home/u"), &|_| None, "nas.lan");
+    assert_eq!(entry.alias, "nas.lan");
+    assert_eq!(entry.user.as_deref(), Some("pi"));
+    assert_eq!(entry.port, Some(2200));
+    assert_eq!(entry.identity_files.len(), 1);
+    let other = resolve(text, Path::new("/ssh"), Path::new("/home/u"), &|_| None, "example.com");
+    assert_eq!((other.user.as_deref(), other.port), (Some("root"), None));
+}

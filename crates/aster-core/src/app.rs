@@ -25,6 +25,7 @@ const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
+    pub ssh: Option<String>,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
@@ -138,6 +139,7 @@ pub struct App {
     backdrop: bool,
     pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
+    swallow_control: bool,
     pub(crate) blink_on: bool,
     blink_since: Instant,
     blink_armed: bool,
@@ -199,6 +201,7 @@ impl App {
             backdrop: false,
             search: None,
             swallow_char: false,
+            swallow_control: false,
             blink_on: true,
             blink_since: Instant::now(),
             blink_armed: false,
@@ -395,7 +398,7 @@ impl App {
             terminal.lock().set_cwd(inherited.clone());
         }
         let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
-        let launch = Launch { command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let launch = Launch { ssh: profile.ssh.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0 });
         id
     }
@@ -956,12 +959,13 @@ impl App {
     }
 
     fn on_key(&mut self, key: Key, mods: Mods) {
+        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.settings.is_some();
+        self.swallow_char = false;
+        self.swallow_control = modal && matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
         if self.overlay.is_some() {
-            self.swallow_char = false;
             self.overlay_key(key, mods);
             return;
         }
-        self.swallow_char = false;
         if self.paste_confirm.is_some() {
             return self.paste_key(key);
         }
@@ -1001,6 +1005,9 @@ impl App {
 
     fn on_char(&mut self, c: char, alt: bool) {
         if std::mem::take(&mut self.swallow_char) {
+            return;
+        }
+        if std::mem::take(&mut self.swallow_control) && c.is_control() {
             return;
         }
         if let Some(o) = self.overlay.as_mut() {
