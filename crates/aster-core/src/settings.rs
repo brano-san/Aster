@@ -1,0 +1,495 @@
+use crate::app::{App, Effect};
+use crate::config::Config;
+use crate::input::{Key, Mods};
+use aster_gfx::render::Rect;
+use toml::Value;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Control {
+    Toggle,
+    Choice(&'static [(&'static str, &'static str)]),
+    Schemes,
+    Profiles,
+    Number { min: f64, max: f64, step: f64 },
+    Text,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Setting {
+    pub section: &'static str,
+    pub key: &'static str,
+    pub label: &'static str,
+    pub hint: &'static str,
+    pub control: Control,
+}
+
+const fn item(section: &'static str, key: &'static str, label: &'static str, hint: &'static str, control: Control) -> Setting {
+    Setting { section, key, label, hint, control }
+}
+
+const TERMINAL: &str = "Terminal";
+const INPUT: &str = "Clipboard and mouse";
+const SEARCH: &str = "Search";
+const APPEARANCE: &str = "Appearance";
+const DOCK: &str = "Docked window";
+
+const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("underline", "Underline")];
+const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
+const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("auto", "Follow the system")];
+const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
+const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
+
+pub const SETTINGS: &[Setting] = &[
+    item(TERMINAL, "terminal.font", "Font", "Monospace font family for the terminal", Control::Text),
+    item(TERMINAL, "terminal.font-size", "Font size", "Size in points before zoom", Control::Number { min: 6.0, max: 48.0, step: 1.0 }),
+    item(TERMINAL, "terminal.line-padding", "Line padding", "Extra pixels between lines", Control::Number { min: 0.0, max: 20.0, step: 1.0 }),
+    item(TERMINAL, "terminal.cursor", "Cursor shape", "Shape of the text cursor", Control::Choice(CURSORS)),
+    item(TERMINAL, "terminal.cursor-blink", "Blinking cursor", "The cursor blinks while the window has focus", Control::Toggle),
+    item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
+    item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
+    item(TERMINAL, "terminal.profile", "Default profile", "Shell for new tabs and windows", Control::Profiles),
+    item(TERMINAL, "terminal.recover-tabs", "Restore tabs", "Reopen tabs, splits and their folders on start", Control::Toggle),
+    item(TERMINAL, "terminal.scroll-on-input", "Scroll on input", "Typing scrolls back to the bottom", Control::Toggle),
+    item(INPUT, "terminal.copy-on-select", "Copy on select", "Selected text goes to the clipboard", Control::Toggle),
+    item(INPUT, "terminal.right-click", "Right click", "What the right mouse button does", Control::Choice(RIGHT_CLICK)),
+    item(INPUT, "terminal.paste-on-middle-click", "Paste on middle click", "The middle mouse button pastes", Control::Toggle),
+    item(INPUT, "terminal.bracketed-paste", "Bracketed paste", "Programs can tell pasted text from typing", Control::Toggle),
+    item(INPUT, "terminal.trim-whitespace-on-paste", "Trim pasted text", "Remove trailing whitespace from pasted text", Control::Toggle),
+    item(INPUT, "terminal.word-separator", "Word separators", "Characters that end a word on double click", Control::Text),
+    item(SEARCH, "terminal.search-options.case-sensitive", "Match case", "Search tells upper and lower case apart", Control::Toggle),
+    item(SEARCH, "terminal.search-options.regex", "Regular expressions", "Search queries are regular expressions", Control::Toggle),
+    item(SEARCH, "terminal.search-options.whole-word", "Whole words", "Search matches whole words only", Control::Toggle),
+    item(APPEARANCE, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Choice(SCHEME_MODES)),
+    item(APPEARANCE, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
+    item(APPEARANCE, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
+    item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Text),
+    item(APPEARANCE, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
+    item(APPEARANCE, "appearance.last-tab-closes-window", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),
+    item(DOCK, "appearance.dock", "Dock to edge", "Pin the window to a screen edge", Control::Choice(EDGES)),
+    item(DOCK, "appearance.dock-fill", "Size", "Share of the screen across the edge", SHARE),
+    item(DOCK, "appearance.dock-space", "Length", "Share of the screen along the edge", SHARE),
+    item(DOCK, "appearance.dock-always-on-top", "Always on top", "The docked window stays above other windows", Control::Toggle),
+    item(DOCK, "appearance.dock-hide-on-blur", "Hide on focus loss", "The docked window hides when another window is activated", Control::Toggle),
+    item(DOCK, "appearance.global-hotkey", "Global hotkey", "Shows and hides the window from anywhere, for example Ctrl-`", Control::Text),
+];
+
+pub fn get(config: &Config, key: &str) -> Option<Value> {
+    let root = Value::try_from(config).ok()?;
+    let mut at = &root;
+    for part in key.split('.') {
+        at = at.get(part)?;
+    }
+    Some(at.clone())
+}
+
+pub fn set(config: &Config, key: &str, value: Value) -> Result<Config, String> {
+    let mut root = Value::try_from(config).map_err(|e| e.to_string())?;
+    let mut at = &mut root;
+    for part in key.split('.') {
+        at = at.as_table_mut().ok_or_else(|| format!("{key} is not a table path"))?.entry(part).or_insert_with(|| Value::Table(Default::default()));
+    }
+    *at = value;
+    root.try_into().map_err(|e: toml::de::Error| e.message().to_owned())
+}
+
+pub fn number_text(v: f64) -> String {
+    let rounded = (v * 100.0).round() / 100.0;
+    if rounded.fract() == 0.0 {
+        format!("{}", rounded as i64)
+    } else {
+        format!("{rounded}")
+    }
+}
+
+fn matches(s: &Setting, query: &str) -> bool {
+    let hay = format!("{} {} {} {}", s.section, s.label, s.hint, s.key).to_lowercase();
+    query.to_lowercase().split_whitespace().all(|w| hay.contains(w))
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SettingsPage {
+    pub query: String,
+    pub shown: Vec<usize>,
+    pub selected: usize,
+    pub scroll: f32,
+    pub editing: Option<String>,
+}
+
+impl SettingsPage {
+    pub fn new() -> Self {
+        let mut page = Self::default();
+        page.refilter();
+        page
+    }
+
+    fn refilter(&mut self) {
+        self.shown = (0..SETTINGS.len()).filter(|&i| matches(&SETTINGS[i], &self.query)).collect();
+        self.selected = 0;
+        self.scroll = 0.0;
+    }
+
+    pub fn current(&self) -> Option<&'static Setting> {
+        self.shown.get(self.selected).map(|&i| &SETTINGS[i])
+    }
+
+    fn step(&mut self, delta: isize) {
+        if self.shown.is_empty() {
+            return;
+        }
+        let last = self.shown.len() as isize - 1;
+        self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RowKind {
+    Section(&'static str),
+    Item(usize),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Row {
+    pub kind: RowKind,
+    pub rect: Rect,
+    pub control: Rect,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettingsGeometry {
+    pub page: Rect,
+    pub title: Rect,
+    pub field: Rect,
+    pub close: Rect,
+    pub list: Rect,
+    pub rows: Vec<Row>,
+    pub height: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Part {
+    Whole,
+    Less,
+    More,
+}
+
+pub fn control_width(control: Control) -> f32 {
+    match control {
+        Control::Toggle => 40.0,
+        Control::Number { .. } => 132.0,
+        Control::Choice(_) | Control::Schemes | Control::Profiles => 220.0,
+        Control::Text => 260.0,
+    }
+}
+
+pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry {
+    let width = (860.0 * s).min(content.w - 48.0 * s).max(240.0 * s).round();
+    let x = (content.x + (content.w - width) / 2.0).round();
+    let top = content.y + (18.0 * s).round();
+    let header_h = (36.0 * s).round();
+    let close_w = header_h;
+    let close = Rect::new(x + width - close_w, top, close_w, header_h);
+    let field_w = (300.0 * s).min(width * 0.5).round();
+    let field = Rect::new(close.x - field_w - (8.0 * s).round(), top, field_w, header_h);
+    let title = Rect::new(x, top, (field.x - x - 8.0 * s).max(0.0), header_h);
+    let list_top = top + header_h + (14.0 * s).round();
+    let list = Rect::new(x, list_top, width, (content.bottom() - list_top - 12.0 * s).max(0.0));
+    let section_h = (38.0 * s).round();
+    let item_h = (58.0 * s).round();
+    let control_h = (30.0 * s).round();
+    let mut rows = Vec::new();
+    let mut y = list.y - page.scroll;
+    let mut section = "";
+    for (n, &i) in page.shown.iter().enumerate() {
+        let setting = &SETTINGS[i];
+        if setting.section != section {
+            section = setting.section;
+            rows.push(Row { kind: RowKind::Section(section), rect: Rect::new(x, y, width, section_h), control: Rect::default() });
+            y += section_h;
+        }
+        let rect = Rect::new(x, y, width, item_h);
+        let (cw, ch) = match setting.control {
+            Control::Toggle => ((control_width(setting.control) * s).round(), (22.0 * s).round()),
+            c => ((control_width(c) * s).min(width * 0.45).round(), control_h),
+        };
+        let control = Rect::new(rect.right() - cw - (14.0 * s).round(), rect.y + ((item_h - ch) / 2.0).round(), cw, ch);
+        rows.push(Row { kind: RowKind::Item(n), rect, control });
+        y += item_h;
+    }
+    let height = y + page.scroll - list.y;
+    SettingsGeometry { page: content, title, field, close, list, rows, height }
+}
+
+pub fn part_at(control: Control, r: Rect, s: f32, x: f32) -> Part {
+    let edge = (30.0 * s).round();
+    match control {
+        Control::Number { .. } | Control::Choice(_) | Control::Schemes | Control::Profiles if x < r.x + edge => Part::Less,
+        Control::Number { .. } | Control::Choice(_) | Control::Schemes | Control::Profiles if x >= r.right() - edge => Part::More,
+        _ => Part::Whole,
+    }
+}
+
+impl App {
+    pub fn settings_open(&self) -> bool {
+        self.settings.is_some()
+    }
+
+    pub(crate) fn open_settings(&mut self) {
+        self.overlay = None;
+        self.settings = Some(SettingsPage::new());
+        self.dirty = true;
+    }
+
+    pub(crate) fn close_settings(&mut self) {
+        self.commit_edit();
+        self.settings = None;
+        self.dirty = true;
+    }
+
+    pub fn settings_geometry(&self) -> Option<SettingsGeometry> {
+        self.settings.as_ref().map(|p| geometry(self.chrome.content, self.scale, p))
+    }
+
+    pub fn setting_options(&self, control: Control) -> Vec<(String, String)> {
+        match control {
+            Control::Choice(list) => list.iter().map(|(v, l)| ((*v).to_owned(), (*l).to_owned())).collect(),
+            Control::Schemes => self.scheme_names().into_iter().map(|n| (n.clone(), n)).collect(),
+            Control::Profiles => std::iter::once((String::new(), "First available".to_owned())).chain(self.profiles.iter().map(|p| (p.id.clone(), p.name.clone()))).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn setting_text(&self, setting: &Setting) -> String {
+        let value = get(&self.config, setting.key);
+        match (setting.control, &value) {
+            (Control::Number { .. }, Some(Value::Integer(n))) => n.to_string(),
+            (Control::Number { .. }, Some(Value::Float(f))) => number_text(*f),
+            (Control::Choice(_) | Control::Schemes | Control::Profiles, Some(Value::String(v))) => {
+                self.setting_options(setting.control).into_iter().find(|(o, _)| o.eq_ignore_ascii_case(v)).map(|(_, l)| l).unwrap_or_else(|| v.clone())
+            }
+            (_, Some(Value::String(v))) => v.clone(),
+            (_, Some(Value::Boolean(b))) => b.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn setting_on(&self, setting: &Setting) -> bool {
+        matches!(get(&self.config, setting.key), Some(Value::Boolean(true)))
+    }
+
+    fn apply_setting(&mut self, key: &str, value: Value) {
+        if let Ok(config) = set(&self.config, key, value) {
+            if config != self.config {
+                self.set_config(config);
+                self.push_save_config();
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn adjust_setting(&mut self, setting: &Setting, delta: i32) {
+        match setting.control {
+            Control::Toggle => {
+                let on = if delta == 0 { !self.setting_on(setting) } else { delta > 0 };
+                self.apply_setting(setting.key, Value::Boolean(on));
+            }
+            Control::Choice(_) | Control::Schemes | Control::Profiles => {
+                let options = self.setting_options(setting.control);
+                if options.is_empty() {
+                    return;
+                }
+                let current = match get(&self.config, setting.key) {
+                    Some(Value::String(v)) => options.iter().position(|(o, _)| o.eq_ignore_ascii_case(&v)),
+                    _ => None,
+                };
+                let n = options.len() as i32;
+                let next = match current {
+                    Some(at) => (at as i32 + if delta < 0 { -1 } else { 1 }).rem_euclid(n),
+                    None => 0,
+                } as usize;
+                self.apply_setting(setting.key, Value::String(options[next].0.clone()));
+            }
+            Control::Number { step, .. } => {
+                if delta == 0 {
+                    return self.begin_edit();
+                }
+                let now = match get(&self.config, setting.key) {
+                    Some(Value::Integer(n)) => n as f64,
+                    Some(Value::Float(f)) => f,
+                    _ => return,
+                };
+                self.set_number(setting, now + step * delta as f64);
+            }
+            Control::Text => self.begin_edit(),
+        }
+    }
+
+    fn set_number(&mut self, setting: &Setting, wanted: f64) {
+        let Control::Number { min, max, step } = setting.control else { return };
+        let snapped = ((wanted / step).round() * step).clamp(min, max);
+        let value = match get(&self.config, setting.key) {
+            Some(Value::Integer(_)) => Value::Integer(snapped.round() as i64),
+            _ => Value::Float((snapped * 1000.0).round() / 1000.0),
+        };
+        self.apply_setting(setting.key, value);
+    }
+
+    fn begin_edit(&mut self) {
+        let Some(setting) = self.settings.as_ref().and_then(|p| p.current()) else { return };
+        let text = match setting.control {
+            Control::Number { .. } | Control::Text => self.setting_text(setting),
+            _ => return,
+        };
+        if let Some(p) = self.settings.as_mut() {
+            p.editing = Some(text);
+        }
+        self.dirty = true;
+    }
+
+    fn commit_edit(&mut self) {
+        let Some(page) = self.settings.as_mut() else { return };
+        let Some(text) = page.editing.take() else { return };
+        let Some(setting) = page.current() else { return };
+        match setting.control {
+            Control::Text => self.apply_setting(setting.key, Value::String(text.trim().to_owned())),
+            Control::Number { .. } => {
+                if let Ok(v) = text.trim().replace(',', ".").parse::<f64>() {
+                    self.set_number(setting, v);
+                }
+            }
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    fn reveal_selected(&mut self) {
+        let Some(geo) = self.settings_geometry() else { return };
+        let Some(page) = self.settings.as_mut() else { return };
+        let Some(row) = geo.rows.iter().find(|r| r.kind == RowKind::Item(page.selected)) else { return };
+        let header = geo.rows.iter().position(|r| r.kind == RowKind::Item(page.selected)).filter(|&i| i > 0 && matches!(geo.rows[i - 1].kind, RowKind::Section(_))).map(|i| geo.rows[i - 1].rect.h).unwrap_or(0.0);
+        let top = row.rect.y - header;
+        if top < geo.list.y {
+            page.scroll -= geo.list.y - top;
+        } else if row.rect.bottom() > geo.list.bottom() {
+            page.scroll += row.rect.bottom() - geo.list.bottom();
+        }
+        page.scroll = page.scroll.clamp(0.0, (geo.height - geo.list.h).max(0.0));
+    }
+
+    pub(crate) fn settings_key(&mut self, key: Key, mods: Mods) {
+        let Some(page) = self.settings.as_mut() else { return };
+        self.dirty = true;
+        if page.editing.is_some() {
+            match key {
+                Key::Escape => page.editing = None,
+                Key::Enter | Key::Tab => self.commit_edit(),
+                Key::Backspace => {
+                    if let Some(t) = page.editing.as_mut() {
+                        if mods.ctrl {
+                            t.clear();
+                        } else {
+                            t.pop();
+                        }
+                    }
+                }
+                Key::Char('V') if mods.ctrl => self.push(Effect::RequestPaste),
+                _ => {}
+            }
+            return;
+        }
+        let current = page.current();
+        match key {
+            Key::Escape if !page.query.is_empty() => {
+                page.query.clear();
+                page.refilter();
+            }
+            Key::Escape => return self.close_settings(),
+            Key::Up => page.step(-1),
+            Key::Down | Key::Tab => page.step(1),
+            Key::PageUp => page.step(-6),
+            Key::PageDown => page.step(6),
+            Key::Home if mods.ctrl => page.step(isize::MIN / 2),
+            Key::End if mods.ctrl => page.step(isize::MAX / 2),
+            Key::Backspace => {
+                if mods.ctrl {
+                    page.query.clear();
+                } else {
+                    page.query.pop();
+                }
+                page.refilter();
+            }
+            Key::Enter => {
+                if let Some(s) = current {
+                    self.adjust_setting(s, 0);
+                }
+            }
+            Key::Left | Key::Right => {
+                if let Some(s) = current {
+                    self.adjust_setting(s, if key == Key::Left { -1 } else { 1 });
+                }
+            }
+            Key::Char('V') if mods.ctrl => self.push(Effect::RequestPaste),
+            _ => {}
+        }
+        self.reveal_selected();
+    }
+
+    pub(crate) fn settings_text(&mut self, text: &str) {
+        let Some(page) = self.settings.as_mut() else { return };
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        match page.editing.as_mut() {
+            Some(t) => t.push_str(&clean),
+            None => {
+                page.query.push_str(&clean);
+                page.refilter();
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub(crate) fn settings_click(&mut self, x: f32, y: f32) {
+        let Some(geo) = self.settings_geometry() else { return };
+        self.dirty = true;
+        if geo.close.contains(x, y) {
+            return self.close_settings();
+        }
+        if geo.field.contains(x, y) {
+            return self.commit_edit();
+        }
+        if !geo.list.contains(x, y) {
+            return self.commit_edit();
+        }
+        let Some(row) = geo.rows.iter().find(|r| r.rect.contains(x, y)).copied() else { return self.commit_edit() };
+        let RowKind::Item(n) = row.kind else { return self.commit_edit() };
+        let editing_same = self.settings.as_ref().is_some_and(|p| p.selected == n && p.editing.is_some());
+        if editing_same && row.control.contains(x, y) && part_at(SETTINGS[self.settings.as_ref().map_or(0, |p| p.shown[n])].control, row.control, self.scale, x) == Part::Whole {
+            return;
+        }
+        self.commit_edit();
+        let Some(page) = self.settings.as_mut() else { return };
+        page.selected = n;
+        let setting = &SETTINGS[page.shown[n]];
+        match setting.control {
+            Control::Toggle => self.adjust_setting(setting, 0),
+            control if row.control.contains(x, y) => match part_at(control, row.control, self.scale, x) {
+                Part::Less => self.adjust_setting(setting, -1),
+                Part::More => self.adjust_setting(setting, 1),
+                Part::Whole => self.adjust_setting(setting, 0),
+            },
+            _ => {}
+        }
+    }
+
+    pub(crate) fn settings_wheel(&mut self, dy: f32) {
+        let Some(geo) = self.settings_geometry() else { return };
+        let Some(page) = self.settings.as_mut() else { return };
+        page.scroll = (page.scroll - dy * 3.0 * 20.0 * self.scale).clamp(0.0, (geo.height - geo.list.h).max(0.0));
+        self.dirty = true;
+    }
+}
+
+#[cfg(test)]
+#[path = "../test/settings.rs"]
+mod tests;

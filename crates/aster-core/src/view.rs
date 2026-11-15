@@ -158,6 +158,7 @@ impl App {
             g.dl.rect(sp.rect, theme.divider);
         }
         self.draw_search(g);
+        self.draw_settings(g);
         if let Some(o) = self.overlay.clone() {
             self.draw_overlay(g, &o);
         }
@@ -468,6 +469,132 @@ impl App {
                 SearchHit::Close => centered(g, r, G_CLOSE, FontStyle::new(FontFamily::Icons, (8.0 * s).round(), false), ink),
                 SearchHit::Field => {}
             }
+        }
+    }
+
+    fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        use crate::settings::{part_at, Control, Part, RowKind, SETTINGS};
+        let Some(geo) = self.settings_geometry() else { return };
+        let Some(page) = self.settings.clone() else { return };
+        let s = self.scale;
+        let theme = self.theme;
+        let line = (1.0 * s).round().max(1.0);
+        let (mx, my) = self.mouse;
+        g.dl.rect(geo.page, theme.background);
+        let title = FontStyle::new(FontFamily::Ui, (20.0 * s).round(), true);
+        let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let section = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), true);
+        let ty = baseline(g, geo.title, title);
+        g.text(geo.title.x, ty, "Settings", title, theme.text, geo.title.w);
+        let radius = (6.0 * s).round();
+        g.dl.round_rect(geo.field, theme.overlay, radius);
+        g.dl.outline(geo.field, if page.editing.is_none() { theme.accent } else { theme.overlay_border }, radius, line);
+        let field_text = geo.field.inset((10.0 * s).round(), 0.0);
+        let fy = baseline(g, field_text, ui);
+        if page.query.is_empty() {
+            g.text(field_text.x, fy, "Search settings", ui, theme.text_dim, field_text.w);
+        }
+        let qw = g.text(field_text.x, fy, &page.query, ui, theme.text, field_text.w);
+        let caret_h = (16.0 * s).round();
+        if page.editing.is_none() {
+            g.dl.rect(Rect::new(field_text.x + qw + 1.0, geo.field.y + ((geo.field.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
+        }
+        if geo.close.contains(mx, my) {
+            g.dl.round_rect(geo.close, theme.button_hover, radius);
+        }
+        centered(g, geo.close, G_CLOSE, FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false), theme.text);
+        if page.shown.is_empty() {
+            centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), "No settings match", ui, theme.text_dim);
+            return;
+        }
+        g.dl.set_clip(Some(geo.list));
+        for row in &geo.rows {
+            if row.rect.bottom() < geo.list.y || row.rect.y > geo.list.bottom() {
+                continue;
+            }
+            match row.kind {
+                RowKind::Section(name) => {
+                    let r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), row.rect.w, row.rect.h - (10.0 * s).round());
+                    let y = baseline(g, r, section);
+                    g.text(r.x, y, name, section, theme.accent, r.w);
+                }
+                RowKind::Item(n) => {
+                    let setting = &SETTINGS[page.shown[n]];
+                    let selected = n == page.selected;
+                    let card = row.rect.inset(0.0, (2.0 * s).round());
+                    if selected {
+                        g.dl.round_rect(card, theme.accent.alpha(0x26), radius);
+                    } else if card.contains(mx, my) {
+                        g.dl.round_rect(card, theme.button_hover, radius);
+                    }
+                    let tx = row.rect.x + (14.0 * s).round();
+                    let tw = (row.control.x - tx - 16.0 * s).max(0.0);
+                    g.text(tx, row.rect.y + (25.0 * s).round(), setting.label, ui, theme.text, tw);
+                    g.text(tx, row.rect.y + (43.0 * s).round(), setting.hint, small, theme.text_dim, tw);
+                    let c = row.control;
+                    match setting.control {
+                        Control::Toggle => {
+                            let on = self.setting_on(setting);
+                            g.dl.round_rect(c, if on { theme.accent } else { theme.overlay_border }, c.h / 2.0);
+                            let knob = (c.h - 6.0 * s).round();
+                            let kx = if on { c.right() - knob - 3.0 * s } else { c.x + 3.0 * s };
+                            g.dl.circle(Rect::new(kx.round(), c.y + ((c.h - knob) / 2.0).round(), knob, knob), if on { Color::rgb(0xFFFFFF) } else { theme.text_dim });
+                        }
+                        control => {
+                            let editing = selected && page.editing.is_some() && matches!(control, Control::Text | Control::Number { .. });
+                            g.dl.round_rect(c, theme.overlay, radius);
+                            g.dl.outline(c, if editing { theme.accent } else { theme.overlay_border }, radius, line);
+                            let stepper = !matches!(control, Control::Text);
+                            let edge = if stepper { (30.0 * s).round() } else { (10.0 * s).round() };
+                            let inner = Rect::new(c.x + edge, c.y, (c.w - 2.0 * edge).max(0.0), c.h);
+                            if stepper {
+                                let hover = c.contains(mx, my).then(|| part_at(control, c, s, mx));
+                                let stroke = (1.4 * s).max(1.0);
+                                let size = (9.0 * s).round();
+                                let less = Rect::new(c.x, c.y, edge, c.h);
+                                let more = Rect::new(c.right() - edge, c.y, edge, c.h);
+                                for (r, part) in [(less, Part::Less), (more, Part::More)] {
+                                    if hover == Some(part) {
+                                        g.dl.round_rect(r.inset(2.0 * s, 2.0 * s), theme.button_hover, radius);
+                                    }
+                                    let center = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+                                    let ink = theme.text_dim;
+                                    if matches!(control, Control::Number { .. }) {
+                                        let arm = (5.0 * s).round();
+                                        g.dl.rect(Rect::new((center.0 - arm).round(), (center.1 - line / 2.0).round(), 2.0 * arm, line), ink);
+                                        if part == Part::More {
+                                            g.dl.rect(Rect::new((center.0 - line / 2.0).round(), (center.1 - arm).round(), line, 2.0 * arm), ink);
+                                        }
+                                    } else {
+                                        g.dl.chevron(center, size, if part == Part::Less { 180.0 } else { 0.0 }, stroke, ink);
+                                    }
+                                }
+                            }
+                            let text = if editing { page.editing.clone().unwrap_or_default() } else { self.setting_text(setting) };
+                            let y = baseline(g, inner, ui);
+                            if editing {
+                                let w = g.text(inner.x, y, &text, ui, theme.text, inner.w);
+                                g.dl.rect(Rect::new(inner.x + w + 1.0, c.y + ((c.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
+                            } else if stepper {
+                                let w = g.measure(&text, ui).min(inner.w);
+                                g.text((inner.x + (inner.w - w) / 2.0).round(), y, &text, ui, theme.text, inner.w);
+                            } else {
+                                g.text(inner.x, y, &text, ui, theme.text, inner.w);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        g.dl.set_clip(None);
+        if geo.height > geo.list.h {
+            let track = geo.list;
+            let thumb_h = (track.h * track.h / geo.height).max(24.0 * s);
+            let max_scroll = geo.height - track.h;
+            let thumb_y = track.y + (track.h - thumb_h) * (page.scroll / max_scroll).clamp(0.0, 1.0);
+            let w = (4.0 * s).round();
+            g.dl.round_rect(Rect::new(track.right() + (8.0 * s).round(), thumb_y.round(), w, thumb_h.round()), theme.overlay_border, w / 2.0);
         }
     }
 

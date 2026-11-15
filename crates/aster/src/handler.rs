@@ -195,7 +195,12 @@ impl<P: Platform> Handler<P> {
                     s.app.paste(text);
                 }
             }
-            Effect::SaveConfig(text) => self.save_config(text),
+            Effect::SaveConfig(text) => {
+                self.save_config(text);
+                if self.windows.keys().min() == Some(&id) {
+                    self.apply_window_prefs(window);
+                }
+            }
             Effect::Open(target) => P::open(&target),
             Effect::Title(t) => window.set_title(&t),
             Effect::Cursor(c) => window.set_cursor(c),

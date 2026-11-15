@@ -122,6 +122,7 @@ pub struct App {
     pub(crate) hover: HitArea,
     pub(crate) hover_link: Option<HoverLink>,
     pub(crate) overlay: Option<Overlay>,
+    pub(crate) settings: Option<crate::settings::SettingsPage>,
     pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
     pub(crate) blink_on: bool,
@@ -174,6 +175,7 @@ impl App {
             hover: HitArea::Client,
             hover_link: None,
             overlay: None,
+            settings: None,
             search: None,
             swallow_char: false,
             blink_on: true,
@@ -528,6 +530,9 @@ impl App {
             self.dirty = true;
             return;
         }
+        if self.settings.is_some() {
+            return self.settings_text(&text.replace(['\r', '\n'], " "));
+        }
         if self.search_paste(&text) {
             return;
         }
@@ -597,6 +602,7 @@ impl App {
             ProfileSelector => self.open_overlay(OverlayKind::Profiles),
             Search => self.open_search(),
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
+            Settings => self.open_settings(),
             ToggleFullscreen => self.effects.push(Effect::ToggleFullscreen),
             NewTab => self.open_default_tab(),
             NewWindow => self.effects.push(Effect::NewWindow),
@@ -778,7 +784,7 @@ impl App {
     }
 
     fn blinking(&self) -> bool {
-        self.config.terminal.cursor_blink && self.focused && self.overlay.is_none()
+        self.config.terminal.cursor_blink && self.focused && self.overlay.is_none() && self.settings.is_none()
     }
 
     pub fn on_timer(&mut self) {
@@ -853,6 +859,12 @@ impl App {
             return;
         }
         self.swallow_char = false;
+        if self.settings.is_some() {
+            if self.keymap.press(Chord { key, mods }) == Outcome::Action(Action::Settings) {
+                return self.close_settings();
+            }
+            return self.settings_key(key, mods);
+        }
         if key == Key::Other {
             return;
         }
@@ -886,6 +898,9 @@ impl App {
             }
             self.preview_scheme();
             return;
+        }
+        if self.settings.is_some() {
+            return self.settings_text(&c.to_string());
         }
         if self.search.is_some() {
             if !alt {
@@ -1000,6 +1015,12 @@ impl App {
             }
             _ => {}
         }
+        if self.settings.is_some() && self.chrome.content.contains(x, y) {
+            self.dirty = true;
+            self.hover_link = None;
+            self.set_cursor(CursorIcon::Default);
+            return;
+        }
         let link = self.link_at(x, y);
         if link != self.hover_link {
             self.hover_link = link;
@@ -1072,6 +1093,12 @@ impl App {
                 }
                 Some(None) => {}
                 None => self.close_overlay(),
+            }
+            return;
+        }
+        if self.settings.is_some() && self.chrome.content.contains(x, y) {
+            if button == MouseButton::Left {
+                self.settings_click(x, y);
             }
             return;
         }
@@ -1184,6 +1211,9 @@ impl App {
             o.step(if dy > 0.0 { -3 } else { 3 });
             self.dirty = true;
             return;
+        }
+        if self.settings.is_some() {
+            return self.settings_wheel(dy);
         }
         let Some((pane, rect)) = self.pane_at(x, y) else { return };
         let action = if dy > 0.0 { MouseAction::WheelUp } else { MouseAction::WheelDown };
