@@ -83,6 +83,8 @@ pub fn file_reply(reply: sftp::Reply) -> FileReply {
         sftp::Reply::Downloaded { id, local } => FileReply::Downloaded { id, local },
         sftp::Reply::Uploaded { id, remote } => FileReply::Uploaded { id, remote },
         sftp::Reply::Changed { dir } => FileReply::Changed { dir },
+        sftp::Reply::Editing { id, local } => FileReply::Editing { id, local },
+        sftp::Reply::Saved { id, remote } => FileReply::Saved { id, remote },
         sftp::Reply::Failed { id, error } => FileReply::Failed { id, error },
     }
 }
@@ -95,6 +97,7 @@ pub fn file_request(request: FileRequest, downloads: PathBuf) -> sftp::Request {
         FileRequest::Mkdir(path) => sftp::Request::Mkdir { path },
         FileRequest::Remove { path, dir } => sftp::Request::Remove { path, dir },
         FileRequest::Rename { from, to } => sftp::Request::Rename { from, to },
+        FileRequest::Edit { id, remote } => sftp::Request::Edit { id, remote, dir: std::env::temp_dir().join("aster-edit") },
         FileRequest::Cancel(id) => sftp::Request::Cancel { id },
     }
 }

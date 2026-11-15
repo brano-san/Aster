@@ -8,6 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CHUNK: usize = 64 * 1024;
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+const EDIT_POLL: Duration = if cfg!(test) { Duration::from_millis(60) } else { Duration::from_secs(1) };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -27,6 +28,7 @@ pub enum Request {
     Mkdir { path: String },
     Remove { path: String, dir: bool },
     Rename { from: String, to: String },
+    Edit { id: u64, remote: String, dir: PathBuf },
     Cancel { id: u64 },
 }
 
@@ -37,6 +39,8 @@ pub enum Reply {
     Downloaded { id: u64, local: PathBuf },
     Uploaded { id: u64, remote: String },
     Changed { dir: String },
+    Editing { id: u64, local: PathBuf },
+    Saved { id: u64, remote: String },
     Failed { id: Option<u64>, error: String },
 }
 
@@ -125,7 +129,7 @@ impl Files {
             return;
         }
         let id = match &request {
-            Request::Download { id, .. } | Request::Upload { id, .. } => Some(*id),
+            Request::Download { id, .. } | Request::Upload { id, .. } | Request::Edit { id, .. } => Some(*id),
             _ => None,
         };
         let me = self.clone();
@@ -172,8 +176,40 @@ impl Files {
             }
             Request::Download { id, remote, dir } => self.download(id, &remote, &dir).await,
             Request::Upload { id, local, dir } => self.upload(id, &local, &dir).await,
+            Request::Edit { id, remote, dir } => self.edit(id, &remote, &dir).await,
             Request::Cancel { .. } => Err("nothing to cancel".into()),
         }
+    }
+
+    async fn edit(&self, id: u64, remote: &str, dir: &Path) -> Result<Reply, String> {
+        let Reply::Downloaded { local, .. } = self.download(id, remote, &dir.join(id.to_string())).await? else {
+            return Err("download failed".into());
+        };
+        let _ = self.replies.send(Reply::Editing { id, local: local.clone() });
+        let stamp = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.modified().ok(), m.len()));
+        let mut saved = stamp(&local);
+        loop {
+            tokio::time::sleep(EDIT_POLL).await;
+            let now = stamp(&local);
+            if now.is_none() || now == saved {
+                continue;
+            }
+            tokio::time::sleep(EDIT_POLL).await;
+            if stamp(&local) != now {
+                continue;
+            }
+            self.put(&local, remote).await?;
+            saved = now;
+            let _ = self.replies.send(Reply::Saved { id, remote: remote.to_owned() });
+        }
+    }
+
+    async fn put(&self, local: &Path, remote: &str) -> Result<(), String> {
+        let mut source = tokio::fs::File::open(local).await.map_err(|e| format!("{}: {e}", local.display()))?;
+        let mut target = self.session.create(remote.to_owned()).await.map_err(|e| format!("{remote}: {e}"))?;
+        tokio::io::copy(&mut source, &mut target).await.map_err(|e| format!("{remote}: {e}"))?;
+        target.shutdown().await.map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     async fn download(&self, id: u64, remote: &str, dir: &Path) -> Result<Reply, String> {
