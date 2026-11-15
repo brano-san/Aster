@@ -17,7 +17,8 @@ Aster — терминал на Rust с нативным GPU-рендеринг�
 | `aster-vt` | `Terminal` поверх `alacritty_terminal::Term`: подача байтов, размер, выделение, прокрутка, снимок видимых клеток, курсор; `Palette` (схемы Tabby Default и Default Light, куб 256 цветов, жирный как яркий, dim, inverse); события `VtEvent` (ответы в PTY, заголовок, звонок, OSC 52) | `alacritty_terminal` |
 | `aster-core` | `App` (вкладки, дерево панелей, сессии, мышь, выделение, селектор команд и профилей), `view` (геометрия заголовка и кадр), `keymap` (действия и привязки Tabby, аккорды), `keys` (кодирование клавиш xterm, мыши SGR и legacy, вставки), `config` (TOML), `panes`, `theme`, `overlay`, `fuzzy` | `aster-gfx`, `aster-vt` |
 | `aster-platform` | трейты `Window`, `WindowHandler`, `WindowSystem`, `Renderer`, `Pty`, `Platform`; `SpawnRequest`, `Spawned` | `aster-core`, `aster-gfx` |
-| `aster-platform-windows` | Win32-окно со своим заголовком (копия Flit без оболочки и UIA), D3D11 + DirectComposition, DirectWrite с курсивом, ConPTY, автоопределение оболочек | `windows` |
+| `aster-platform-windows` | Win32-окно со своим заголовком (копия Flit без оболочки и UIA), D3D11 + DirectComposition, DirectWrite с курсивом, ConPTY, автоопределение оболочек (PowerShell 5/7, CMD с PROMPT, сообщающим папку, WSL, Git Bash, Cygwin, MSYS2, Cmder, VS Developer Prompt), открытие ссылок через `ShellExecuteW` | `windows` |
+| `aster-platform-linux` | окно на winit 0.31 (Wayland и X11, без системной рамки: перетаскивание и изменение размера за край из кода, двойной щелчок по заголовку), OpenGL ES 3 через EGL (`glutin` + `glow`, шейдер WGSL → GLSL через `naga`), текст на `harfrust` + `swash` + fontconfig из Flit с синтетическим курсивом, PTY через `openpty` + `fork` + `execvpe`, оболочка входа из passwd и `/etc/shells`, буфер обмена через data transfer winit, `xdg-open` | `winit`, `glutin`, `glow`, `harfrust`, `swash`, `libc` |
 | `aster` | бинарник: `Handler` (окна, рендереры, применение эффектов), `Session` (потоки чтения, записи и ожидания PTY), конфиг и положение окна | все |
 
 **Правило изоляции.** `aster-gfx`, `aster-vt`, `aster-core`, `aster-platform` не зависят от крейта `windows` (windows-rs). Исключение — `windows-sys`, который `alacritty_terminal` тянет для своего модуля `tty`; Aster этот модуль не использует. CI проверяет правило задачей `deps-isolation`.
@@ -51,15 +52,30 @@ Aster — терминал на Rust с нативным GPU-рендеринг�
 
 Перенесён из Flit (см. [docs/GPU-SHARED-LIB.md](docs/GPU-SHARED-LIB.md)): одно устройство D3D11, swap chain `FLIP_DISCARD` для композиции, `SetMaximumFrameLatency(1)`, ожидание кадрового объекта вместе с вводом, синхронная перерисовка в `WM_SIZE`, восстановление после потери устройства. Шейдер `ui.hlsl` — виды: заливка и скруглённые рамки (SDF), глиф, цветной глиф, тень, волнистое подчёркивание. Атлас 2048² сбрасывается целиком при переполнении, кадр тут же строится заново.
 
-Клетка сетки: ширина — округлённая ширина «M» моноширинного шрифта, высота — подъём + спуск + `line-padding`, поэтому глифы стоят в целых пикселях и не требуют субпиксельных копий. Резервные шрифты для символов, которых нет в основном, подбирает DirectWrite.
+Клетка сетки: ширина — округлённая ширина «M» моноширинного шрифта, высота — подъём + спуск + `line-padding`, поэтому глифы стоят в целых пикселях и не требуют субпиксельных копий. Резервные шрифты для символов, которых нет в основном, подбирает DirectWrite (на Linux — список fontconfig).
+
+Псевдографика рисуется кодом (`aster-gfx/src/boxdraw.rs`): одинарные и жирные линии U+2500–257F, скругления, диагонали, блоки и штриховки U+2580–259F, треугольники Powerline E0B0–E0B3 растеризуются в маску ровно по размеру клетки и кладутся в тот же атлас (ключ — символ и размер клетки), поэтому стыкуются без щелей при любом `line-padding`. Двойные линии берутся из шрифта.
+
+## Цветовые схемы, текущая папка, ссылки
+
+- 191 схема сообщества Tabby лежит в `aster-vt/schemes` (формат Xresources), `build.rs` встраивает их; свои схемы — `[[color-schemes]]` в конфиге. Команда «Select color scheme» показывает схему при перемещении по списку, Esc возвращает прежнюю, Enter сохраняет конфиг.
+- `aster-vt` сам разбирает OSC 7 (`file://`), OSC 9;9 (Windows Terminal) и OSC 1337 `CurrentDir=`: `vte` их не обрабатывает. Новая вкладка и сплит стартуют в папке активной панели; для WSL unix-путь подставляется в аргумент `--cd`.
+- Ссылки (`aster-core/src/links.rs`): URL, пути Windows и Unix у начала слова; при наведении — подчёркивание и курсор-рука, щелчок без выделения открывает (суффикс `:строка:столбец` отбрасывается).
+- Конфиг перечитывается, когда окно получает фокус и файл изменился.
 
 ## Конфигурация
 
 `%APPDATA%\Aster\config.toml`, создаётся с умолчаниями при первом запуске. Разделы `[terminal]`, `[appearance]`, `[hotkeys]` (id действий и строки привязок как в Tabby: `"split-right" = ["Ctrl-Shift-S"]`), `[[profiles]]`. Умолчания повторяют Tabby для Windows (копирование при выделении, правый клик — копировать или вставить, 25 000 строк прокрутки).
 
+## Linux
+
+Окно без системной рамки: `HitArea::Caption` превращается в `drag_window`, полоса в 5 пикселей у края — в `drag_resize_window`, двойной щелчок по заголовку — в разворот, правый щелчок — в меню окна. Клавиши сопоставляются по позиции на US-раскладке (хоткеи работают на любой раскладке), текст берётся из `KeyEvent::text`; при зажатом Ctrl окно само порождает управляющий символ (Ctrl+C → 0x03), при Alt — `AltChar`. Буфер обмена асинхронный: `clipboard_text` просит winit прочитать данные, текст приходит событием `Pasted`. Таймер мигания курсора — `ControlFlow::WaitUntil`.
+
+Устройство OpenGL ES одно на процесс и создаётся от дисплея цикла событий; на Wayland вертикальная синхронизация отключена (кадры темпирует композитор), на X11 — `SwapInterval::Wait(1)`. Иконки интерфейса — `FlitIcons.ttf` (подмножество Fluent UI System Icons на кодах Segoe Fluent), шрифт интерфейса по умолчанию — `FlitSans.ttf` (подмножество DejaVu Sans) или шрифт рабочего стола из GNOME/KDE.
+
 ## Проверка кадра без экрана
 
-`ASTER_CAPTURE=путь.png` открывает окно вне экрана, после каждого кадра пишет снимок и завершает процесс через `ASTER_CAPTURE_MS` (по умолчанию 4 с). `ASTER_CAPTURE_SIZE=900,520` задаёт размер, `ASTER_CAPTURE_KEYS` — ввод: `'текст` печатает символы, `Ctrl+Shift+S`, `Enter` и т. п. — клавиши. Пример: `ASTER_CAPTURE_KEYS="'dir;Enter;Ctrl+Shift+D"`.
+`ASTER_CAPTURE=путь.png` после каждого кадра пишет снимок и завершает процесс через `ASTER_CAPTURE_MS` (по умолчанию 4 с); на Windows окно открывается вне экрана, на Linux — обычным окном. Тест `crates/aster-platform-linux/test/render.rs` рисует кадр `App` на безоконном EGL-устройстве в offscreen-текстуру и с `ASTER_RENDER_PNG=путь` сохраняет его. `ASTER_CAPTURE_SIZE=900,520` задаёт размер, `ASTER_CAPTURE_KEYS` — ввод: `'текст` печатает символы, `Ctrl+Shift+S`, `Enter` и т. п. — клавиши. Пример: `ASTER_CAPTURE_KEYS="'dir;Enter;Ctrl+Shift+D"`.
 
 ## Тесты
 
