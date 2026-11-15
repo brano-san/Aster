@@ -106,7 +106,7 @@ fn diagonal(m: &mut Mask, c: u32, light: f32) {
 
 fn blocks(m: &mut Mask, c: u32) {
     let (w, h) = (m.w as f32, m.h as f32);
-    let e = |n: f32| (n / 8.0);
+    let e = |n: f32| n / 8.0;
     match c {
         0x2580 => m.fill(0.0, 0.0, w, h / 2.0, 255),
         0x2581..=0x2588 => m.fill(0.0, h * (1.0 - e((c - 0x2580) as f32)), w, h, 255),
