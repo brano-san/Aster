@@ -62,6 +62,7 @@ pub const SETTINGS: &[Setting] = &[
     item(INPUT, "terminal.bracketed-paste", "Bracketed paste", "Programs can tell pasted text from typing", Control::Toggle),
     item(INPUT, "terminal.trim-whitespace-on-paste", "Trim pasted text", "Remove trailing whitespace from pasted text", Control::Toggle),
     item(INPUT, "terminal.warn-on-multiline-paste", "Confirm multiline paste", "Ask before pasting several lines into a program that would run each one", Control::Toggle),
+    item(INPUT, "terminal.sudo-passwords", "Saved passwords at prompts", "At a sudo or other password prompt, Ctrl+Shift+Enter types a saved password or saves one that worked", Control::Toggle),
     item(INPUT, "terminal.word-separator", "Word separators", "Characters that end a word on double click", Control::Text),
     item(SEARCH, "terminal.search-options.case-sensitive", "Match case", "Search tells upper and lower case apart", Control::Toggle),
     item(SEARCH, "terminal.search-options.regex", "Regular expressions", "Search queries are regular expressions", Control::Toggle),

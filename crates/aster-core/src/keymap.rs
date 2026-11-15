@@ -54,6 +54,7 @@ pub enum Action {
     CloseTabsToRight,
     CloseTabsToLeft,
     OpenFiles,
+    FillPassword,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -106,6 +107,7 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::CloseTabsToRight, "close-tabs-to-the-right", "Close tabs to the right"),
     (Action::CloseTabsToLeft, "close-tabs-to-the-left", "Close tabs to the left"),
     (Action::OpenFiles, "open-files", "Remote files (SFTP)"),
+    (Action::FillPassword, "fill-password", "Type or save the password for this prompt"),
 ];
 
 impl Action {
@@ -292,6 +294,7 @@ pub fn defaults() -> Vec<(Action, &'static [&'static str])> {
         (Search, &["Ctrl-Shift-F"]),
         (Settings, &["Ctrl-,"]),
         (OpenFiles, &["Ctrl-Shift-O"]),
+        (FillPassword, &["Ctrl-Shift-Enter"]),
     ]
 }
 

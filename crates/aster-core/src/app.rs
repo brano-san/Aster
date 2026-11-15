@@ -57,6 +57,9 @@ pub enum Effect {
     Files { pane: PaneId, request: crate::files::FileRequest },
     SendFiles { pane: PaneId, files: Vec<std::path::PathBuf> },
     CancelTransfer { pane: PaneId },
+    CheckSecret { pane: PaneId, key: String },
+    FillSecret { pane: PaneId, key: String },
+    SaveSecret { key: String, value: String },
     ImeArea(Rect),
 }
 
@@ -117,7 +120,7 @@ pub struct App {
     pub(crate) zoom: f32,
     pub(crate) focused: bool,
     system_dark: bool,
-    effects: Vec<Effect>,
+    pub(crate) effects: Vec<Effect>,
     pub(crate) dirty: bool,
     events: Receiver<(PaneId, VtEvent)>,
     sender: Sender<(PaneId, VtEvent)>,
@@ -140,6 +143,7 @@ pub struct App {
     pub(crate) transfer_seq: u64,
     pub(crate) last_dirs: HashMap<PaneId, String>,
     pub(crate) offers: HashMap<PaneId, String>,
+    pub(crate) prompts: HashMap<PaneId, crate::sudo::Prompt>,
     pub(crate) bell: Option<(PaneId, Instant)>,
     last_bell: Option<Instant>,
     bell_pane: Option<PaneId>,
@@ -207,6 +211,7 @@ impl App {
             transfer_seq: 0,
             last_dirs: HashMap::new(),
             offers: HashMap::new(),
+            prompts: HashMap::new(),
             bell: None,
             last_bell: None,
             bell_pane: None,
@@ -498,6 +503,7 @@ impl App {
             self.files = None;
         }
         self.offers.remove(&pane);
+        self.prompts.remove(&pane);
         if self.search.as_ref().is_some_and(|s| s.pane == pane) {
             self.search = None;
         }
@@ -613,6 +619,7 @@ impl App {
         if queued {
             p.queued.extend_from_slice(&bytes);
         }
+        self.note_input(pane, &bytes);
         self.reset_blink();
         if !queued {
             self.effects.push(Effect::Write { pane, bytes });
@@ -773,6 +780,9 @@ impl App {
             Settings => self.open_settings(),
             RenameTab => self.start_rename(self.active),
             OpenFiles => self.open_files(),
+            FillPassword => {
+                self.fill_password();
+            }
             CloseOtherTabs => self.close_tabs_except(|i, active| i == active),
             CloseTabsToRight => self.close_tabs_except(|i, active| i <= active),
             CloseTabsToLeft => self.close_tabs_except(|i, active| i >= active),
@@ -1083,7 +1093,11 @@ impl App {
         if self.search_key(key, mods) {
             return;
         }
-        match self.keymap.press(Chord { key, mods }) {
+        let outcome = self.keymap.press(Chord { key, mods });
+        if outcome != Outcome::Action(Action::FillPassword) && key != Key::Other {
+            self.dismiss_offer();
+        }
+        match outcome {
             Outcome::Action(a) => {
                 self.swallow_char = true;
                 self.run(a);
@@ -1541,6 +1555,7 @@ impl App {
                 VtEvent::Clipboard(text) => self.effects.push(Effect::SetClipboard(text)),
             }
         }
+        self.scan_prompts();
         self.dirty = true;
     }
 

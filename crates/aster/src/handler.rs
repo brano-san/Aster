@@ -243,6 +243,24 @@ impl<P: Platform> Handler<P> {
             Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()) }),
             Effect::Timer(ms) => window.set_timer(ms),
             Effect::Attention => window.request_attention(),
+            Effect::CheckSecret { pane, key } => {
+                let known = P::secret_get(&key).is_some();
+                if let Some(s) = self.windows.get_mut(&id) {
+                    s.app.secret_known(pane, known);
+                }
+            }
+            Effect::FillSecret { pane, key } => {
+                if let (Some(secret), Some(s)) = (P::secret_get(&key), self.sessions.get(&(id, pane))) {
+                    let mut bytes = secret.into_bytes();
+                    bytes.push(b'\r');
+                    s.write(bytes);
+                }
+            }
+            Effect::SaveSecret { key, value } => {
+                if !P::secret_set(&key, &value) {
+                    tracing::warn!("could not save the password for {key}");
+                }
+            }
             Effect::SendFiles { pane, files } => {
                 if let Some(s) = self.sessions.get(&(id, pane)) {
                     s.send_files(&files);
