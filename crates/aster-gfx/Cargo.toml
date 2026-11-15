@@ -1,0 +1,9 @@
+[package]
+name = "aster-gfx"
+description = "OS-independent drawing for Aster: draw lists, glyph atlas, text shaping cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

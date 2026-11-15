@@ -1,0 +1,10 @@
+[package]
+name = "aster-vt"
+description = "Terminal emulation for Aster: VT parsing, screen model, input encoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
