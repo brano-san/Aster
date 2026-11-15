@@ -25,6 +25,7 @@ const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
+    pub elevated: bool,
     pub ssh: Option<String>,
     pub serial: Option<String>,
     pub command: String,
@@ -155,6 +156,7 @@ pub struct App {
     pub(crate) last_dirs: HashMap<PaneId, String>,
     pub(crate) offers: HashMap<PaneId, (PaneTransfer, String)>,
     pub(crate) prompts: HashMap<PaneId, crate::sudo::Prompt>,
+    can_elevate: bool,
     pub(crate) bell: Option<(PaneId, Instant)>,
     last_bell: Option<Instant>,
     bell_pane: Option<PaneId>,
@@ -223,6 +225,7 @@ impl App {
             last_dirs: HashMap::new(),
             offers: HashMap::new(),
             prompts: HashMap::new(),
+            can_elevate: false,
             bell: None,
             last_bell: None,
             bell_pane: None,
@@ -506,7 +509,7 @@ impl App {
             terminal.lock().set_cwd(inherited.clone());
         }
         let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
-        let launch = Launch { ssh: profile.ssh.clone(), serial: profile.serial.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), serial: profile.serial.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0 });
         id
     }
@@ -641,6 +644,11 @@ impl App {
         let Some(tab) = self.tabs.get(index) else { return String::new() };
         if let Some(t) = &tab.title {
             return t.clone();
+        }
+        let elevated = self.panes.get(&tab.focus).is_some_and(|p| p.profile.elevated);
+        if elevated {
+            let base = self.panes.get(&tab.focus).map(|p| p.title.clone().unwrap_or_else(|| p.profile.name.clone())).unwrap_or_default();
+            return format!("Administrator: {base}");
         }
         self.panes.get(&tab.focus).map(|p| p.title.clone().unwrap_or_else(|| p.profile.name.clone())).unwrap_or_default()
     }
@@ -836,6 +844,16 @@ impl App {
             DuplicateTab => {
                 if let Some(p) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.profile.clone()) {
                     self.open_tab(p);
+                }
+            }
+            NewAdminTab => {
+                if let Some(p) = self.default_profile() {
+                    self.open_admin_tab(p);
+                }
+            }
+            DuplicateAsAdmin => {
+                if let Some(p) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.profile.clone()) {
+                    self.open_admin_tab(p);
                 }
             }
             NextTab => self.cycle(1),
@@ -1620,6 +1638,23 @@ impl App {
             p.terminal.lock().feed(text.as_bytes());
             self.dirty = true;
         }
+    }
+
+    pub fn set_can_elevate(&mut self, can: bool) {
+        self.can_elevate = can;
+    }
+
+    pub fn can_elevate(&self) -> bool {
+        self.can_elevate
+    }
+
+    fn open_admin_tab(&mut self, mut profile: Profile) {
+        let local = profile.ssh.is_none() && profile.serial.is_none();
+        if !self.can_elevate || !local {
+            return;
+        }
+        profile.elevated = true;
+        self.open_tab(profile);
     }
 
     pub fn spawn_failed(&mut self, pane: PaneId, message: &str) {

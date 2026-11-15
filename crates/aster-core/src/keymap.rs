@@ -55,6 +55,8 @@ pub enum Action {
     CloseTabsToLeft,
     OpenFiles,
     FillPassword,
+    NewAdminTab,
+    DuplicateAsAdmin,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -108,6 +110,8 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::CloseTabsToLeft, "close-tabs-to-the-left", "Close tabs to the left"),
     (Action::OpenFiles, "open-files", "Remote files (SFTP)"),
     (Action::FillPassword, "fill-password", "Type or save the password for this prompt"),
+    (Action::NewAdminTab, "new-admin-tab", "New administrator tab"),
+    (Action::DuplicateAsAdmin, "duplicate-as-admin", "Duplicate tab as administrator"),
 ];
 
 impl Action {

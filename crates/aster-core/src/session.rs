@@ -94,7 +94,8 @@ impl App {
     fn build(&mut self, state: &NodeState) -> Node {
         match state {
             NodeState::Pane(p) => {
-                let id: PaneId = self.new_pane_in(p.profile.clone(), p.cwd.clone());
+                let profile = Profile { elevated: false, ..p.profile.clone() };
+                let id: PaneId = self.new_pane_in(profile, p.cwd.clone());
                 if let Some(pane) = self.panes.get(&id) {
                     let mut t = pane.terminal.lock();
                     if !p.buffer.is_empty() {

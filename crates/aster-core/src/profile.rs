@@ -18,6 +18,8 @@ pub struct Profile {
     pub serial: Option<String>,
     #[serde(skip)]
     pub builtin: bool,
+    #[serde(skip)]
+    pub elevated: bool,
 }
 
 impl Profile {
