@@ -157,6 +157,7 @@ impl App {
         for sp in &layout.splitters {
             g.dl.rect(sp.rect, theme.divider);
         }
+        self.draw_search(g);
         if let Some(o) = self.overlay.clone() {
             self.draw_overlay(g, &o);
         }
@@ -254,7 +255,13 @@ impl App {
         let blink_on = self.blink_on || !self.config.terminal.cursor_blink;
         let theme = self.theme;
         let terminal = pane.terminal.clone();
-        let t = terminal.lock();
+        let mut t = terminal.lock();
+        let matches = if self.search.as_ref().is_some_and(|s| s.pane == id) { t.visible_matches() } else { Vec::new() };
+        if !matches.is_empty() {
+            if let Some(bar) = self.search.as_mut() {
+                bar.missing = false;
+            }
+        }
         let overrides = *t.colors();
         let default_bg = palette.background(&overrides);
         if default_bg != palette.background {
@@ -275,6 +282,10 @@ impl App {
                 g.dl.rect(cell_rect(v.line, v.col, span), rgb(bg));
             }
         });
+        for mt in &matches {
+            let color = if mt.current { Color::rgb(0xF0A030).alpha(0xC0) } else { Color::rgb(0xE5C07B).alpha(0x60) };
+            g.dl.rect(cell_rect(mt.line, mt.start, mt.end.saturating_sub(mt.start).max(1)), color);
+        }
         let cursor = t.cursor();
         let show_cursor = cursor.shape != CursorShape::Hidden;
         let cursor_color = overrides[aster_vt::NamedColor::Cursor].unwrap_or(palette.cursor);
@@ -374,6 +385,53 @@ impl App {
         }
         for e in effects {
             self.push(e);
+        }
+    }
+
+    fn draw_search<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        use crate::search::SearchHit;
+        let Some(geo) = self.search_geometry() else { return };
+        let Some(bar) = self.search.clone() else { return };
+        let s = self.scale;
+        let theme = self.theme;
+        let radius = (6.0 * s).round();
+        g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 3.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (10.0 * s).round());
+        g.dl.round_rect(geo.frame, theme.overlay, radius);
+        let border = if bar.error || bar.missing { Color::rgb(0xD9534F) } else { theme.overlay_border };
+        g.dl.outline(geo.frame, border, radius, (1.0 * s).round().max(1.0));
+        let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
+        let y = baseline(g, geo.field, ui);
+        if bar.query.is_empty() {
+            g.text(geo.field.x, y, "Search", ui, theme.text_dim, geo.field.w);
+        }
+        let w = g.text(geo.field.x, y, &bar.query, ui, theme.text, geo.field.w);
+        let caret_h = (16.0 * s).round();
+        g.dl.rect(Rect::new(geo.field.x + w + 1.0, geo.field.y + ((geo.field.h - caret_h) / 2.0).round(), (1.0 * s).round().max(1.0), caret_h), theme.accent);
+        let options = self.config.terminal.search_options;
+        let icons = FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false);
+        let (mx, my) = self.mouse;
+        for (hit, r) in geo.buttons {
+            let on = match hit {
+                SearchHit::Case => options.case_sensitive,
+                SearchHit::Regex => options.regex,
+                SearchHit::Word => options.whole_word,
+                _ => false,
+            };
+            if on {
+                g.dl.round_rect(r, theme.accent.alpha(0x50), (4.0 * s).round());
+            } else if r.contains(mx, my) {
+                g.dl.round_rect(r, theme.button_hover, (4.0 * s).round());
+            }
+            let ink = if on { theme.text } else { theme.text_dim };
+            match hit {
+                SearchHit::Case => centered(g, r, "Aa", ui, ink),
+                SearchHit::Regex => centered(g, r, ".*", ui, ink),
+                SearchHit::Word => centered(g, r, "W", ui, ink),
+                SearchHit::Older => centered(g, r, "\u{E70E}", icons, ink),
+                SearchHit::Newer => centered(g, r, "\u{E70D}", icons, ink),
+                SearchHit::Close => centered(g, r, G_CLOSE, FontStyle::new(FontFamily::Icons, (8.0 * s).round(), false), ink),
+                SearchHit::Field => {}
+            }
         }
     }
 

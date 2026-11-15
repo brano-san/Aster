@@ -47,6 +47,7 @@ pub enum Action {
     ScrollUp,
     ScrollDown,
     SelectColorScheme,
+    Search,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -92,6 +93,7 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::ScrollUp, "scroll-up", "Scroll up"),
     (Action::ScrollDown, "scroll-down", "Scroll down"),
     (Action::SelectColorScheme, "select-color-scheme", "Select color scheme"),
+    (Action::Search, "search", "Search"),
 ];
 
 impl Action {
@@ -275,6 +277,7 @@ pub fn defaults() -> Vec<(Action, &'static [&'static str])> {
         (ScrollDown, &["Ctrl-Shift-Down"]),
         (ScrollPageDown, &["Alt-PageDown"]),
         (ScrollToBottom, &["Ctrl-PageDown"]),
+        (Search, &["Ctrl-Shift-F"]),
     ]
 }
 
