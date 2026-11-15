@@ -7,6 +7,7 @@ pub enum Input {
     Data(Vec<u8>),
     Resize(u16, u16),
     Close,
+    Sftp(crate::sftp::Request),
 }
 
 pub struct Console {
@@ -64,7 +65,7 @@ impl Console {
                         return Some(String::from_utf8_lossy(line).into_owned());
                     }
                 }
-                Input::Resize(..) => {}
+                Input::Resize(..) | Input::Sftp(_) => {}
                 Input::Close => return None,
             }
         }
