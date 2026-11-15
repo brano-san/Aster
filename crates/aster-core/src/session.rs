@@ -22,6 +22,8 @@ pub struct WindowState {
 pub struct TabState {
     pub root: NodeState,
     pub focus: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -83,7 +85,7 @@ impl App {
             .filter_map(|t| {
                 let root = self.node_state(&t.root)?;
                 let focus = t.root.panes().iter().position(|p| *p == t.focus).unwrap_or(0);
-                Some(TabState { root, focus })
+                Some(TabState { root, focus, title: t.title.clone() })
             })
             .collect::<Vec<_>>();
         WindowState { active: self.active.min(tabs.len().saturating_sub(1)), tabs }
@@ -115,7 +117,7 @@ impl App {
             let root = self.build(&tab.root);
             let order = root.panes();
             let focus = order.get(tab.focus).or(order.first()).copied().unwrap_or(0);
-            self.tabs.push(Tab { root, focus, zoomed: None });
+            self.tabs.push(Tab { root, focus, zoomed: None, title: tab.title.clone() });
         }
         self.active = state.active.min(self.tabs.len().saturating_sub(1));
         self.dirty = true;

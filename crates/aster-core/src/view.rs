@@ -162,6 +162,7 @@ impl App {
         if let Some(o) = self.overlay.clone() {
             self.draw_overlay(g, &o);
         }
+        self.draw_menu(g);
         self.mark_drawn();
     }
 
@@ -190,9 +191,21 @@ impl App {
             let show_close = active || hovered;
             let text_x = r.x + (12.0 * s).round();
             let text_end = if show_close { slot.close.x - 4.0 * s } else { r.right() - 12.0 * s };
-            let title = self.tab_title(i);
             let y = baseline(g, r, ui);
-            g.text(text_x, y, &title, ui, if active { theme.text } else { theme.text_dim }, (text_end - text_x).max(0.0));
+            match self.rename.as_ref().filter(|n| n.tab == i) {
+                Some(edit) => {
+                    let field = Rect::new(text_x - (5.0 * s).round(), r.y + (5.0 * s).round(), (text_end - text_x + 8.0 * s).max(0.0).round(), r.h - (10.0 * s).round());
+                    g.dl.round_rect(field, theme.background, (4.0 * s).round());
+                    g.dl.outline(field, theme.accent, (4.0 * s).round(), (1.0 * s).round().max(1.0));
+                    let w = g.text(text_x, y, &edit.text, ui, theme.text, (text_end - text_x).max(0.0));
+                    let caret_h = (14.0 * s).round();
+                    g.dl.rect(Rect::new(text_x + w + 1.0, field.y + ((field.h - caret_h) / 2.0).round(), (1.0 * s).round().max(1.0), caret_h), theme.accent);
+                }
+                None => {
+                    let title = self.tab_title(i);
+                    g.text(text_x, y, &title, ui, if active { theme.text } else { theme.text_dim }, (text_end - text_x).max(0.0));
+                }
+            }
             if show_close {
                 if slot.close.contains(mx, my) {
                     g.dl.round_rect(slot.close, theme.button_hover, (4.0 * s).round());
@@ -226,6 +239,7 @@ impl App {
         let inner = pane_inner(rect, s);
         let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
         let mut effects = Vec::new();
+        let window_focused = self.terminal_has_focus();
         let Some(pane) = self.panes.get_mut(&id) else { return };
         if let Some(mut launch) = pane.pending.take() {
             launch.cols = size.cols as u16;
@@ -252,7 +266,6 @@ impl App {
             }
         }
         let palette = self.palette;
-        let window_focused = self.focused && self.overlay.is_none();
         let blink_on = self.blink_on || !self.config.terminal.cursor_blink;
         let theme = self.theme;
         let terminal = pane.terminal.clone();
@@ -468,6 +481,39 @@ impl App {
                 SearchHit::Newer => centered(g, r, "\u{E70D}", icons, ink),
                 SearchHit::Close => centered(g, r, G_CLOSE, FontStyle::new(FontFamily::Icons, (8.0 * s).round(), false), ink),
                 SearchHit::Field => {}
+            }
+        }
+    }
+
+    fn draw_menu<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        use crate::menu::Entry;
+        let Some(geo) = self.menu_geometry() else { return };
+        let Some(menu) = self.menu.clone() else { return };
+        let s = self.scale;
+        let theme = self.theme;
+        let radius = (7.0 * s).round();
+        g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 4.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (14.0 * s).round());
+        g.dl.round_rect(geo.frame, theme.overlay, radius);
+        g.dl.outline(geo.frame, theme.overlay_border, radius, (1.0 * s).round().max(1.0));
+        for r in &geo.separators {
+            g.dl.rect(*r, theme.overlay_border);
+        }
+        let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.0 * s).round(), false);
+        for (i, r) in &geo.rows {
+            let Some(Entry::Item { label, action, enabled }) = menu.entries.get(*i) else { continue };
+            if menu.selected == Some(*i) {
+                g.dl.round_rect(*r, theme.accent.alpha(0x38), (4.0 * s).round());
+            }
+            let ink = if *enabled { theme.text } else { theme.text_dim.alpha(0x80) };
+            let hint = self.keymap.bindings_of(*action).next().map(crate::keymap::format_binding).unwrap_or_default();
+            let hint_w = if hint.is_empty() { 0.0 } else { g.measure(&hint, small) };
+            let pad = (12.0 * s).round();
+            let y = baseline(g, *r, ui);
+            g.text(r.x + pad, y, label, ui, ink, (r.w - hint_w - 3.0 * pad).max(0.0));
+            if hint_w > 0.0 {
+                let hy = baseline(g, *r, small);
+                g.text(r.right() - pad - hint_w, hy, &hint, small, theme.text_dim, hint_w + 1.0);
             }
         }
     }
