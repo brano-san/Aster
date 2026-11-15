@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --release
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p aster-gfx -p aster-vt -p aster-core -p aster-platform --all-targets -- -D warnings
+      - run: cargo test -p aster-gfx -p aster-vt -p aster-core -p aster-platform
+
+  deps-isolation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          status=0
+          for crate in aster-gfx aster-vt aster-core aster-platform; do
+            tree=$(cargo tree -p "$crate" -e normal,build --target all --prefix none)
+            if grep -E '^windows(-core)? v' <<< "$tree"; then
+              echo "::error::$crate depends on the windows crate"
+              status=1
+            else
+              echo "$crate: no windows crate"
+            fi
+          done
+          exit "$status"
