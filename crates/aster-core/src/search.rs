@@ -11,6 +11,8 @@ pub struct SearchBar {
     pub query: String,
     pub error: bool,
     pub missing: bool,
+    pub current: Option<usize>,
+    pub count: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +59,7 @@ impl App {
         let Some(pane) = self.focused_pane() else { return };
         let selected = self.panes.get(&pane).and_then(|p| p.terminal.lock().selection_text()).filter(|t| !t.contains('\n'));
         let query = selected.or_else(|| self.search.as_ref().map(|s| s.query.clone())).unwrap_or_default();
-        self.search = Some(SearchBar { pane, query, error: false, missing: false });
+        self.search = Some(SearchBar { pane, query, error: false, missing: false, current: None, count: 0 });
         self.rerun_search();
     }
 
