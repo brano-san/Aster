@@ -177,6 +177,10 @@ impl Terminal {
         self.cwd.as_deref()
     }
 
+    pub fn set_cwd(&mut self, cwd: Option<String>) {
+        self.cwd = cwd;
+    }
+
     pub fn line_text(&self, line: usize) -> (String, Vec<usize>) {
         let mut text = String::new();
         let mut cols = Vec::new();
@@ -341,6 +345,29 @@ impl Terminal {
             found.reset_index();
         }
         self.bump();
+    }
+
+    pub fn tail_lines(&self, max: usize) -> Vec<String> {
+        let top = self.term.topmost_line().0;
+        let bottom = self.term.bottommost_line().0;
+        let mut lines: Vec<String> = Vec::new();
+        let mut joining = false;
+        for line in top..=bottom {
+            let row = &self.term.grid()[Line(line)];
+            let wrapped = row[Column(self.size.cols - 1)].flags.contains(Flags::WRAPLINE);
+            let text = search::row_text(&self.term, line);
+            let text = if wrapped { text } else { text.trim_end().to_owned() };
+            match (joining, lines.last_mut()) {
+                (true, Some(last)) => last.push_str(&text),
+                _ => lines.push(text),
+            }
+            joining = wrapped;
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        let skip = lines.len().saturating_sub(max);
+        lines.split_off(skip)
     }
 
     pub fn screen_text(&self) -> String {

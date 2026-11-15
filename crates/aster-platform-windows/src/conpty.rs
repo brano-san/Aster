@@ -13,6 +13,7 @@ use windows::Win32::System::Threading::{
     EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
+const INHERIT_CURSOR: u32 = 0x1;
 const RESIZE_QUIRK: u32 = 0x2;
 
 struct Inner {
@@ -124,7 +125,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
         let (in_read, in_write) = pipe()?;
         let (out_read, out_write) = pipe()?;
         let size = COORD { X: req.cols.max(1) as i16, Y: req.rows.max(1) as i16 };
-        let pcon = CreatePseudoConsole(size, in_read, out_write, RESIZE_QUIRK);
+        let pcon = CreatePseudoConsole(size, in_read, out_write, INHERIT_CURSOR | RESIZE_QUIRK);
         let _ = CloseHandle(in_read);
         let _ = CloseHandle(out_write);
         let pcon = match pcon {

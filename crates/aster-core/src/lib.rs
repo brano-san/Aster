@@ -9,6 +9,7 @@ pub mod overlay;
 pub mod panes;
 pub mod profile;
 pub mod search;
+pub mod session;
 pub mod ssh;
 pub mod theme;
 pub mod view;

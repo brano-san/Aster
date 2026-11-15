@@ -118,6 +118,7 @@ dependencies = [
  "aster-gfx",
  "aster-vt",
  "serde",
+ "serde_json",
  "toml",
 ]
 

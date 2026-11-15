@@ -4,6 +4,7 @@ use aster_core::config::Config;
 use aster_core::input::{Event, HitArea};
 use aster_core::panes::PaneId;
 use aster_core::profile::Profile;
+use aster_core::session::{SessionState, WindowState};
 use aster_gfx::text::Gfx;
 use aster_platform::{Platform, RenderError, Renderer, SpawnRequest, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -34,6 +35,8 @@ pub struct Handler<P: Platform> {
     exit_tx: Sender<Exit>,
     config_stamp: Option<SystemTime>,
     ssh: Option<String>,
+    pending: Vec<WindowState>,
+    session_saved: bool,
 }
 
 fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
@@ -48,6 +51,17 @@ fn stamp(path: &Option<PathBuf>) -> Option<SystemTime> {
     path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
+fn capturing() -> bool {
+    std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_CAPTURE_SESSION").is_none()
+}
+
+fn load_session<P: Platform>() -> Vec<WindowState> {
+    if capturing() {
+        return Vec::new();
+    }
+    crate::session_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| SessionState::parse(&t)).map(|s| s.windows).unwrap_or_default()
+}
+
 impl<P: Platform> Handler<P> {
     pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker) -> Self {
         let mut profiles = P::shells();
@@ -57,7 +71,8 @@ impl<P: Platform> Handler<P> {
         }
         let (exit_tx, exits) = unbounded();
         let config_stamp = stamp(&crate::config_path::<P>());
-        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, exit_tx, config_stamp, ssh }
+        let pending = if config.terminal.recover_tabs { load_session::<P>() } else { Vec::new() };
+        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, exit_tx, config_stamp, ssh, pending, session_saved: false }
     }
 
     fn save_config(&mut self, text: String) {
@@ -180,11 +195,28 @@ impl<P: Platform> Handler<P> {
             Effect::Minimize => window.minimize(),
             Effect::ToggleMaximize => window.toggle_maximize(),
             Effect::ToggleFullscreen => window.toggle_fullscreen(),
-            Effect::Close => window.close(),
+            Effect::Close => {
+                if self.windows.len() == 1 && !std::mem::take(&mut self.session_saved) {
+                    self.save_session();
+                }
+                window.close();
+            }
             Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()) }),
             Effect::Timer(ms) => window.set_timer(ms),
             Effect::Attention => window.request_attention(),
             Effect::ImeArea(r) => window.set_ime_area(r),
+        }
+    }
+
+    fn save_session(&self) {
+        if capturing() {
+            return;
+        }
+        let Some(path) = crate::session_path::<P>() else { return };
+        let state = SessionState { windows: self.windows.values().map(|s| s.app.snapshot()).filter(|w| !w.tabs.is_empty()).collect() };
+        let tmp = path.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp, state.to_text()).and_then(|_| std::fs::rename(&tmp, &path)) {
+            tracing::warn!("{}: {e}", path.display());
         }
     }
 
@@ -214,7 +246,13 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let (w, h) = window.size();
         app.set_viewport(w, h, window.scale());
         app.set_ssh(self.ssh.clone());
-        app.open_default_tab();
+        let restored = (!self.pending.is_empty()).then(|| self.pending.remove(0)).is_some_and(|state| app.restore(&state));
+        if !restored {
+            app.open_default_tab();
+        }
+        for _ in 0..std::mem::take(&mut self.pending).len() {
+            window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: app.is_dark() });
+        }
         window.set_dark(app.is_dark());
         self.windows.insert(window.id(), State { app, gfx: Gfx::new(text, ATLAS), renderer: None });
         window.request_redraw();
@@ -223,6 +261,10 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     fn event(&mut self, window: &Win<P>, event: Event) {
         if matches!(event, Event::Focus(true)) {
             self.reload_config();
+        }
+        if matches!(event, Event::SessionEnding) || (matches!(event, Event::CloseRequested) && self.windows.len() == 1) {
+            self.save_session();
+            self.session_saved = true;
         }
         if matches!(event, Event::CloseRequested) && !window.is_fullscreen() {
             if let Some(path) = crate::state_path::<P>() {

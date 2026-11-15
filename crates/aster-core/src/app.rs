@@ -304,6 +304,11 @@ impl App {
     }
 
     fn new_pane(&mut self, profile: Profile) -> PaneId {
+        let inherited = self.focused_pane().and_then(|p| self.panes.get(&p)).and_then(|p| p.terminal.lock().cwd().map(str::to_owned));
+        self.new_pane_in(profile, inherited)
+    }
+
+    pub(crate) fn new_pane_in(&mut self, profile: Profile, inherited: Option<String>) -> PaneId {
         let id = self.next_id;
         self.next_id += 1;
         let sender = self.sender.clone();
@@ -319,7 +324,9 @@ impl App {
         for (k, v) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "Aster")] {
             env.entry(k.to_owned()).or_insert_with(|| v.to_owned());
         }
-        let inherited = self.focused_pane().and_then(|p| self.panes.get(&p)).and_then(|p| p.terminal.lock().cwd().map(str::to_owned));
+        if inherited.is_some() {
+            terminal.lock().set_cwd(inherited.clone());
+        }
         let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
         let launch = Launch { command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), size, scroll_acc: 0.0 });

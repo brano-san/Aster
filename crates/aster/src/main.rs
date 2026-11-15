@@ -29,6 +29,10 @@ fn load_config<P: Platform>() -> Config {
     }
 }
 
+pub fn session_path<P: Platform>() -> Option<PathBuf> {
+    P::config_dir().map(|d| d.join("session.json"))
+}
+
 pub fn state_path<P: Platform>() -> Option<PathBuf> {
     P::config_dir().map(|d| d.join("window.state"))
 }
