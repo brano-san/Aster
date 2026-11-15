@@ -24,7 +24,7 @@ pub fn detect() -> Vec<Profile> {
     let mut out = Vec::new();
     let default = login_shell().unwrap_or_else(|| "/bin/sh".into());
     let name = Path::new(&default).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "sh".into());
-    out.push(Profile::new("local:default", &format!("User default ({name})"), &default, &["--login"]));
+    out.push(Profile::new("local:default", &format!("User default ({name})"), &default, &["-l"]));
     let listed = std::fs::read_to_string("/etc/shells").or_else(|_| std::fs::read_to_string("/usr/share/defaults/etc/shells")).unwrap_or_default();
     for shell in listed_shells(&listed).into_iter().filter(|s| Path::new(s).is_file()) {
         let base = Path::new(&shell).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
