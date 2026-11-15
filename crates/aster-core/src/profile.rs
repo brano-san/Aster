@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -8,7 +9,7 @@ pub struct Profile {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
-    pub env: Vec<(String, String)>,
+    pub env: BTreeMap<String, String>,
     pub icon: Option<String>,
     pub color: Option<String>,
     #[serde(skip)]
