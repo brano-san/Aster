@@ -182,6 +182,7 @@ pub trait Platform: 'static {
     fn home_dir() -> Option<PathBuf>;
     fn open(target: &str);
     fn ssh_command() -> Option<String>;
+    fn process_cwd(pid: u32) -> Option<String>;
 }
 
 #[cfg(test)]

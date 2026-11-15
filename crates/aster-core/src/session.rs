@@ -64,8 +64,9 @@ impl App {
         Some(match node {
             Node::Leaf(id) => {
                 let pane = self.panes.get(id)?;
+                let cwd = self.pane_cwd(*id);
                 let t = pane.terminal.lock();
-                NodeState::Pane(Box::new(PaneState { profile: pane.profile.clone(), cwd: t.cwd().map(str::to_owned), buffer: t.tail_lines(BUFFER_LINES) }))
+                NodeState::Pane(Box::new(PaneState { profile: pane.profile.clone(), cwd, buffer: t.tail_lines(BUFFER_LINES) }))
             }
             Node::Split { axis, ratio, a, b } => match (self.node_state(a), self.node_state(b)) {
                 (Some(a), Some(b)) => NodeState::Split { vertical: *axis == Axis::Vertical, ratio: *ratio, a: Box::new(a), b: Box::new(b) },
