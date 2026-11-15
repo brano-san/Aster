@@ -13,7 +13,9 @@ pub use window::{Win32, Win32Waker, Win32Window};
 use aster_core::profile::Profile;
 use aster_platform::{Platform, PlatformError, SpawnRequest, Spawned};
 use std::path::PathBuf;
-use windows::core::w;
+use windows::core::{w, PCWSTR};
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
 pub(crate) fn err(e: windows::core::Error) -> PlatformError {
@@ -62,5 +64,12 @@ impl Platform for Windows {
 
     fn home_dir() -> Option<PathBuf> {
         std::env::var_os("USERPROFILE").map(PathBuf::from)
+    }
+
+    fn open(target: &str) {
+        let wide: Vec<u16> = target.encode_utf16().chain([0]).collect();
+        unsafe {
+            ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
+        }
     }
 }

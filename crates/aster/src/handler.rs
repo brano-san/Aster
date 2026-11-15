@@ -161,6 +161,7 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::SaveConfig(text) => self.save_config(text),
+            Effect::Open(target) => P::open(&target),
             Effect::Title(t) => window.set_title(&t),
             Effect::Cursor(c) => window.set_cursor(c),
             Effect::Minimize => window.minimize(),

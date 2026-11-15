@@ -347,6 +347,11 @@ impl App {
         let offset = t.display_offset();
         let history = t.history();
         drop(t);
+        if let Some(link) = self.hover_link.as_ref().filter(|l| l.pane == id) {
+            let x = ox + link.start as f32 * m.w;
+            let w = (link.end.saturating_sub(link.start)) as f32 * m.w;
+            g.dl.rect(Rect::new(x, oy + link.line as f32 * m.h + under_y, w, thin), theme.accent);
+        }
         if focused && !self.preedit.is_empty() {
             let style = FontStyle::new(FontFamily::Mono, px, false);
             let w = g.measure(&self.preedit.text, style);

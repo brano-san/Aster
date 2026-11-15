@@ -139,4 +139,5 @@ pub trait Platform: 'static {
     fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError>;
     fn config_dir() -> Option<PathBuf>;
     fn home_dir() -> Option<PathBuf>;
+    fn open(target: &str);
 }

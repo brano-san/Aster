@@ -1,3 +1,4 @@
+mod osc;
 mod palette;
 pub mod schemes;
 
@@ -98,6 +99,8 @@ pub struct Terminal {
     cell: Arc<AtomicU32>,
     title: Option<String>,
     seq: u64,
+    sniffer: osc::Sniffer,
+    cwd: Option<String>,
 }
 
 pub struct VisibleCell<'a> {
@@ -119,7 +122,27 @@ impl Terminal {
     pub fn new(size: Size, options: Options, sink: Sink) -> Self {
         let cell = Arc::new(AtomicU32::new(0));
         let listener = Listener { sink, cell: cell.clone() };
-        Self { term: Term::new(config(options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0 }
+        Self { term: Term::new(config(options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, sniffer: osc::Sniffer::default(), cwd: None }
+    }
+
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
+    }
+
+    pub fn line_text(&self, line: usize) -> (String, Vec<usize>) {
+        let mut text = String::new();
+        let mut cols = Vec::new();
+        let point = self.viewport_point(line, 0);
+        let row = &self.term.grid()[point.line];
+        for col in 0..self.size.cols {
+            let cell = &row[Column(col)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            text.push(cell.c);
+            cols.push(col);
+        }
+        (text, cols)
     }
 
     pub fn set_options(&mut self, options: Options) {
@@ -127,6 +150,12 @@ impl Terminal {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        let cwd = &mut self.cwd;
+        self.sniffer.feed(bytes, |payload| {
+            if let Some(dir) = osc::cwd(payload) {
+                *cwd = Some(dir);
+            }
+        });
         self.parser.advance(&mut self.term, bytes);
         self.bump();
     }

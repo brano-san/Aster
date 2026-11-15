@@ -201,3 +201,46 @@ fn the_scheme_selector_previews_restores_on_escape_and_saves_on_enter() {
     let saved = a.take_effects().into_iter().find_map(|e| if let Effect::SaveConfig(t) = e { Some(t) } else { None }).unwrap();
     assert!(saved.contains("color-scheme = \"Dracula\""), "{saved}");
 }
+
+#[test]
+fn new_panes_start_in_the_working_directory_of_the_focused_pane() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let pane = spawns(&a.take_effects())[0].0;
+    a.panes[&pane].terminal.lock().feed(b"\x1b]7;file://pc/D:/work\x07");
+    key(&mut a, Key::Char('D'), CTRL_SHIFT);
+    a.frame(&mut g, false);
+    let s = spawns(&a.take_effects());
+    assert_eq!(s[0].1.cwd.as_deref(), Some(r"D:\work"));
+}
+
+#[test]
+fn wsl_profiles_receive_a_unix_directory_through_their_cd_argument() {
+    let wsl = Profile::new("local:wsl:u", "WSL", "wsl.exe", &["-d", "Ubuntu", "--cd", "~"]);
+    let (args, cwd) = inherit_cwd(&wsl, Some("/srv/app".into()), Some(r"C:\home".into()));
+    assert_eq!(args, ["-d", "Ubuntu", "--cd", "/srv/app"]);
+    assert_eq!(cwd.as_deref(), Some(r"C:\home"));
+    let cmd = Profile::new("local:cmd", "CMD", "cmd.exe", &[]);
+    assert_eq!(inherit_cwd(&cmd, Some("/srv/app".into()), None).1, None);
+    assert_eq!(inherit_cwd(&cmd, None, Some("H".into())).1.as_deref(), Some("H"));
+}
+
+#[test]
+fn hovering_a_link_underlines_it_and_a_plain_click_opens_it() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let pane = spawns(&a.take_effects())[0].0;
+    a.panes[&pane].terminal.lock().feed(b"see https://aster.dev/x ok");
+    a.frame(&mut g, false);
+    let inner = view::pane_inner(a.layout.panes[0].1, 1.0);
+    let (x, y) = (inner.x + 8.0 * 6.5, inner.y + 8.0);
+    a.on_event(Event::MouseMove { x, y });
+    assert_eq!(a.hover_link.as_ref().map(|l| (l.start, l.end)), Some((4, 23)));
+    a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+    a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Open(t) if t == "https://aster.dev/x")));
+    assert_eq!(open_target("C:/src/main.rs:12:5"), "C:/src/main.rs");
+    assert_eq!(open_target("https://a.b:8080"), "https://a.b:8080");
+}
