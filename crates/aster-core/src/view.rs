@@ -153,6 +153,18 @@ impl App {
             if split && focus != Some(*id) {
                 g.dl.rect(*rect, theme.dim);
             }
+            if let Some(prompt) = self.password_prompt(*id).cloned() {
+                let text = if prompt.offer {
+                    Some("Save this password for the next prompt here? Ctrl+Shift+Enter saves it; any other key dismisses")
+                } else if prompt.saved == Some(true) && !prompt.submitted {
+                    Some("A saved password matches this prompt. Ctrl+Shift+Enter types it")
+                } else {
+                    None
+                };
+                if let Some(text) = text {
+                    self.draw_hint(g, *rect, text);
+                }
+            }
             if let Some(typed) = self.offer(*id).map(str::to_owned) {
                 self.draw_offer(g, *rect, &typed);
             }
@@ -491,6 +503,19 @@ impl App {
                 SearchHit::Field => {}
             }
         }
+    }
+
+    fn draw_hint<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, text: &str) {
+        let s = self.scale;
+        let theme = self.theme;
+        let h = (30.0 * s).round();
+        let r = Rect::new(pane.x, pane.bottom() - h, pane.w, h);
+        g.dl.rect(r, theme.overlay);
+        g.dl.rect(Rect::new(r.x, r.y, r.w, (1.0 * s).round().max(1.0)), theme.accent);
+        let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
+        let inner = r.inset((14.0 * s).round(), 0.0);
+        let y = baseline(g, inner, ui);
+        g.text(inner.x, y, text, ui, theme.text, inner.w);
     }
 
     fn draw_offer<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, typed: &str) {

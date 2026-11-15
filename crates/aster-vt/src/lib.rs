@@ -347,6 +347,14 @@ impl Terminal {
         self.bump();
     }
 
+    pub fn prompt_line(&self) -> (String, usize) {
+        let grid = self.term.grid();
+        let point = grid.cursor.point;
+        let row = &grid[point.line];
+        let text: String = (0..point.column.0.min(self.size.cols)).map(|c| row[Column(c)].c).collect();
+        (text, grid.history_size() + point.line.0.max(0) as usize)
+    }
+
     pub fn tail_lines(&self, max: usize) -> Vec<String> {
         let top = self.term.topmost_line().0;
         let bottom = self.term.bottommost_line().0;
