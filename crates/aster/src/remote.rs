@@ -2,7 +2,9 @@ use aster_platform::{Pty, Spawned};
 use aster_ssh::client::{self, Request};
 use aster_core::files::{FileEntry, FileReply, FileRequest};
 use aster_ssh::console::Input;
+use aster_ssh::secrets::Secrets;
 use aster_ssh::sftp;
+use std::sync::Arc;
 use crossbeam_channel::Receiver;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -97,7 +99,35 @@ pub fn file_request(request: FileRequest, downloads: PathBuf) -> sftp::Request {
     }
 }
 
-pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, home: Option<PathBuf>, share: bool) -> Remote {
+pub struct Options {
+    pub share: bool,
+    pub remember: bool,
+    pub secrets: Arc<dyn Secrets>,
+}
+
+pub struct System<P>(std::marker::PhantomData<fn() -> P>);
+
+impl<P> Default for System<P> {
+    fn default() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl<P: aster_platform::Platform> Secrets for System<P> {
+    fn get(&self, key: &str) -> Option<String> {
+        P::secret_get(key)
+    }
+
+    fn set(&self, key: &str, value: &str) -> bool {
+        P::secret_set(key, value)
+    }
+
+    fn delete(&self, key: &str) {
+        P::secret_delete(key)
+    }
+}
+
+pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, home: Option<PathBuf>, options: Options) -> Remote {
     let home = home.unwrap_or_default();
     let req = Request {
         destination: destination.to_owned(),
@@ -108,7 +138,9 @@ pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, 
         home,
         user: local_user(),
         use_agent: true,
-        share,
+        share: options.share,
+        secrets: Some(options.secrets),
+        remember: options.remember,
     };
     let conn = client::start(req);
     let exit = conn.exit;

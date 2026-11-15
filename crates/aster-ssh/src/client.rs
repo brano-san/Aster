@@ -20,7 +20,7 @@ pub const FAILED: u32 = 255;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_JUMPS: usize = 8;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Default)]
 pub struct Request {
     pub destination: String,
     pub cols: u16,
@@ -31,6 +31,8 @@ pub struct Request {
     pub user: String,
     pub use_agent: bool,
     pub share: bool,
+    pub secrets: Option<Arc<dyn crate::secrets::Secrets>>,
+    pub remember: bool,
 }
 
 pub struct Connection {
@@ -449,7 +451,7 @@ async fn authenticate(handle: &mut Handle<Client>, dest: &Destination, req: &Req
                 }
                 continue;
             }
-            let Some(key) = load_key(path, console).await else { continue };
+            let Some(key) = load_key(path, console, req).await else { continue };
             let attempt = handle.authenticate_publickey(user.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), rsa)).await.map_err(|e| e.to_string())?;
             if note(&attempt, &mut methods) {
                 return Ok(());
@@ -490,6 +492,17 @@ async fn authenticate(handle: &mut Handle<Client>, dest: &Destination, req: &Req
     }
 
     if allows(&methods, MethodKind::Password) {
+        let key = crate::secrets::password_key(&user, &dest.host, dest.port);
+        if let Some(stored) = req.secrets.as_ref().and_then(|s| s.get(&key)) {
+            let r = handle.authenticate_password(user.clone(), stored).await.map_err(|e| e.to_string())?;
+            if note(&r, &mut methods) {
+                return Ok(());
+            }
+            if let Some(s) = &req.secrets {
+                s.delete(&key);
+            }
+            console.lock().await.print("The saved password was not accepted.\n");
+        }
         for attempt in 0..3 {
             let mut c = console.lock().await;
             if attempt > 0 {
@@ -497,8 +510,9 @@ async fn authenticate(handle: &mut Handle<Client>, dest: &Destination, req: &Req
             }
             let password = c.ask(&format!("{user}@{}'s password: ", dest.host), false).await.ok_or_else(String::new)?;
             drop(c);
-            let r = handle.authenticate_password(user.clone(), password).await.map_err(|e| e.to_string())?;
+            let r = handle.authenticate_password(user.clone(), password.clone()).await.map_err(|e| e.to_string())?;
             if note(&r, &mut methods) {
+                offer_to_save(req, console, &key, &password, &format!("the password for {user}@{}", dest.host)).await;
                 return Ok(());
             }
         }
@@ -506,7 +520,7 @@ async fn authenticate(handle: &mut Handle<Client>, dest: &Destination, req: &Req
     Err(format!("{user}@{}: permission denied", dest.host))
 }
 
-async fn load_key(path: &std::path::Path, console: &Shared) -> Option<russh::keys::PrivateKey> {
+async fn load_key(path: &std::path::Path, console: &Shared, req: &Request) -> Option<russh::keys::PrivateKey> {
     match russh::keys::load_secret_key(path, None) {
         Ok(k) => return Some(k),
         Err(russh::keys::Error::KeyIsEncrypted) => {}
@@ -515,18 +529,50 @@ async fn load_key(path: &std::path::Path, console: &Shared) -> Option<russh::key
             return None;
         }
     }
-    let mut c = console.lock().await;
+    let saved = crate::secrets::passphrase_key(path);
+    if let Some(stored) = req.secrets.as_ref().and_then(|s| s.get(&saved)) {
+        if let Ok(k) = russh::keys::load_secret_key(path, Some(&stored)) {
+            return Some(k);
+        }
+        if let Some(s) = &req.secrets {
+            s.delete(&saved);
+        }
+    }
     for _ in 0..3 {
+        let mut c = console.lock().await;
         let pass = c.ask(&format!("Enter passphrase for key '{}': ", path.display()), false).await?;
         if pass.is_empty() {
             return None;
         }
         match russh::keys::load_secret_key(path, Some(&pass)) {
-            Ok(k) => return Some(k),
+            Ok(k) => {
+                drop(c);
+                offer_to_save(req, console, &saved, &pass, &format!("the passphrase for {}", path.display())).await;
+                return Some(k);
+            }
             Err(_) => c.print("Bad passphrase, try again.\n"),
         }
     }
     None
+}
+
+async fn offer_to_save(req: &Request, console: &Shared, key: &str, value: &str, what: &str) {
+    let Some(secrets) = req.secrets.as_ref().filter(|_| req.remember) else { return };
+    let mut c = console.lock().await;
+    let prompt = format!("Save {what} in the system credential store (yes/no)? ");
+    loop {
+        match c.ask(&prompt, true).await.map(|a| a.trim().to_ascii_lowercase()) {
+            Some(a) if a == "yes" || a == "y" => {
+                if !secrets.set(key, value) {
+                    c.print("Could not save it.\n");
+                }
+                return;
+            }
+            Some(a) if a == "no" || a == "n" || a.is_empty() => return,
+            Some(_) => continue,
+            None => return,
+        }
+    }
 }
 
 async fn agent_auth(handle: &mut Handle<Client>, user: &str, rsa: Option<HashAlg>) -> Option<AuthResult> {

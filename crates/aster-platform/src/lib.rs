@@ -192,6 +192,9 @@ pub trait Platform: 'static {
     fn process_cwd(pid: u32) -> Option<String>;
     fn beep() -> bool;
     fn downloads_dir() -> Option<PathBuf>;
+    fn secret_get(key: &str) -> Option<String>;
+    fn secret_set(key: &str, value: &str) -> bool;
+    fn secret_delete(key: &str);
 }
 
 #[cfg(test)]

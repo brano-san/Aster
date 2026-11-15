@@ -3,6 +3,7 @@
 mod conpty;
 mod d3d;
 mod process;
+mod secrets;
 mod dwrite;
 mod shells;
 mod window;
@@ -81,6 +82,18 @@ impl Platform for Windows {
             })
         };
         known.flatten().map(PathBuf::from).or_else(|| Self::home_dir().map(|h| h.join("Downloads")))
+    }
+
+    fn secret_get(key: &str) -> Option<String> {
+        secrets::get(key)
+    }
+
+    fn secret_set(key: &str, value: &str) -> bool {
+        secrets::set(key, value)
+    }
+
+    fn secret_delete(key: &str) {
+        secrets::delete(key)
     }
 
     fn beep() -> bool {
