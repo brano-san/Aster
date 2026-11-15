@@ -418,12 +418,72 @@ impl GlRenderer {
             if s.reset_status.is_some_and(|status| status() != glow::NO_ERROR) {
                 return Err(RenderError::DeviceLost);
             }
+            if let Some(path) = capture_path() {
+                let mut pixels = vec![0u8; (w * h * 4) as usize];
+                gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
+                let tmp = path.with_extension("tmp");
+                let _ = std::fs::write(&tmp, png(w, h, &pixels)).and_then(|_| std::fs::rename(&tmp, path));
+            }
         }
         match &self.target {
             Target::Window(surface) => surface.swap_buffers(&s.context).map_err(classify),
             Target::Offscreen(..) => Ok(()),
         }
     }
+}
+
+pub fn capture_path() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = std::env::var_os("ASTER_CAPTURE").map(std::path::PathBuf::from)?;
+        let ms = std::env::var("ASTER_CAPTURE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            std::process::exit(0);
+        });
+        Some(path)
+    })
+    .as_deref()
+}
+
+fn png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::with_capacity((w as usize * 3 + 1) * h as usize);
+    for y in (0..h as usize).rev() {
+        raw.push(0);
+        raw.extend(rgba[y * w as usize * 4..(y + 1) * w as usize * 4].chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
+    }
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(0xFFFF).collect();
+    for (i, b) in blocks.iter().enumerate() {
+        let n = b.len() as u16;
+        z.push(u8::from(i + 1 == blocks.len()));
+        z.extend(n.to_le_bytes());
+        z.extend((!n).to_le_bytes());
+        z.extend_from_slice(b);
+    }
+    let (a, b) = raw.iter().fold((1u32, 0u32), |(a, b), &x| ((a + x as u32) % 65521, (b + a + x as u32) % 65521));
+    z.extend(((b << 16) | a).to_be_bytes());
+    let crc = |data: &[u8]| {
+        let mut c = !0u32;
+        for &byte in data {
+            c ^= byte as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    };
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8], data: &[u8]| {
+        out.extend((data.len() as u32).to_be_bytes());
+        let body = [kind, data].concat();
+        out.extend_from_slice(&body);
+        out.extend(crc(&body).to_be_bytes());
+    };
+    chunk(b"IHDR", &[&w.to_be_bytes()[..], &h.to_be_bytes(), &[8, 2, 0, 0, 0]].concat());
+    chunk(b"IDAT", &z);
+    chunk(b"IEND", &[]);
+    out
 }
 
 fn bytes<T>(data: &[T]) -> &[u8] {

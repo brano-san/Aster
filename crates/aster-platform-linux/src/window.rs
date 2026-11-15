@@ -301,6 +301,30 @@ pub(crate) fn chars_for(key: Key, m: Mods, text: Option<&str>) -> Vec<Event> {
     text.chars().map(|c| if alt_prefix { Event::AltChar(c) } else { Event::Char(c) }).collect()
 }
 
+fn capture_keys(keys: &str) -> Vec<Event> {
+    let mut out = Vec::new();
+    for k in keys.split(';').filter(|k| !k.is_empty()) {
+        if let Some(text) = k.strip_prefix('\'') {
+            out.extend(text.chars().map(Event::Char));
+            continue;
+        }
+        let (mod_names, name) = k.rsplit_once('+').unwrap_or(("", k));
+        let has = |m: &str| mod_names.split('+').any(|x| x.eq_ignore_ascii_case(m));
+        let m = Mods { ctrl: has("ctrl"), shift: has("shift"), alt: has("alt"), meta: false };
+        let (key, text) = match name {
+            "Enter" => (Key::Enter, Some("\r")),
+            "Tab" => (Key::Tab, Some("\t")),
+            "Escape" => (Key::Escape, Some("\u{1b}")),
+            "Up" => (Key::Up, None),
+            "Down" => (Key::Down, None),
+            _ => (Key::Char(name.chars().next().unwrap_or(' ').to_ascii_uppercase()), None),
+        };
+        out.push(Event::Key { key, mods: m, pressed: true });
+        out.extend(chars_for(key, m, text));
+    }
+    out
+}
+
 fn wheel(delta: MouseScrollDelta, scale: f32) -> (f32, f32) {
     match delta {
         MouseScrollDelta::LineDelta(x, y) => (-x, y),
@@ -442,6 +466,11 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
         self.nodes.push(Node { window, last_click: None, pointer: (0.0, 0.0) });
         let node = self.nodes.last().expect("node");
         self.handler.created(&node.window);
+        if crate::gl::capture_path().is_some() {
+            for ev in capture_keys(&std::env::var("ASTER_CAPTURE_KEYS").unwrap_or_default()) {
+                self.handler.event(&node.window, ev);
+            }
+        }
     }
 
     fn close(&mut self, id: WindowId) {
