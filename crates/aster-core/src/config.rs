@@ -53,11 +53,12 @@ pub struct Ssh {
     pub client: SshClient,
     pub share_connections: bool,
     pub remember_passwords: bool,
+    pub forward_agent: bool,
 }
 
 impl Default for Ssh {
     fn default() -> Self {
-        Self { client: SshClient::Native, share_connections: true, remember_passwords: true }
+        Self { client: SshClient::Native, share_connections: true, remember_passwords: true, forward_agent: false }
     }
 }
 

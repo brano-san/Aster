@@ -85,6 +85,30 @@ impl server::Handler for Server {
         Ok(())
     }
 
+    async fn agent_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<bool, Self::Error> {
+        let handle = session.handle();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let reply = match handle.channel_open_agent().await {
+                Ok(agent) => {
+                    let mut stream = agent.into_stream();
+                    let mut buf = [0u8; 4];
+                    match stream.write_all(b"ping").await {
+                        Ok(()) => match stream.read_exact(&mut buf).await {
+                            Ok(_) => String::from_utf8_lossy(&buf).into_owned(),
+                            Err(e) => format!("read failed: {e}"),
+                        },
+                        Err(e) => format!("write failed: {e}"),
+                    }
+                }
+                Err(e) => format!("refused: {e}"),
+            };
+            let _ = handle.data(channel, format!("agent said {reply}
+").into_bytes()).await;
+        });
+        Ok(true)
+    }
+
     async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
         session.data(channel, &b"welcome\r\n"[..])?;
         Ok(())
