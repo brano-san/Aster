@@ -29,6 +29,7 @@ pub enum Request {
     Remove { path: String, dir: bool },
     Rename { from: String, to: String },
     Edit { id: u64, remote: String, dir: PathBuf },
+    Chmod { path: String, mode: u32, recursive: bool },
     Cancel { id: u64 },
 }
 
@@ -164,7 +165,7 @@ impl Files {
             }
             Request::Remove { path, dir } => {
                 if dir {
-                    s.remove_dir(path.clone()).await.map_err(err)?;
+                    crate::sftp_tree::remove(s, &path).await?;
                 } else {
                     s.remove_file(path.clone()).await.map_err(err)?;
                 }
@@ -174,10 +175,32 @@ impl Files {
                 s.rename(from.clone(), to).await.map_err(err)?;
                 Ok(Reply::Changed { dir: parent(&from) })
             }
-            Request::Download { id, remote, dir } => self.download(id, &remote, &dir).await,
+            Request::Chmod { path, mode, recursive } => {
+                crate::sftp_tree::chmod(s, &path, mode, recursive).await?;
+                Ok(Reply::Changed { dir: parent(&path) })
+            }
+            Request::Download { id, remote, dir } => {
+                if s.metadata(remote.clone()).await.map_err(err)?.is_dir() {
+                    let mut progress = self.progress(id);
+                    let local = crate::sftp_tree::download(s, &remote, &dir, &mut progress).await?;
+                    return Ok(Reply::Downloaded { id, local });
+                }
+                self.download(id, &remote, &dir).await
+            }
             Request::Upload { id, local, dir } => self.upload(id, &local, &dir).await,
             Request::Edit { id, remote, dir } => self.edit(id, &remote, &dir).await,
             Request::Cancel { .. } => Err("nothing to cancel".into()),
+        }
+    }
+
+    fn progress(&self, id: u64) -> impl FnMut(u64, u64) + Send {
+        let replies = self.replies.clone();
+        let mut last = Instant::now() - PROGRESS_EVERY;
+        move |done, total| {
+            if last.elapsed() >= PROGRESS_EVERY || done >= total {
+                last = Instant::now();
+                let _ = replies.send(Reply::Progress { id, done, total });
+            }
         }
     }
 
@@ -230,8 +253,13 @@ impl Files {
     async fn upload(&self, id: u64, local: &Path, dir: &str) -> Result<Reply, String> {
         let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or("not a file")?;
         let meta = std::fs::metadata(local).map_err(|e| format!("{}: {e}", local.display()))?;
+        if meta.is_dir() {
+            let mut progress = self.progress(id);
+            let remote = crate::sftp_tree::upload(&self.session, local, dir, &mut progress).await?;
+            return Ok(Reply::Uploaded { id, remote });
+        }
         if !meta.is_file() {
-            return Err(format!("{name} is a folder; folders are not uploaded yet"));
+            return Err(format!("{name} is not a regular file"));
         }
         let remote = join(dir, &name);
         if self.session.try_exists(remote.clone()).await.unwrap_or(false) {

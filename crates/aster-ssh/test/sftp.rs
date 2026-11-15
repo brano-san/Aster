@@ -161,3 +161,31 @@ fn a_file_edited_locally_is_uploaded_after_each_save_until_editing_stops() {
     std::thread::sleep(std::time::Duration::from_millis(400));
     assert_eq!(std::fs::read_to_string(remote.join("conf.ini")).unwrap(), "a=4", "nothing is uploaded after editing stops");
 }
+
+#[test]
+fn folders_download_upload_and_delete_with_their_contents() {
+    let remote = temp_ssh_dir();
+    std::fs::create_dir_all(remote.join("site").join("css")).unwrap();
+    std::fs::write(remote.join("site").join("index.html"), "<h1>hi</h1>").unwrap();
+    std::fs::write(remote.join("site").join("css").join("a.css"), "body{}").unwrap();
+    let (port, _) = serve_files(Some(remote.clone()));
+    let pane = logged_in(port);
+    let downloads = temp_ssh_dir();
+    ask(&pane, Request::Download { id: 1, remote: "/site".into(), dir: downloads.clone() });
+    assert_eq!(answer(&pane), Reply::Downloaded { id: 1, local: downloads.join("site") });
+    assert_eq!(std::fs::read_to_string(downloads.join("site").join("css").join("a.css")).unwrap(), "body{}");
+
+    ask(&pane, Request::Upload { id: 2, local: downloads.join("site"), dir: "/backup".into() });
+    assert!(matches!(answer(&pane), Reply::Failed { id: Some(2), .. }), "the target folder must exist");
+    std::fs::create_dir(remote.join("backup")).unwrap();
+    ask(&pane, Request::Upload { id: 3, local: downloads.join("site"), dir: "/backup".into() });
+    assert_eq!(answer(&pane), Reply::Uploaded { id: 3, remote: "/backup/site".into() });
+    assert_eq!(std::fs::read_to_string(remote.join("backup").join("site").join("index.html")).unwrap(), "<h1>hi</h1>");
+
+    ask(&pane, Request::Remove { path: "/site".into(), dir: true });
+    assert_eq!(answer(&pane), Reply::Changed { dir: "/".into() });
+    assert!(!remote.join("site").exists(), "a non-empty folder is removed with its contents");
+
+    ask(&pane, Request::Chmod { path: "/backup".into(), mode: 0o700, recursive: true });
+    assert_eq!(answer(&pane), Reply::Changed { dir: "/".into() });
+}
