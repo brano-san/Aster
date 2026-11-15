@@ -18,6 +18,7 @@ aster-platform-windows = { path = "crates/aster-platform-windows" }
 aster-platform-linux = { path = "crates/aster-platform-linux" }
 aster-ssh = { path = "crates/aster-ssh" }
 aster-proto = { path = "crates/aster-proto" }
+aster-zmodem = { path = "crates/aster-zmodem" }
 regex = "1"
 
 alacritty_terminal = "0.26"
