@@ -58,6 +58,7 @@ pub struct Terminal {
     pub profile: String,
     pub environment: BTreeMap<String, String>,
     pub search_options: SearchOptions,
+    pub recover_tabs: bool,
 }
 
 impl Default for Terminal {
@@ -80,6 +81,7 @@ impl Default for Terminal {
             profile: String::new(),
             environment: BTreeMap::new(),
             search_options: SearchOptions::default(),
+            recover_tabs: true,
         }
     }
 }
