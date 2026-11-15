@@ -436,6 +436,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let (w, h) = window.size();
         app.set_viewport(w, h, window.scale());
         app.set_ssh(self.ssh.clone());
+        app.set_system_language(&P::ui_language());
         app.set_cwd_probe(Arc::new(P::process_cwd));
         app.set_can_elevate(P::can_elevate());
         let restored = (!self.pending.is_empty()).then(|| self.pending.remove(0)).is_some_and(|state| app.restore(&state));

@@ -95,6 +95,10 @@ impl Platform for Linux {
         Err(PlatformError::new(-1, "The terminal host is only available on Windows"))
     }
 
+    fn ui_language() -> String {
+        ["LC_ALL", "LC_MESSAGES", "LANG"].iter().filter_map(|v| std::env::var(v).ok()).find(|v| !v.trim().is_empty()).unwrap_or_else(|| "en".to_owned())
+    }
+
     fn beep() -> bool {
         false
     }
