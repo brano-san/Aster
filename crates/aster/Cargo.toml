@@ -17,3 +17,6 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 aster-platform-windows.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aster-platform-linux.workspace = true

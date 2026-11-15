@@ -1,0 +1,102 @@
+#![cfg(target_os = "linux")]
+
+mod fonts;
+mod gl;
+mod pty;
+mod shells;
+mod text;
+mod window;
+
+pub use gl::{GlDevice, GlRenderer};
+pub use text::LinuxText;
+pub use window::{LinuxWaker, LinuxWindow, LinuxWindows};
+
+use aster_core::profile::Profile;
+use aster_gfx::atlas::Slot;
+use aster_gfx::render::DrawList;
+use aster_platform::{Platform, PlatformError, RenderError, Renderer, SpawnRequest, Spawned, Window};
+use std::path::PathBuf;
+use std::sync::Arc;
+use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+pub struct Linux;
+
+impl Platform for Linux {
+    type Windows = LinuxWindows;
+    type Renderer = LinuxRenderer;
+    type Text = LinuxText;
+
+    fn text() -> Result<LinuxText, PlatformError> {
+        Ok(LinuxText::new())
+    }
+
+    fn shells() -> Vec<Profile> {
+        shells::detect()
+    }
+
+    fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
+        pty::spawn(req)
+    }
+
+    fn config_dir() -> Option<PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).or_else(|| Self::home_dir().map(|h| h.join(".config")))?;
+        Some(base.join("aster"))
+    }
+
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+
+    fn open(target: &str) {
+        let target = target.to_owned();
+        let _ = std::thread::Builder::new().name("aster-open".into()).spawn(move || {
+            if let Err(e) = std::process::Command::new("xdg-open").arg(&target).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status() {
+                tracing::warn!("xdg-open {target}: {e}");
+            }
+        });
+    }
+}
+
+pub struct LinuxRenderer {
+    gl: GlRenderer,
+    window: Arc<dyn winit::window::Window>,
+}
+
+fn handle_error(e: impl std::fmt::Display) -> PlatformError {
+    PlatformError::new(-1, format!("window handle: {e}"))
+}
+
+impl Renderer for LinuxRenderer {
+    type Window = LinuxWindow;
+    type Device = GlDevice;
+
+    fn device(software: bool) -> Result<GlDevice, PlatformError> {
+        if software {
+            return Err(PlatformError::new(-1, "OpenGL ES has no separate software device, Mesa picks the driver for the display"));
+        }
+        let display = window::display().ok_or_else(|| PlatformError::new(-1, "no display connection"))?;
+        GlDevice::new(display.display_handle().map_err(handle_error)?.as_raw())
+    }
+
+    fn new(device: &GlDevice, window: &LinuxWindow, atlas_size: u32) -> Result<Self, PlatformError> {
+        let raw = window.winit().clone();
+        let gl = GlRenderer::new(device, raw.window_handle().map_err(handle_error)?.as_raw(), window.size(), atlas_size)?;
+        if let Err(e) = gl.set_swap_interval(if window.is_wayland() { 0 } else { 1 }) {
+            tracing::warn!("swap interval: {e:?}");
+        }
+        Ok(Self { gl, window: raw })
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.gl.resize(width, height);
+    }
+
+    fn upload(&mut self, slot: Slot, rgba: &[u8]) {
+        self.gl.upload(slot, rgba);
+    }
+
+    fn render(&mut self, list: &DrawList) -> Result<(), RenderError> {
+        self.window.pre_present_notify();
+        self.gl.render(list)
+    }
+}

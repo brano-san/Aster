@@ -1,0 +1,30 @@
+[package]
+name = "aster-platform-linux"
+description = "Linux platform for Aster: winit window on Wayland and X11, OpenGL ES drawing, HarfRust and Swash text, pseudo terminals"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aster-core.workspace = true
+aster-gfx.workspace = true
+aster-platform.workspace = true
+tracing.workspace = true
+libc = "0.2"
+glutin = { version = "0.32", default-features = false, features = ["egl", "wayland", "x11"] }
+glow = "0.18"
+winit = { version = "=0.31.0-beta.4", default-features = false, features = ["wayland", "wayland-dlopen", "x11"] }
+harfrust = "0.15"
+swash = { version = "0.2.10", default-features = false, features = ["std", "render"] }
+unicode-bidi = { version = "0.3.18", default-features = false, features = ["hardcoded-data", "std"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+aster-vt.workspace = true
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+naga = { version = "30", default-features = false, features = ["wgsl-in", "glsl-out"] }
+
+[[test]]
+name = "render"
+path = "test/render.rs"
