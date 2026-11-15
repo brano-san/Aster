@@ -89,6 +89,7 @@ impl Receiver {
         self.file = false;
         self.accepting = false;
         self.pending = None;
+        self.decoder = Decoder::new();
         hex_header(Header::new(ZSKIP, [0; 4]))
     }
 
