@@ -8,6 +8,7 @@ use crate::profile::Profile;
 use crate::theme::Theme;
 use crate::view::{self, Chrome};
 use aster_gfx::render::Rect;
+use aster_vt::schemes::{self, Scheme};
 use aster_vt::{CursorShape, FairMutex, Options, Palette, Scroll, SelectionType, Sink, Size, TermMode, Terminal, VtEvent};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -36,6 +37,7 @@ pub enum Effect {
     Kill { pane: PaneId },
     SetClipboard(String),
     RequestPaste,
+    SaveConfig(String),
     Title(String),
     Cursor(CursorIcon),
     Minimize,
@@ -88,6 +90,9 @@ pub(crate) struct Metrics {
 pub struct App {
     pub(crate) config: Config,
     pub(crate) profiles: Vec<Profile>,
+    detected: Vec<Profile>,
+    schemes: Vec<Scheme>,
+    scheme_before: Option<String>,
     keymap: Keymap,
     pub(crate) palette: Palette,
     pub(crate) theme: Theme,
@@ -125,13 +130,17 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, mut profiles: Vec<Profile>, system_dark: bool, home: Option<String>, wake: Wake) -> App {
+    pub fn new(config: Config, detected: Vec<Profile>, system_dark: bool, home: Option<String>, wake: Wake) -> App {
+        let mut profiles = detected.clone();
         profiles.extend(config.profiles.iter().cloned());
         let (sender, events) = channel();
         let keymap = Keymap::new(&config.hotkeys);
         let mut app = App {
             config,
             profiles,
+            detected,
+            schemes: schemes::builtin(),
+            scheme_before: None,
             keymap,
             palette: Palette::default(),
             theme: Theme::from_palette(&Palette::default()),
@@ -185,17 +194,76 @@ impl App {
             SchemeMode::Light => false,
             SchemeMode::Auto => self.system_dark,
         };
-        let name = if dark { &self.config.appearance.color_scheme } else { &self.config.appearance.light_color_scheme };
-        let mut palette = match name.as_str() {
-            "Tabby Default Light" => Palette::TABBY_LIGHT,
-            "Tabby Default" => Palette::TABBY_DARK,
-            _ if dark => Palette::TABBY_DARK,
-            _ => Palette::TABBY_LIGHT,
-        };
+        let name = if dark { self.config.appearance.color_scheme.clone() } else { self.config.appearance.light_color_scheme.clone() };
+        let fallback = if dark { Palette::TABBY_DARK } else { Palette::TABBY_LIGHT };
+        let mut palette = self.scheme(&name).unwrap_or(fallback);
         palette.bold_is_bright = self.config.terminal.draw_bold_text_in_bright_colors;
         self.palette = palette;
         self.theme = Theme::from_palette(&palette);
         self.dirty = true;
+    }
+
+    fn custom_schemes(&self) -> Vec<Scheme> {
+        self.config
+            .color_schemes
+            .iter()
+            .filter_map(|c| {
+                let colors: Vec<_> = c.colors.iter().filter_map(|s| schemes::parse_hex(s)).collect();
+                let cursor = c.cursor.as_deref().and_then(schemes::parse_hex);
+                let palette = schemes::from_colors(schemes::parse_hex(&c.foreground)?, schemes::parse_hex(&c.background)?, cursor, &colors)?;
+                Some(Scheme { name: c.name.clone(), palette })
+            })
+            .collect()
+    }
+
+    pub fn scheme_names(&self) -> Vec<String> {
+        self.custom_schemes().into_iter().chain(self.schemes.iter().cloned()).map(|s| s.name).collect()
+    }
+
+    fn scheme(&self, name: &str) -> Option<Palette> {
+        self.custom_schemes().into_iter().chain(self.schemes.iter().cloned()).find(|s| s.name.eq_ignore_ascii_case(name)).map(|s| s.palette)
+    }
+
+    fn scheme_is_dark(&self) -> bool {
+        match self.config.appearance.color_scheme_mode {
+            SchemeMode::Dark => true,
+            SchemeMode::Light => false,
+            SchemeMode::Auto => self.system_dark,
+        }
+    }
+
+    fn current_scheme(&self) -> String {
+        if self.scheme_is_dark() {
+            self.config.appearance.color_scheme.clone()
+        } else {
+            self.config.appearance.light_color_scheme.clone()
+        }
+    }
+
+    fn set_scheme_name(&mut self, name: String) {
+        if self.scheme_is_dark() {
+            self.config.appearance.color_scheme = name;
+        } else {
+            self.config.appearance.light_color_scheme = name;
+        }
+        self.restyle();
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn set_config(&mut self, config: Config) {
+        let mut profiles = self.detected.clone();
+        profiles.extend(config.profiles.iter().cloned());
+        self.profiles = profiles;
+        self.keymap = Keymap::new(&config.hotkeys);
+        self.config = config;
+        let options = self.options();
+        for p in self.panes.values() {
+            p.terminal.lock().set_options(options);
+        }
+        self.restyle();
     }
 
     pub fn set_viewport(&mut self, width: u32, height: u32, scale: f32) {
@@ -470,6 +538,7 @@ impl App {
         match action {
             CommandSelector => self.open_overlay(OverlayKind::Commands),
             ProfileSelector => self.open_overlay(OverlayKind::Profiles),
+            SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             ToggleFullscreen => self.effects.push(Effect::ToggleFullscreen),
             NewTab => self.open_default_tab(),
             NewWindow => self.effects.push(Effect::NewWindow),
@@ -560,8 +629,17 @@ impl App {
                 .map(|a| Pick { label: a.label(), hint: self.keymap.bindings_of(a).next().map(crate::keymap::format_binding).unwrap_or_default(), value: a.id() })
                 .collect(),
             OverlayKind::Profiles => self.profiles.iter().map(|p| Pick { label: p.name.clone(), hint: String::new(), value: p.id.clone() }).collect(),
+            OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), hint: String::new(), value: n }).collect(),
         };
-        self.overlay = Some(Overlay::new(kind, items));
+        let mut overlay = Overlay::new(kind, items);
+        if kind == OverlayKind::Schemes {
+            let current = self.current_scheme();
+            if let Some(at) = overlay.shown.iter().position(|(i, _)| overlay.items[*i].value.eq_ignore_ascii_case(&current)) {
+                overlay.select(at);
+            }
+            self.scheme_before = Some(current);
+        }
+        self.overlay = Some(overlay);
         self.dirty = true;
     }
 
@@ -579,14 +657,36 @@ impl App {
                     self.open_tab(p);
                 }
             }
+            OverlayKind::Schemes => {
+                self.scheme_before = None;
+                self.set_scheme_name(value);
+                self.effects.push(Effect::SaveConfig(self.config.to_text()));
+            }
         }
+    }
+
+    fn preview_scheme(&mut self) {
+        let Some(o) = self.overlay.as_ref().filter(|o| o.kind == OverlayKind::Schemes) else { return };
+        if let Some(v) = o.selected_value() {
+            if !v.eq_ignore_ascii_case(&self.current_scheme()) {
+                self.set_scheme_name(v);
+            }
+        }
+    }
+
+    fn close_overlay(&mut self) {
+        self.overlay = None;
+        if let Some(name) = self.scheme_before.take() {
+            self.set_scheme_name(name);
+        }
+        self.dirty = true;
     }
 
     fn overlay_key(&mut self, key: Key, mods: Mods) {
         let Some(o) = self.overlay.as_mut() else { return };
         self.dirty = true;
         match key {
-            Key::Escape => self.overlay = None,
+            Key::Escape => return self.close_overlay(),
             Key::Up => o.step(-1),
             Key::Down => o.step(1),
             Key::PageUp => o.step(-8),
@@ -601,6 +701,7 @@ impl App {
             Key::Char('V') if mods.ctrl => self.effects.push(Effect::RequestPaste),
             _ => {}
         }
+        self.preview_scheme();
     }
 
     fn reset_blink(&mut self) {
@@ -711,6 +812,7 @@ impl App {
                 o.insert(&c.to_string());
                 self.dirty = true;
             }
+            self.preview_scheme();
             return;
         }
         let bytes = if alt {
@@ -863,7 +965,7 @@ impl App {
                     }
                 }
                 Some(None) => {}
-                None => self.overlay = None,
+                None => self.close_overlay(),
             }
             return;
         }

@@ -7,7 +7,7 @@ use aster_core::config::{Config, SchemeMode};
 use aster_platform::{Placement, Platform, WindowOptions, WindowSystem};
 use std::path::PathBuf;
 
-fn config_path<P: Platform>() -> Option<PathBuf> {
+pub fn config_path<P: Platform>() -> Option<PathBuf> {
     P::config_dir().map(|d| d.join("config.toml"))
 }
 

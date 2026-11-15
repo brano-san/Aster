@@ -1,4 +1,5 @@
 mod palette;
+pub mod schemes;
 
 pub use alacritty_terminal::grid::Scroll;
 pub use alacritty_terminal::index::{Column, Line, Point, Side};

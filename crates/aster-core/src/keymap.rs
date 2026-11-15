@@ -46,6 +46,7 @@ pub enum Action {
     ScrollPageDown,
     ScrollUp,
     ScrollDown,
+    SelectColorScheme,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -90,6 +91,7 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::ScrollPageDown, "scroll-page-down", "Scroll one page down"),
     (Action::ScrollUp, "scroll-up", "Scroll up"),
     (Action::ScrollDown, "scroll-down", "Scroll down"),
+    (Action::SelectColorScheme, "select-color-scheme", "Select color scheme"),
 ];
 
 impl Action {

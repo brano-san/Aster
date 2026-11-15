@@ -9,6 +9,7 @@ use aster_platform::{Platform, RenderError, Renderer, SpawnRequest, Waker, Windo
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use std::sync::Arc;
 
 const ATLAS: u32 = 2048;
@@ -31,13 +32,55 @@ pub struct Handler<P: Platform> {
     sessions: HashMap<(WindowId, PaneId), Session>,
     exits: Receiver<Exit>,
     exit_tx: Sender<Exit>,
+    config_stamp: Option<SystemTime>,
+}
+
+fn stamp(path: &Option<PathBuf>) -> Option<SystemTime> {
+    path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
 }
 
 impl<P: Platform> Handler<P> {
     pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker) -> Self {
         let profiles = P::shells();
         let (exit_tx, exits) = unbounded();
-        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, exit_tx }
+        let config_stamp = stamp(&crate::config_path::<P>());
+        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, exit_tx, config_stamp }
+    }
+
+    fn save_config(&mut self, text: String) {
+        let path = crate::config_path::<P>();
+        if let Some(p) = &path {
+            if let Err(e) = std::fs::write(p, &text) {
+                tracing::error!("{}: {e}", p.display());
+            }
+        }
+        self.config_stamp = stamp(&path);
+        if let Ok(config) = Config::parse(&text) {
+            self.apply_config(config);
+        }
+    }
+
+    fn apply_config(&mut self, config: Config) {
+        for s in self.windows.values_mut() {
+            if s.app.config() != &config {
+                s.app.set_config(config.clone());
+            }
+        }
+        self.config = config;
+    }
+
+    fn reload_config(&mut self) {
+        let path = crate::config_path::<P>();
+        let now = stamp(&path);
+        if now == self.config_stamp {
+            return;
+        }
+        self.config_stamp = now;
+        let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else { return };
+        match Config::parse(&text) {
+            Ok(config) => self.apply_config(config),
+            Err(e) => tracing::error!("config: {e}"),
+        }
     }
 
     fn device(&mut self) -> Option<&Device<P>> {
@@ -117,6 +160,7 @@ impl<P: Platform> Handler<P> {
                     s.app.paste(text);
                 }
             }
+            Effect::SaveConfig(text) => self.save_config(text),
             Effect::Title(t) => window.set_title(&t),
             Effect::Cursor(c) => window.set_cursor(c),
             Effect::Minimize => window.minimize(),
@@ -162,6 +206,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     }
 
     fn event(&mut self, window: &Win<P>, event: Event) {
+        if matches!(event, Event::Focus(true)) {
+            self.reload_config();
+        }
         if matches!(event, Event::CloseRequested) && !window.is_fullscreen() {
             if let Some(path) = crate::state_path::<P>() {
                 let _ = std::fs::write(path, crate::format_placement(&window.placement()));

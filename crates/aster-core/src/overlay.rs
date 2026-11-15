@@ -5,6 +5,7 @@ use std::ops::Range;
 pub enum OverlayKind {
     Commands,
     Profiles,
+    Schemes,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +38,7 @@ impl Overlay {
         match self.kind {
             OverlayKind::Commands => "Type a command",
             OverlayKind::Profiles => "Select a profile",
+            OverlayKind::Schemes => "Select a color scheme",
         }
     }
 
@@ -77,6 +79,13 @@ impl Overlay {
             self.scroll = self.selected;
         } else if self.selected >= self.scroll + VISIBLE {
             self.scroll = self.selected + 1 - VISIBLE;
+        }
+    }
+
+    pub fn select(&mut self, index: usize) {
+        if index < self.shown.len() {
+            self.selected = index;
+            self.scroll = index.saturating_sub(VISIBLE / 2).min(self.shown.len().saturating_sub(VISIBLE));
         }
     }
 

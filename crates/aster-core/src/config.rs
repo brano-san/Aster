@@ -98,13 +98,24 @@ impl Default for Appearance {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
+pub struct CustomScheme {
+    pub name: String,
+    pub foreground: String,
+    pub background: String,
+    pub cursor: Option<String>,
+    pub colors: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct Config {
     pub terminal: Terminal,
     pub appearance: Appearance,
     pub hotkeys: BTreeMap<String, Vec<String>>,
     pub profiles: Vec<Profile>,
+    pub color_schemes: Vec<CustomScheme>,
 }
 
 impl Config {
