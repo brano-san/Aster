@@ -206,3 +206,16 @@ fn skipping_during_a_continuing_data_frame_allows_the_next_file() {
     assert!(events.contains(&TxEvent::Skipped(1)));
     assert!(events.contains(&TxEvent::FileDone(2)));
 }
+
+#[test]
+fn bytes_after_the_final_reply_are_kept_for_the_caller() {
+    let mut tx = Sender::new(Vec::new());
+    assert!(tx.feed(&hex_header(Header::new(ZRINIT, [0, 0, 0, CANFC32]))).is_empty());
+    assert_eq!(tx.poll(), Some(hex_header(Header::new(ZFIN, [0; 4]))));
+    assert!(tx.rest().is_empty());
+    let mut bytes = hex_header(Header::new(ZFIN, [0; 4]));
+    bytes.extend(b"\r\nuser@host:~$ ");
+    assert_eq!(tx.feed(&bytes), vec![TxEvent::Done]);
+    assert_eq!(tx.rest(), b"\r\x8a\r\nuser@host:~$ ");
+    assert_eq!(tx.poll(), Some(b"OO".to_vec()));
+}

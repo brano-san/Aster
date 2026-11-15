@@ -167,3 +167,16 @@ fn rubout_escapes_are_accepted() {
     bytes.extend(&packet[2..]);
     assert_eq!(Decoder::new().feed(&bytes), vec![Item::Header(h), Item::Subpacket { data: vec![0x7f, 0xff], end: ZCRCE }]);
 }
+
+#[test]
+fn counted_items_report_how_far_the_input_was_read() {
+    let fin = hex_header(Header::new(ZFIN, [0; 4]));
+    let mut bytes = b"$ ".to_vec();
+    bytes.extend(&fin);
+    bytes.extend(b"OO");
+    bytes.extend([CAN; 5]);
+    bytes.extend(b"tail");
+    let header_end = 2 + fin.len() - 2;
+    let cancel_end = 2 + fin.len() + 2 + 5;
+    assert_eq!(Decoder::new().feed_counted(&bytes), vec![(header_end, Item::Header(Header::new(ZFIN, [0; 4]))), (cancel_end, Item::Cancel)]);
+}

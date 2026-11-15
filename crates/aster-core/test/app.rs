@@ -317,7 +317,7 @@ fn a_waiting_transfer_takes_typed_paths_drops_and_escape_instead_of_the_shell() 
     a.open_default_tab();
     a.frame(&mut g, false);
     let pane = spawns(&a.take_effects())[0].0;
-    a.transfer_offered(pane, true);
+    a.transfer_offered(pane, PaneTransfer::AwaitingFiles);
     for c in r"C:\\notes.txt".chars() {
         a.on_event(Event::Char(c));
     }
@@ -334,4 +334,108 @@ fn a_waiting_transfer_takes_typed_paths_drops_and_escape_instead_of_the_shell() 
     assert_eq!(a.offer(pane), None);
     a.on_event(Event::Char('x'));
     assert_eq!(writes(&a.take_effects()), [b"x".to_vec()], "typing goes to the shell again");
+}
+
+const CTRL: Mods = Mods { ctrl: true, shift: false, alt: false, meta: false };
+
+fn transfer_pane() -> (App, Gfx<Mono>, PaneId) {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let pane = spawns(&a.take_effects())[0].0;
+    (a, g, pane)
+}
+
+#[test]
+fn incoming_files_wait_for_enter_before_they_are_received() {
+    let (mut a, mut g, pane) = transfer_pane();
+    a.transfer_offered(pane, PaneTransfer::Incoming);
+    assert_eq!(a.transfer(pane), PaneTransfer::Incoming);
+    assert_eq!(a.offer(pane), None, "no path field while files come in");
+    a.frame(&mut g, false);
+    a.on_event(Event::Char('y'));
+    key(&mut a, Key::Enter, Mods::NONE);
+    a.on_event(Event::Char('\r'));
+    let e = a.take_effects();
+    assert!(writes(&e).is_empty(), "nothing reaches the remote side");
+    assert!(e.iter().any(|e| matches!(e, Effect::AcceptTransfer { pane: p } if *p == pane)));
+    assert_eq!(a.transfer(pane), PaneTransfer::Running);
+}
+
+#[test]
+fn escape_refuses_incoming_files() {
+    let (mut a, _, pane) = transfer_pane();
+    a.transfer_offered(pane, PaneTransfer::Incoming);
+    key(&mut a, Key::Escape, Mods::NONE);
+    let e = a.take_effects();
+    assert!(e.iter().any(|e| matches!(e, Effect::CancelTransfer { pane: p } if *p == pane)));
+    assert!(!e.iter().any(|e| matches!(e, Effect::AcceptTransfer { .. })));
+    assert_eq!(a.transfer(pane), PaneTransfer::None);
+    a.on_event(Event::Char('x'));
+    assert_eq!(writes(&a.take_effects()), [b"x".to_vec()]);
+}
+
+#[test]
+fn escape_cancels_a_running_transfer() {
+    let (mut a, mut g, pane) = transfer_pane();
+    a.transfer_offered(pane, PaneTransfer::Running);
+    a.frame(&mut g, false);
+    key(&mut a, Key::Escape, Mods::NONE);
+    a.on_event(Event::Char('\u{1b}'));
+    let e = a.take_effects();
+    assert!(writes(&e).is_empty());
+    assert!(e.iter().any(|e| matches!(e, Effect::CancelTransfer { pane: p } if *p == pane)));
+    assert_eq!(a.transfer(pane), PaneTransfer::None);
+}
+
+#[test]
+fn ctrl_c_cancels_a_running_transfer_without_reaching_the_remote_side() {
+    let (mut a, _, pane) = transfer_pane();
+    a.transfer_offered(pane, PaneTransfer::Running);
+    key(&mut a, Key::Char('C'), CTRL);
+    a.on_event(Event::Char('\u{3}'));
+    let e = a.take_effects();
+    assert!(writes(&e).is_empty(), "{:?}", writes(&e));
+    assert!(e.iter().any(|e| matches!(e, Effect::CancelTransfer { pane: p } if *p == pane)));
+}
+
+#[test]
+fn other_keys_typing_pastes_and_drops_are_swallowed_while_a_transfer_runs() {
+    let (mut a, _, pane) = transfer_pane();
+    a.transfer_offered(pane, PaneTransfer::Running);
+    for k in [Key::Enter, Key::Backspace, Key::Tab, Key::Up] {
+        key(&mut a, k, Mods::NONE);
+    }
+    for c in "ls\r\t".chars() {
+        a.on_event(Event::Char(c));
+    }
+    a.on_event(Event::Pasted("echo hi".into()));
+    a.on_event(Event::DroppedFiles(vec!["/tmp/a".into()]));
+    let e = a.take_effects();
+    assert!(writes(&e).is_empty(), "{:?}", writes(&e));
+    assert!(!e.iter().any(|e| matches!(e, Effect::CancelTransfer { .. } | Effect::SendFiles { .. } | Effect::AcceptTransfer { .. })));
+    assert_eq!(a.transfer(pane), PaneTransfer::Running);
+}
+
+#[test]
+fn the_end_of_a_transfer_removes_the_strip_and_returns_the_keyboard() {
+    let (mut a, mut g, pane) = transfer_pane();
+    a.transfer_offered(pane, PaneTransfer::Running);
+    a.transfer_offered(pane, PaneTransfer::None);
+    assert_eq!(a.transfer(pane), PaneTransfer::None);
+    a.frame(&mut g, false);
+    a.on_event(Event::Char('x'));
+    assert_eq!(writes(&a.take_effects()), [b"x".to_vec()]);
+}
+
+#[test]
+fn awaiting_files_keeps_the_typed_path_when_the_same_state_repeats() {
+    let (mut a, mut g, pane) = transfer_pane();
+    a.transfer_offered(pane, PaneTransfer::AwaitingFiles);
+    a.on_event(Event::Char('a'));
+    a.transfer_offered(pane, PaneTransfer::AwaitingFiles);
+    assert_eq!(a.offer(pane), Some("a"));
+    a.frame(&mut g, false);
+    a.transfer_offered(pane, PaneTransfer::Running);
+    assert_eq!(a.offer(pane), None);
 }

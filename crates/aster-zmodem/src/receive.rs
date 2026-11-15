@@ -17,6 +17,7 @@ pub struct Receiver {
     file: bool,
     accepting: bool,
     finished: bool,
+    rest: Vec<u8>,
 }
 
 fn ready() -> Vec<u8> { hex_header(Header::new(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32])) }
@@ -24,13 +25,13 @@ fn reply(kind: u8, position: u32) -> RxEvent { RxEvent::Send(hex_header(Header::
 
 impl Receiver {
     pub fn new() -> Self {
-        Self { decoder: Decoder::new(), pending: None, position: 0, file: false, accepting: false, finished: false }
+        Self { decoder: Decoder::new(), pending: None, position: 0, file: false, accepting: false, finished: false, rest: Vec::new() }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<RxEvent> {
         if self.finished { return Vec::new(); }
         let mut out = Vec::new();
-        for item in self.decoder.feed(bytes) {
+        for (consumed, item) in self.decoder.feed_counted(bytes) {
             match item {
                 Item::Cancel => { self.finished = true; out.push(RxEvent::Aborted); }
                 Item::BadCrc if self.file => { self.accepting = false; out.push(reply(ZRPOS, self.position)); }
@@ -79,10 +80,12 @@ impl Receiver {
                 }
                 _ => {}
             }
-            if self.finished { break; }
+            if self.finished { self.rest = bytes[consumed..].to_vec(); break; }
         }
         out
     }
+
+    pub fn rest(&mut self) -> Vec<u8> { std::mem::take(&mut self.rest) }
 
     pub fn skip(&mut self) -> Vec<u8> {
         if self.finished || !self.file { return Vec::new(); }

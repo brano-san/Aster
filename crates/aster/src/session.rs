@@ -131,6 +131,11 @@ impl Session {
         self.ctx.deliver(out);
     }
 
+    pub fn accept_transfer(&self) {
+        let out = self.ctx.transfer.lock().map(|mut t| t.accept()).unwrap_or_default();
+        self.ctx.deliver(out);
+    }
+
     pub fn cancel_transfer(&self) {
         let out = self.ctx.transfer.lock().map(|mut t| t.cancel()).unwrap_or_default();
         self.ctx.deliver(out);

@@ -35,6 +35,15 @@ pub struct Launch {
     pub rows: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PaneTransfer {
+    #[default]
+    None,
+    AwaitingFiles,
+    Incoming,
+    Running,
+}
+
 pub enum Effect {
     Spawn { pane: PaneId, launch: Launch, terminal: Shared },
     Write { pane: PaneId, bytes: Vec<u8> },
@@ -58,6 +67,7 @@ pub enum Effect {
     Files { pane: PaneId, request: crate::files::FileRequest },
     SendFiles { pane: PaneId, files: Vec<std::path::PathBuf> },
     CancelTransfer { pane: PaneId },
+    AcceptTransfer { pane: PaneId },
     CheckSecret { pane: PaneId, key: String },
     FillSecret { pane: PaneId, key: String },
     SaveSecret { key: String, value: String },
@@ -143,7 +153,7 @@ pub struct App {
     pub(crate) transfers: Vec<crate::files::Transfer>,
     pub(crate) transfer_seq: u64,
     pub(crate) last_dirs: HashMap<PaneId, String>,
-    pub(crate) offers: HashMap<PaneId, String>,
+    pub(crate) offers: HashMap<PaneId, (PaneTransfer, String)>,
     pub(crate) prompts: HashMap<PaneId, crate::sudo::Prompt>,
     pub(crate) bell: Option<(PaneId, Instant)>,
     last_bell: Option<Instant>,
@@ -245,24 +255,56 @@ impl App {
         }
     }
 
-    pub fn transfer_offered(&mut self, pane: PaneId, offered: bool) {
-        if offered {
-            self.offers.insert(pane, String::new());
-        } else {
+    pub fn transfer_offered(&mut self, pane: PaneId, state: PaneTransfer) {
+        if state == PaneTransfer::None {
             self.offers.remove(&pane);
+        } else if self.transfer(pane) != state {
+            self.offers.insert(pane, (state, String::new()));
         }
         self.dirty = true;
     }
 
+    pub fn transfer(&self, pane: PaneId) -> PaneTransfer {
+        self.offers.get(&pane).map_or(PaneTransfer::None, |o| o.0)
+    }
+
     pub fn offer(&self, pane: PaneId) -> Option<&str> {
-        self.offers.get(&pane).map(String::as_str)
+        self.offers.get(&pane).filter(|o| o.0 == PaneTransfer::AwaitingFiles).map(|o| o.1.as_str())
     }
 
     fn offered_pane(&self) -> Option<PaneId> {
         self.focused_pane().filter(|p| self.offers.contains_key(p))
     }
 
+    fn awaiting_pane(&self) -> Option<PaneId> {
+        self.offered_pane().filter(|p| self.transfer(*p) == PaneTransfer::AwaitingFiles)
+    }
+
     fn offer_key(&mut self, pane: PaneId, key: Key, mods: Mods) {
+        let interrupt = key == Key::Escape || (matches!(key, Key::Char('C' | 'c')) && mods.ctrl && !mods.shift && !mods.alt);
+        match self.transfer(pane) {
+            PaneTransfer::Incoming => {
+                if interrupt {
+                    self.offers.remove(&pane);
+                    self.effects.push(Effect::CancelTransfer { pane });
+                    self.dirty = true;
+                } else if key == Key::Enter {
+                    self.offers.insert(pane, (PaneTransfer::Running, String::new()));
+                    self.effects.push(Effect::AcceptTransfer { pane });
+                    self.dirty = true;
+                }
+                return;
+            }
+            PaneTransfer::Running => {
+                if interrupt {
+                    self.offers.remove(&pane);
+                    self.effects.push(Effect::CancelTransfer { pane });
+                    self.dirty = true;
+                }
+                return;
+            }
+            PaneTransfer::AwaitingFiles | PaneTransfer::None => {}
+        }
         self.dirty = true;
         match key {
             Key::Escape => {
@@ -270,16 +312,16 @@ impl App {
                 self.effects.push(Effect::CancelTransfer { pane });
             }
             Key::Enter => {
-                let path = self.offers.get(&pane).map(|p| p.trim().trim_matches('"').to_owned()).unwrap_or_default();
+                let path = self.offers.get(&pane).map(|p| p.1.trim().trim_matches('"').to_owned()).unwrap_or_default();
                 if !path.is_empty() {
                     self.effects.push(Effect::SendFiles { pane, files: vec![std::path::PathBuf::from(path)] });
                     if let Some(p) = self.offers.get_mut(&pane) {
-                        p.clear();
+                        p.1.clear();
                     }
                 }
             }
             Key::Backspace => {
-                if let Some(p) = self.offers.get_mut(&pane) {
+                if let Some((_, p)) = self.offers.get_mut(&pane) {
                     if mods.ctrl {
                         p.clear();
                     } else {
@@ -656,7 +698,7 @@ impl App {
             return self.settings_text(&text.replace(['\r', '\n'], " "));
         }
         if let Some(pane) = self.offered_pane() {
-            if let Some(p) = self.offers.get_mut(&pane) {
+            if let Some((PaneTransfer::AwaitingFiles, p)) = self.offers.get_mut(&pane) {
                 p.push_str(text.lines().next().unwrap_or_default());
             }
             self.dirty = true;
@@ -1032,8 +1074,10 @@ impl App {
                 self.dirty = true;
             }
             Event::DroppedFiles(paths) => {
-                if let Some(pane) = self.offered_pane() {
-                    self.effects.push(Effect::SendFiles { pane, files: paths.into_iter().map(std::path::PathBuf::from).collect() });
+                if self.offered_pane().is_some() {
+                    if let Some(pane) = self.awaiting_pane() {
+                        self.effects.push(Effect::SendFiles { pane, files: paths.into_iter().map(std::path::PathBuf::from).collect() });
+                    }
                 } else if self.files.is_some() {
                     self.files_dropped(paths);
                 } else if let Some(profile) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.profile.clone()) {
@@ -1143,7 +1187,7 @@ impl App {
         }
         if let Some(pane) = self.offered_pane() {
             if !c.is_control() {
-                if let Some(p) = self.offers.get_mut(&pane) {
+                if let Some((PaneTransfer::AwaitingFiles, p)) = self.offers.get_mut(&pane) {
                     p.push(c);
                 }
                 self.dirty = true;
