@@ -1,6 +1,6 @@
 # Архитектура Aster
 
-Aster — терминал на Rust с нативным GPU-рендерингом. Возможности перечислены в [docs/FEATURES.md](docs/FEATURES.md), порядок работ — в [docs/PLAN.md](docs/PLAN.md).
+Aster — терминал на Rust с нативным GPU-рендерингом. Заметки к выпускам — в [docs/releases](docs/releases).
 
 ## Принципы
 

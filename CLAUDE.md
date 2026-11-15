@@ -2,9 +2,11 @@
 
 Native GPU-accelerated terminal in Rust. Rendering: D3D11 + DirectComposition + DirectWrite on Windows, OpenGL ES 3 + EGL + HarfRust + Swash on Linux.
 
-## Docs (`docs/`, RU) — read before coding
+## Docs (RU) — read before coding
 
-Always: `docs/PLAN.md` (stages, tasks, decisions, status), `ARCHITECTURE.md` (crates, threads, input → PTY → frame path, capture-based visual checks). As needed: `docs/FEATURES.md` (full feature checklist with config keys). Tick features in `FEATURES.md` in the same commit that ships them.
+- `doc/` — private working docs, git-ignored, never pushed: `doc/PLAN.md` (stages, tasks, decisions, status), `doc/FEATURES.md` (feature checklist with config keys), `doc/tasks/` (task briefs for helper agents). Tick features in `doc/FEATURES.md` when they ship. Agent work products stay in `doc/`.
+- `docs/` — public docs that go to the repository: `docs/releases/X.Y.Z.md` (release notes, read by CI). Add something here only when it is meant for users.
+- `ARCHITECTURE.md` (crates, threads, input → PTY → frame path, capture-based visual checks) — always read.
 
 The project is self-contained: docs, code, UI strings, tests and commit messages never mention other applications or terminals. Third-party code enters only as crates.io dependencies or bundled fonts with their licenses.
 
