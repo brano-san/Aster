@@ -85,6 +85,24 @@ impl server::Handler for Server {
         Ok(())
     }
 
+    async fn tcpip_forward(&mut self, address: &str, port: &mut u32, session: &mut Session) -> Result<bool, Self::Error> {
+        let Ok(listener) = tokio::net::TcpListener::bind((address.to_owned(), *port as u16)).await else { return Ok(false) };
+        *port = listener.local_addr().map(|a| a.port() as u32).unwrap_or(*port);
+        let (handle, address, bound) = (session.handle(), address.to_owned(), *port);
+        tokio::spawn(async move {
+            while let Ok((mut socket, peer)) = listener.accept().await {
+                let (handle, address) = (handle.clone(), address.clone());
+                tokio::spawn(async move {
+                    if let Ok(ch) = handle.channel_open_forwarded_tcpip(address, bound, peer.ip().to_string(), peer.port() as u32).await {
+                        let mut stream = ch.into_stream();
+                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut socket).await;
+                    }
+                });
+            }
+        });
+        Ok(true)
+    }
+
     async fn agent_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<bool, Self::Error> {
         let handle = session.handle();
         tokio::spawn(async move {
