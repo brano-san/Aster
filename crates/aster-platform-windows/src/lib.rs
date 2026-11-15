@@ -71,6 +71,18 @@ impl Platform for Windows {
         process::current_directory(pid)
     }
 
+    fn downloads_dir() -> Option<PathBuf> {
+        use windows::Win32::UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+        let known = unsafe {
+            SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None).ok().map(|p| {
+                let path = p.to_string().ok();
+                windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as _));
+                path
+            })
+        };
+        known.flatten().map(PathBuf::from).or_else(|| Self::home_dir().map(|h| h.join("Downloads")))
+    }
+
     fn beep() -> bool {
         unsafe { windows::Win32::System::Diagnostics::Debug::MessageBeep(windows::Win32::UI::WindowsAndMessaging::MB_OK) }.is_ok()
     }

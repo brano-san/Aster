@@ -162,6 +162,7 @@ impl App {
         }
         self.draw_search(g);
         self.draw_settings(g);
+        self.draw_files(g);
         if let Some(o) = self.overlay.clone() {
             self.draw_overlay(g, &o);
         }
@@ -563,6 +564,145 @@ impl App {
                 g.text(r.right() - pad - hint_w, hy, &hint, small, theme.text_dim, hint_w + 1.0);
             }
         }
+    }
+
+    fn draw_files<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        use crate::files::{date, human_size, Prompt, TransferState};
+        if self.files.as_ref().is_some_and(|f| !self.panes.contains_key(&f.pane)) {
+            self.files = None;
+        }
+        let Some(geo) = self.files_geometry() else { return };
+        let Some(page) = self.files.clone() else { return };
+        let transfers: Vec<_> = self.transfers_of(page.pane).into_iter().cloned().collect();
+        let s = self.scale;
+        let theme = self.theme;
+        let line = (1.0 * s).round().max(1.0);
+        let radius = (6.0 * s).round();
+        let (mx, my) = self.mouse;
+        g.dl.rect(self.chrome.content, theme.surface);
+        let title = FontStyle::new(FontFamily::Ui, (17.0 * s).round(), true);
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let ty = baseline(g, geo.title, title);
+        g.text(geo.title.x, ty, &format!("Files on {}", page.host), title, theme.text, geo.title.w);
+        if geo.close.contains(mx, my) {
+            g.dl.round_rect(geo.close, theme.button_hover, radius);
+        }
+        centered(g, geo.close, G_CLOSE, FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false), theme.text);
+
+        let caret_h = (16.0 * s).round();
+        let field = |g: &mut Gfx<B>, r: Rect, text: &str, placeholder: &str, focused: bool| {
+            g.dl.round_rect(r, theme.overlay, radius);
+            g.dl.outline(r, if focused { theme.accent } else { theme.overlay_border }, radius, line);
+            let inner = r.inset((10.0 * s).round(), 0.0);
+            let y = baseline(g, inner, ui);
+            if text.is_empty() {
+                g.text(inner.x, y, placeholder, ui, theme.text_dim, inner.w);
+            }
+            let w = g.text(inner.x, y, text, ui, theme.text, inner.w);
+            if focused {
+                g.dl.rect(Rect::new(inner.x + w + 1.0, r.y + ((r.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
+            }
+        };
+        let (path_text, path_hint, editing) = match &page.prompt {
+            Some(Prompt::NewFolder(t)) => (t.clone(), "New folder name".to_owned(), true),
+            Some(Prompt::Rename { text, .. }) => (text.clone(), "New name".to_owned(), true),
+            Some(Prompt::GoTo(t)) => (t.clone(), "Go to folder".to_owned(), true),
+            Some(Prompt::Upload(t)) => (t.clone(), "Local file to upload".to_owned(), true),
+            Some(Prompt::Delete { name, dir }) => (String::new(), format!("Delete {} {name}? Enter to delete, Esc to keep", if *dir { "folder" } else { "file" }), false),
+            None => (page.path.clone(), "Loading".to_owned(), false),
+        };
+        field(g, geo.path, &path_text, &path_hint, editing);
+        if let Some(Prompt::Delete { .. }) = page.prompt {
+            g.dl.outline(geo.path, Color::rgb(0xD9534F), radius, line);
+        }
+        field(g, geo.filter, &page.query, "Filter", page.prompt.is_none());
+
+        g.dl.set_clip(Some(geo.list));
+        let name_x = geo.list.x + (40.0 * s).round();
+        let date_w = (100.0 * s).round();
+        let size_w = (90.0 * s).round();
+        for (row, r) in &geo.rows {
+            if r.bottom() < geo.list.y || r.y > geo.list.bottom() {
+                continue;
+            }
+            if *row == page.selected {
+                g.dl.round_rect(*r, theme.accent.alpha(0x30), radius);
+            } else if r.contains(mx, my) {
+                g.dl.round_rect(*r, theme.button_hover, radius);
+            }
+            let y = baseline(g, *r, ui);
+            let icon = Rect::new(r.x + (14.0 * s).round(), r.y + ((r.h - 14.0 * s) / 2.0).round(), (16.0 * s).round(), (14.0 * s).round());
+            if page.is_up(*row) {
+                g.dl.round_rect(icon, theme.text_dim.alpha(0x70), (2.0 * s).round());
+                g.text(name_x, y, crate::files::UP, ui, theme.text, r.w);
+                continue;
+            }
+            let Some(entry) = page.entry(*row) else { continue };
+            if entry.dir {
+                g.dl.round_rect(icon, theme.accent, (2.0 * s).round());
+            } else {
+                let paper = Rect::new(icon.x + 2.0 * s, icon.y - 1.0 * s, icon.w - 4.0 * s, icon.h + 2.0 * s);
+                g.dl.outline(paper, theme.text_dim, (2.0 * s).round(), line);
+            }
+            let right = r.right() - (12.0 * s).round();
+            let name_w = (right - date_w - size_w - name_x - 12.0 * s).max(0.0);
+            let name = if entry.link { format!("{} \u{2192}", entry.name) } else { entry.name.clone() };
+            g.text(name_x, y, &name, ui, theme.text, name_w);
+            if !entry.dir {
+                let size = human_size(entry.size);
+                let w = g.measure(&size, small);
+                let sy = baseline(g, *r, small);
+                g.text(right - date_w - w - 12.0 * s, sy, &size, small, theme.text_dim, size_w);
+            }
+            if let Some(m) = entry.modified {
+                let d = date(m);
+                let w = g.measure(&d, small);
+                let dy = baseline(g, *r, small);
+                g.text(right - w, dy, &d, small, theme.text_dim, date_w);
+            }
+        }
+        g.dl.set_clip(None);
+        let status = if page.loading && page.entries.is_empty() {
+            Some(("Loading".to_owned(), theme.text_dim))
+        } else if let Some(e) = &page.error {
+            Some((e.clone(), Color::rgb(0xD9534F)))
+        } else if page.rows() == 0 {
+            Some((if page.query.is_empty() { "This folder is empty".to_owned() } else { "Nothing matches the filter".to_owned() }, theme.text_dim))
+        } else {
+            None
+        };
+        if let Some((text, color)) = status {
+            centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (60.0 * s).round()), &text, ui, color);
+        }
+
+        for (id, r) in &geo.transfers {
+            let Some(t) = transfers.iter().find(|t| t.id == *id) else { continue };
+            if r.contains(mx, my) {
+                g.dl.round_rect(*r, theme.button_hover, radius);
+            }
+            let pad = (12.0 * s).round();
+            let bar = Rect::new(r.x + pad, r.bottom() - (6.0 * s).round(), r.w - 2.0 * pad, (3.0 * s).round().max(2.0));
+            let fraction = if t.total > 0 { (t.done as f32 / t.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+            let (state, color) = match &t.state {
+                TransferState::Running => (format!("{} of {}  ·  click to cancel", human_size(t.done), human_size(t.total)), theme.text_dim),
+                TransferState::Done(m) if !t.upload => (format!("{m}  ·  click to show"), theme.text_dim),
+                TransferState::Done(m) => (m.clone(), theme.text_dim),
+                TransferState::Failed(e) => (format!("{e}  ·  click to dismiss"), Color::rgb(0xD9534F)),
+            };
+            g.dl.round_rect(bar, theme.overlay_border, bar.h / 2.0);
+            if fraction > 0.0 {
+                g.dl.round_rect(Rect::new(bar.x, bar.y, (bar.w * fraction).max(bar.h), bar.h), if matches!(t.state, TransferState::Failed(_)) { Color::rgb(0xD9534F) } else { theme.accent }, bar.h / 2.0);
+            }
+            let y = r.y + (17.0 * s).round();
+            let arrow = if t.upload { "\u{2191}" } else { "\u{2193}" };
+            let label = format!("{arrow} {}", t.name);
+            let lw = g.text(r.x + pad, y, &label, ui, theme.text, r.w * 0.45);
+            g.text(r.x + pad + lw + (14.0 * s).round(), y, &state, small, color, (r.w - lw - 3.0 * pad).max(0.0));
+        }
+        let hint = "Enter open or download  ·  Backspace up  ·  F2 rename  ·  F7 new folder  ·  Del delete  ·  Ctrl+U upload  ·  drop files to upload";
+        let hy = baseline(g, geo.hint, small);
+        g.text(geo.hint.x, hy, hint, small, theme.text_dim, geo.hint.w);
     }
 
     fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {

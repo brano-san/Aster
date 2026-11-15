@@ -551,6 +551,7 @@ impl<H: WindowHandler<Win32>> Shared<H> {
         }
         node.window.dpi.set(GetDpiForWindow(hwnd));
         apply_dark(hwnd, opts.dark);
+        windows::Win32::UI::Shell::DragAcceptFiles(hwnd, true);
         let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         update_size(&node.window);
         self.nodes.borrow_mut().push(node.clone());
@@ -1110,6 +1111,23 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
             let (x, y) = client_xy();
             s.send(Event::MouseUp { x, y, button });
             Some(LRESULT(if msg == WM_XBUTTONUP { 1 } else { 0 }))
+        }
+        WM_DROPFILES => {
+            use windows::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
+            let drop = HDROP(wp.0 as _);
+            let count = DragQueryFileW(drop, u32::MAX, None);
+            let mut paths = Vec::new();
+            for i in 0..count {
+                let len = DragQueryFileW(drop, i, None) as usize;
+                let mut buf = vec![0u16; len + 1];
+                let got = DragQueryFileW(drop, i, Some(&mut buf)) as usize;
+                paths.push(String::from_utf16_lossy(&buf[..got]));
+            }
+            DragFinish(drop);
+            if !paths.is_empty() {
+                s.send(Event::DroppedFiles(paths));
+            }
+            Some(LRESULT(0))
         }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
             let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as f32 / WHEEL_DELTA as f32;

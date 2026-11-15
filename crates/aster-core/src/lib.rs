@@ -1,5 +1,6 @@
 pub mod app;
 pub mod config;
+pub mod files;
 pub mod fuzzy;
 pub mod input;
 pub mod keymap;
