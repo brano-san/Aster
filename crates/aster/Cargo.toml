@@ -13,6 +13,7 @@ aster-platform.workspace = true
 aster-ssh.workspace = true
 aster-vt.workspace = true
 crossbeam-channel.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

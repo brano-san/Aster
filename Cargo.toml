@@ -30,6 +30,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 windows = "0.62"
 windows-core = "0.62"
 crc32fast = "1.5"
+russh = { version = "0.65", default-features = false }
+tokio = { version = "1", default-features = false }
 
 [profile.release]
 opt-level = 3

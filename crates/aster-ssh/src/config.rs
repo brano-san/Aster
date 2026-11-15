@@ -53,21 +53,45 @@ pub fn parse(
         }
     }
 
-    for block in &blocks {
-        for entry in &mut entries {
-            let applies = match &block.scope {
-                Scope::Global => true,
-                Scope::Hosts(patterns) => matches_patterns(patterns, &entry.alias),
-                Scope::Skipped => false,
-            };
-            if applies {
-                for (key, value) in &block.options {
-                    apply(entry, key, value, home);
-                }
+    for entry in &mut entries {
+        apply_blocks(&blocks, entry, home);
+    }
+    entries
+}
+
+pub fn resolve(
+    text: &str,
+    ssh_dir: &Path,
+    home: &Path,
+    read: &dyn Fn(&Path) -> Option<String>,
+    host: &str,
+) -> HostEntry {
+    let mut blocks = vec![Block {
+        scope: Scope::Global,
+        options: Vec::new(),
+    }];
+    collect(text, ssh_dir, home, read, 0, &mut blocks);
+    let mut entry = HostEntry {
+        alias: host.to_owned(),
+        ..HostEntry::default()
+    };
+    apply_blocks(&blocks, &mut entry, home);
+    entry
+}
+
+fn apply_blocks(blocks: &[Block], entry: &mut HostEntry, home: &Path) {
+    for block in blocks {
+        let applies = match &block.scope {
+            Scope::Global => true,
+            Scope::Hosts(patterns) => matches_patterns(patterns, &entry.alias),
+            Scope::Skipped => false,
+        };
+        if applies {
+            for (key, value) in &block.options {
+                apply(entry, key, value, home);
             }
         }
     }
-    entries
 }
 
 fn collect(
@@ -224,7 +248,7 @@ fn apply(entry: &mut HostEntry, key: &str, value: &str, home: &Path) {
                 entry.port = first.and_then(|token| token.parse::<u16>().ok());
             }
         }
-        "proxyjump" => set_once(&mut entry.proxy_jump, first),
+        "proxyjump" => set_once(&mut entry.proxy_jump, (!tokens.is_empty()).then(|| tokens.concat())),
         "proxycommand" => {
             if !value.is_empty() {
                 set_once(&mut entry.proxy_command, Some(value.to_string()));

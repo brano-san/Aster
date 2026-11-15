@@ -6,7 +6,7 @@ use aster_core::panes::PaneId;
 use aster_core::profile::Profile;
 use aster_core::session::{SessionState, WindowState};
 use aster_gfx::text::Gfx;
-use aster_core::config::Dock;
+use aster_core::config::{Dock, SshClient};
 use aster_core::keymap::Chord;
 use aster_platform::{DockSpec, Edge, Platform, RenderError, Renderer, SpawnRequest, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -68,7 +68,7 @@ fn load_session<P: Platform>() -> Vec<WindowState> {
 impl<P: Platform> Handler<P> {
     pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker) -> Self {
         let mut profiles = P::shells();
-        let ssh = P::ssh_command();
+        let ssh = P::ssh_command().or_else(|| (config.ssh.client == SshClient::Native).then(|| "ssh".to_owned()));
         if let Some(cmd) = &ssh {
             profiles.extend(ssh_hosts::<P>(cmd));
         }
@@ -147,6 +147,13 @@ impl<P: Platform> Handler<P> {
     fn effect(&mut self, window: &Win<P>, effect: Effect) {
         let id = window.id();
         match effect {
+            Effect::Spawn { pane, launch, terminal } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
+                let destination = launch.ssh.unwrap_or_default();
+                let spawned = crate::remote::connect(&destination, launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), P::home_dir());
+                let waker = self.waker.clone();
+                let session = Session::start(id, pane, spawned, terminal, move || waker.wake(), self.exit_tx.clone());
+                self.sessions.insert((id, pane), session);
+            }
             Effect::Spawn { pane, launch, terminal } => {
                 let req = SpawnRequest {
                     command: launch.command,

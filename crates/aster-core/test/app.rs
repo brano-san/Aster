@@ -291,3 +291,22 @@ fn opacity_reaches_the_backgrounds_only_where_the_window_can_show_it() {
     a.set_surface(true, false);
     assert_eq!(a.theme.chrome.0 >> 24, 128, "without a backdrop the tab bar is as clear as the terminal");
 }
+
+#[test]
+fn the_enter_that_picks_a_profile_does_not_reach_the_new_tab() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.take_effects();
+    key(&mut a, Key::Char('E'), CTRL_SHIFT);
+    a.on_event(Event::Char('\u{5}'));
+    for c in "local:b".chars() {
+        a.on_event(Event::Char(c));
+    }
+    key(&mut a, Key::Enter, Mods::NONE);
+    a.on_event(Event::Char('\r'));
+    a.frame(&mut g, false);
+    let e = a.take_effects();
+    assert_eq!(spawns(&e).len(), 1);
+    assert!(writes(&e).is_empty(), "{:?}", writes(&e));
+}
