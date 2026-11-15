@@ -1,6 +1,7 @@
 use crate::app::{App, Effect};
 use crate::config::Config;
 use crate::input::{Key, Mods};
+use crate::keymap::{format_binding, Action, Chord};
 use aster_gfx::render::Rect;
 use toml::Value;
 
@@ -113,9 +114,32 @@ pub fn number_text(v: f64) -> String {
     }
 }
 
-fn matches(s: &Setting, query: &str) -> bool {
-    let hay = format!("{} {} {} {}", s.section, s.label, s.hint, s.key).to_lowercase();
+fn found(hay: &str, query: &str) -> bool {
+    let hay = hay.to_lowercase();
     query.to_lowercase().split_whitespace().all(|w| hay.contains(w))
+}
+
+pub const SHORTCUTS: &str = "Keyboard shortcuts";
+
+pub fn shortcut(item: usize) -> Option<Action> {
+    item.checked_sub(SETTINGS.len()).and_then(|k| Action::all().nth(k))
+}
+
+pub fn section_of(item: usize) -> &'static str {
+    match shortcut(item) {
+        Some(_) => SHORTCUTS,
+        None => SETTINGS[item].section,
+    }
+}
+
+fn item_matches(item: usize, query: &str) -> bool {
+    match shortcut(item) {
+        Some(a) => found(&format!("{SHORTCUTS} hotkey {} {}", a.label(), a.id()), query),
+        None => {
+            let s = &SETTINGS[item];
+            found(&format!("{} {} {} {}", s.section, s.label, s.hint, s.key), query)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -125,6 +149,8 @@ pub struct SettingsPage {
     pub selected: usize,
     pub scroll: f32,
     pub editing: Option<String>,
+    pub capture: Option<Action>,
+    pub notice: Option<String>,
 }
 
 impl SettingsPage {
@@ -135,13 +161,18 @@ impl SettingsPage {
     }
 
     fn refilter(&mut self) {
-        self.shown = (0..SETTINGS.len()).filter(|&i| matches(&SETTINGS[i], &self.query)).collect();
+        let total = SETTINGS.len() + Action::all().count();
+        self.shown = (0..total).filter(|&i| item_matches(i, &self.query)).collect();
         self.selected = 0;
         self.scroll = 0.0;
     }
 
     pub fn current(&self) -> Option<&'static Setting> {
-        self.shown.get(self.selected).map(|&i| &SETTINGS[i])
+        self.shown.get(self.selected).and_then(|&i| SETTINGS.get(i))
+    }
+
+    pub fn current_shortcut(&self) -> Option<Action> {
+        self.shown.get(self.selected).and_then(|&i| shortcut(i))
     }
 
     fn step(&mut self, delta: isize) {
@@ -212,16 +243,16 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
     let mut y = list.y - page.scroll;
     let mut section = "";
     for (n, &i) in page.shown.iter().enumerate() {
-        let setting = &SETTINGS[i];
-        if setting.section != section {
-            section = setting.section;
+        if section_of(i) != section {
+            section = section_of(i);
             rows.push(Row { kind: RowKind::Section(section), rect: Rect::new(x, y, width, section_h), control: Rect::default() });
             y += section_h;
         }
         let rect = Rect::new(x, y, width, item_h);
-        let (cw, ch) = match setting.control {
-            Control::Toggle => ((control_width(setting.control) * s).round(), (22.0 * s).round()),
-            c => ((control_width(c) * s).min(width * 0.45).round(), control_h),
+        let (cw, ch) = match SETTINGS.get(i).map(|s| s.control) {
+            Some(Control::Toggle) => ((control_width(Control::Toggle) * s).round(), (22.0 * s).round()),
+            Some(c) => ((control_width(c) * s).min(width * 0.45).round(), control_h),
+            None => ((240.0 * s).min(width * 0.45).round(), control_h),
         };
         let control = Rect::new(rect.right() - cw - (14.0 * s).round(), rect.y + ((item_h - ch) / 2.0).round(), cw, ch);
         rows.push(Row { kind: RowKind::Item(n), rect, control });
@@ -286,6 +317,67 @@ impl App {
 
     pub fn setting_on(&self, setting: &Setting) -> bool {
         matches!(get(&self.config, setting.key), Some(Value::Boolean(true)))
+    }
+
+    pub fn shortcut_text(&self, action: Action) -> String {
+        let all: Vec<String> = self.keymap.bindings_of(action).map(format_binding).collect();
+        if all.is_empty() {
+            "None".into()
+        } else {
+            all.join(", ")
+        }
+    }
+
+    fn set_shortcuts(&mut self, action: Action, bindings: Option<Vec<String>>) {
+        let mut config = self.config.clone();
+        match bindings {
+            Some(b) => {
+                config.hotkeys.insert(action.id(), b);
+            }
+            None => {
+                config.hotkeys.remove(&action.id());
+            }
+        }
+        if config != self.config {
+            self.set_config(config);
+            self.push_save_config();
+        }
+    }
+
+    fn assign_shortcut(&mut self, action: Action, chord: Chord) {
+        let text = chord.to_string();
+        let mut taken = Vec::new();
+        let mut config = self.config.clone();
+        for other in Action::all().filter(|o| *o != action) {
+            let current: Vec<String> = self.keymap.bindings_of(other).map(format_binding).collect();
+            if current.contains(&text) {
+                config.hotkeys.insert(other.id(), current.into_iter().filter(|b| *b != text).collect());
+                taken.push(other.label());
+            }
+        }
+        config.hotkeys.insert(action.id(), vec![text.clone()]);
+        if config != self.config {
+            self.set_config(config);
+            self.push_save_config();
+        }
+        if let Some(page) = self.settings.as_mut() {
+            page.capture = None;
+            page.notice = (!taken.is_empty()).then(|| format!("{text} was taken from {}", taken.join(", ")));
+        }
+    }
+
+    fn capture_key(&mut self, key: Key, mods: Mods) {
+        let Some(action) = self.settings.as_ref().and_then(|p| p.capture) else { return };
+        match key {
+            Key::Escape if mods == Mods::NONE => {
+                if let Some(p) = self.settings.as_mut() {
+                    p.capture = None;
+                }
+            }
+            Key::Other => {}
+            _ => self.assign_shortcut(action, Chord { key, mods }),
+        }
+        self.dirty = true;
     }
 
     fn apply_setting(&mut self, key: &str, value: Value) {
@@ -390,6 +482,12 @@ impl App {
     pub(crate) fn settings_key(&mut self, key: Key, mods: Mods) {
         let Some(page) = self.settings.as_mut() else { return };
         self.dirty = true;
+        if page.capture.is_some() {
+            return self.capture_key(key, mods);
+        }
+        if key != Key::Other {
+            page.notice = None;
+        }
         if page.editing.is_some() {
             match key {
                 Key::Escape => page.editing = None,
@@ -409,6 +507,17 @@ impl App {
             return;
         }
         let current = page.current();
+        if let Some(action) = page.current_shortcut() {
+            match key {
+                Key::Enter => {
+                    page.capture = Some(action);
+                    return;
+                }
+                Key::Delete if mods.shift => return self.set_shortcuts(action, None),
+                Key::Delete => return self.set_shortcuts(action, Some(Vec::new())),
+                _ => {}
+            }
+        }
         match key {
             Key::Escape if !page.query.is_empty() => {
                 page.query.clear();
@@ -476,12 +585,18 @@ impl App {
         let Some(row) = geo.rows.iter().find(|r| r.rect.contains(x, y)).copied() else { return self.commit_edit() };
         let RowKind::Item(n) = row.kind else { return self.commit_edit() };
         let editing_same = self.settings.as_ref().is_some_and(|p| p.selected == n && p.editing.is_some());
-        if editing_same && row.control.contains(x, y) && part_at(SETTINGS[self.settings.as_ref().map_or(0, |p| p.shown[n])].control, row.control, self.scale, x) == Part::Whole {
+        let control = self.settings.as_ref().and_then(|p| SETTINGS.get(p.shown[n])).map(|s| s.control);
+        if editing_same && row.control.contains(x, y) && control.is_some_and(|c| part_at(c, row.control, self.scale, x) == Part::Whole) {
             return;
         }
         self.commit_edit();
         let Some(page) = self.settings.as_mut() else { return };
         page.selected = n;
+        page.notice = None;
+        if let Some(action) = shortcut(page.shown[n]) {
+            page.capture = Some(action);
+            return;
+        }
         let setting = &SETTINGS[page.shown[n]];
         match setting.control {
             Control::Toggle => self.adjust_setting(setting, 0),

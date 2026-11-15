@@ -1002,6 +1002,9 @@ impl App {
             return self.files_key(key, mods);
         }
         if self.settings.is_some() {
+            if self.settings.as_ref().is_some_and(|p| p.capture.is_some()) {
+                return self.settings_key(key, mods);
+            }
             if self.keymap.press(Chord { key, mods }) == Outcome::Action(Action::Settings) {
                 return self.close_settings();
             }
