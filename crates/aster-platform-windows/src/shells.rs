@@ -111,5 +111,73 @@ pub fn detect() -> Vec<Profile> {
         profile.icon = Some("git".into());
         out.push(profile);
     }
+    out.extend(cygwin());
+    out.extend(msys2(&sys));
+    out.extend(cmder(&sys, &windows_ps));
+    out.extend(visual_studio(&sys));
     out
 }
+
+fn cygwin() -> Vec<Profile> {
+    [(r"SOFTWARE\Cygwin\setup", "local:cygwin", "Cygwin"), (r"SOFTWARE\WOW6432Node\Cygwin\setup", "local:cygwin32", "Cygwin (32 bit)")]
+        .into_iter()
+        .filter_map(|(key, id, name)| {
+            let bash = PathBuf::from(reg_string(HKEY_LOCAL_MACHINE, key, "rootdir")?).join(r"bin\bash.exe");
+            bash.is_file().then(|| {
+                let mut p = Profile::new(id, name, &path_str(&bash), &["--login", "-i"]);
+                p.icon = Some("cygwin".into());
+                p
+            })
+        })
+        .collect()
+}
+
+fn msys2(sys: &Path) -> Vec<Profile> {
+    let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+    let root = PathBuf::from(format!(r"{drive}\msys64"));
+    let script = root.join("msys2_shell.cmd");
+    if !script.is_file() {
+        return Vec::new();
+    }
+    let cmd = path_str(&sys.join("cmd.exe"));
+    ["msys", "mingw64", "clang64", "ucrt64"]
+        .into_iter()
+        .map(|env| {
+            let flag = format!("-{env}");
+            let mut p = Profile::new(&format!("local:msys2:{env}"), &format!("MSYS2 ({})", env.to_uppercase()), &cmd, &["/c", &path_str(&script), "-defterm", "-here", "-no-start", &flag]);
+            p.icon = Some("msys2".into());
+            p
+        })
+        .collect()
+}
+
+fn cmder(sys: &Path, powershell: &Path) -> Vec<Profile> {
+    let Some(root) = std::env::var_os("CMDER_ROOT").map(PathBuf::from).filter(|p| p.is_dir()) else { return Vec::new() };
+    let init = path_str(&root.join(r"vendor\init.bat"));
+    let profile_ps1 = path_str(&root.join(r"vendor\profile.ps1"));
+    let mut cmd = Profile::new("local:cmder", "Cmder", &path_str(&sys.join("cmd.exe")), &["/k", &init]);
+    cmd.env.insert("CMDER_ROOT".into(), path_str(&root));
+    let invoke = format!("Invoke-Expression '. ''{profile_ps1}'''");
+    let ps = Profile::new("local:cmder-powershell", "Cmder PowerShell", &path_str(powershell), &["-ExecutionPolicy", "Bypass", "-nologo", "-noprofile", "-noexit", "-command", &invoke]);
+    vec![cmd, ps]
+}
+
+fn visual_studio(sys: &Path) -> Vec<Profile> {
+    let roots: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)"].iter().filter_map(std::env::var_os).map(|p| PathBuf::from(p).join("Microsoft Visual Studio")).collect();
+    let cmd = path_str(&sys.join("cmd.exe"));
+    let mut out = Vec::new();
+    for version in ["2022", "2019", "2017"] {
+        for edition in ["Enterprise", "Professional", "Community", "BuildTools"] {
+            let Some(bat) = roots.iter().map(|r| r.join(version).join(edition).join(r"Common7\Tools\VsDevCmd.bat")).find(|p| p.is_file()) else { continue };
+            let mut p = Profile::new(&format!("local:vs{version}:{}", edition.to_lowercase()), &format!("Developer Prompt for VS {version}"), &cmd, &["/k", &path_str(&bat)]);
+            p.icon = Some("vs".into());
+            out.push(p);
+            break;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[path = "../test/shells.rs"]
+mod tests;
