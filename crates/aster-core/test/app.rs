@@ -439,3 +439,19 @@ fn awaiting_files_keeps_the_typed_path_when_the_same_state_repeats() {
     a.transfer_offered(pane, PaneTransfer::Running);
     assert_eq!(a.offer(pane), None);
 }
+
+#[test]
+fn a_translucent_window_paints_each_background_once_over_a_clear_frame() {
+    let (mut a, mut g) = app();
+    let mut config = Config::default();
+    config.appearance.opacity = 0.6;
+    a.set_config(config);
+    a.set_surface(true, false);
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    assert_eq!(g.dl.clear.0 >> 24, 0, "the frame starts fully transparent");
+    let alpha = (0.6f32 * 255.0).round() as u32;
+    let content = a.chrome.content;
+    let covering: Vec<_> = g.dl.instances.iter().filter(|i| i.color >> 24 == alpha && i.rect[0] <= content.x && i.rect[1] <= content.y + 1.0 && i.rect[2] >= content.w && i.rect[3] >= content.h).collect();
+    assert_eq!(covering.len(), 1, "the terminal background is drawn once");
+}
