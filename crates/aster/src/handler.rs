@@ -318,6 +318,11 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::Open(target) => P::open(&target),
+            Effect::OpenConfigFile => {
+                if let Some(path) = crate::config_path::<P>() {
+                    P::open(&path.to_string_lossy());
+                }
+            }
             Effect::OpenLog => {
                 if let Some(dir) = P::config_dir() {
                     P::open(&dir.to_string_lossy());
