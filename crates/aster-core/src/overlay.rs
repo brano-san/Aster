@@ -7,6 +7,7 @@ pub enum OverlayKind {
     Commands,
     Profiles,
     Schemes,
+    TabColors,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +52,7 @@ impl Overlay {
             OverlayKind::Commands => t("Type a command"),
             OverlayKind::Profiles => t("Select a profile"),
             OverlayKind::Schemes => t("Select a color scheme"),
+            OverlayKind::TabColors => t("Select a tab color"),
         }
     }
 

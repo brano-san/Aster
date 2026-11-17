@@ -205,3 +205,23 @@ fn keyboard_resizing_moves_the_nearest_divider() {
     a.run(Action::PaneResizeDown);
     assert!(matches!(a.tabs[0].root, crate::panes::Node::Split { ratio, .. } if (ratio - 0.4).abs() < 1e-6), "no vertical divider to move");
 }
+
+#[test]
+fn tab_colors_come_from_the_picker_or_the_profile_and_survive_the_session() {
+    let mut a = app(2);
+    assert_eq!(a.tab_color(1), None);
+    a.run(Action::SetTabColor);
+    typed(&mut a, "green");
+    key(&mut a, Key::Enter, Mods::NONE);
+    assert_eq!(a.tabs[1].color.as_deref(), Some("#57AB5A"));
+    assert!(a.tab_color(1).is_some());
+    let state = a.snapshot();
+    assert_eq!(state.tabs[1].color.as_deref(), Some("#57AB5A"));
+    a.run(Action::SetTabColor);
+    typed(&mut a, "no color");
+    key(&mut a, Key::Enter, Mods::NONE);
+    assert_eq!(a.tabs[1].color, None);
+    let pane = a.tabs[0].focus;
+    a.panes.get_mut(&pane).unwrap().profile.color = Some("#4C8DF6".into());
+    assert!(a.tab_color(0).is_some());
+}

@@ -24,6 +24,8 @@ pub struct TabState {
     pub focus: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -82,7 +84,7 @@ impl App {
         let t = self.tabs.get(index)?;
         let root = self.node_state(&t.root)?;
         let focus = t.root.panes().iter().position(|p| *p == t.focus).unwrap_or(0);
-        Some(TabState { root, focus, title: t.title.clone() })
+        Some(TabState { root, focus, title: t.title.clone(), color: t.color.clone() })
     }
 
     pub fn session_snapshot(&self) -> WindowState {
@@ -124,7 +126,7 @@ impl App {
             let root = self.build(&tab.root);
             let order = root.panes();
             let focus = order.get(tab.focus).or(order.first()).copied().unwrap_or(0);
-            self.tabs.push(Tab { root, focus, zoomed: None, title: tab.title.clone() });
+            self.tabs.push(Tab { root, focus, zoomed: None, title: tab.title.clone(), color: tab.color.clone() });
         }
         self.active = state.active.min(self.tabs.len().saturating_sub(1));
         self.dirty = true;

@@ -222,6 +222,9 @@ impl App {
                 let lh = (16.0 * s).round();
                 g.dl.rect(Rect::new(r.right() - 1.0, r.y + ((r.h - lh) / 2.0).round(), (1.0 * s).max(1.0), lh), theme.divider);
             }
+            if let Some(ink) = self.tab_color(i) {
+                g.dl.round_rect(Rect::new(r.x + (10.0 * s).round(), r.y + (3.0 * s).round(), r.w - (20.0 * s).round(), (3.0 * s).round().max(2.0)), ink, (1.5 * s).round());
+            }
             let show_close = active || hovered;
             let text_x = r.x + (12.0 * s).round();
             let text_end = if show_close { slot.close.x - 4.0 * s } else { r.right() - 12.0 * s };
