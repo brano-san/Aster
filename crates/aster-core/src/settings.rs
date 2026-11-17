@@ -946,6 +946,10 @@ impl App {
     }
 }
 
+pub fn explorer_label() -> &'static str {
+    t("Open in Aster")
+}
+
 #[cfg(test)]
 #[path = "../test/settings.rs"]
 mod tests;
