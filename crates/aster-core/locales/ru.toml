@@ -247,6 +247,7 @@
 "Combine all tabs" = "Собрать все вкладки"
 "Report a problem" = "Сообщить о проблеме"
 "Open the log folder" = "Открыть папку журнала"
+"Open the config file in an editor" = "Открыть файл конфигурации в редакторе"
 "System" = "Система"
 "Explorer menu" = "Меню Проводника"
 "Add \"Open in Aster\" to the folder menu of Windows Explorer" = "Добавить «Открыть в Aster» в меню папок Проводника Windows"
