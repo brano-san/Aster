@@ -905,7 +905,7 @@ impl App {
                                 let kind = if p.custom { t("Custom") } else { t("Detected") };
                                 (p.name.clone(), p.detail.clone(), if p.default { tf("Default  ·  {kind}", &[("kind", kind)]) } else { kind.to_owned() })
                             }
-                            None => (t("New profile").to_owned(), t("Create a profile with its own command, folder or SSH host").to_owned(), "+".to_owned()),
+                            None => (t("New profile").to_owned(), t("Create a profile for a command, an SSH host, a serial port or a Telnet or TCP address").to_owned(), "+".to_owned()),
                         };
                         let hint = match (&page.notice, selected) {
                             (Some(n), true) => n.clone(),
