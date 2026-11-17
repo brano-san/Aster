@@ -410,3 +410,19 @@ fn a_network_profile_stores_a_normalized_address() {
     assert!(!p.is_local());
     assert!(a.settings.as_ref().unwrap().profiles.iter().any(|r| r.detail == "telnet://switch.lan:23"));
 }
+
+#[test]
+fn the_first_letter_typed_after_opening_settings_by_shortcut_is_kept() {
+    let mut a = app();
+    a.on_event(ctrl(Key::Char(',')));
+    assert!(a.settings.is_some());
+    a.on_event(Event::Char('n'));
+    a.on_event(Event::Char('e'));
+    assert_eq!(a.settings.as_ref().unwrap().query, "ne");
+    let mut b = app();
+    b.on_event(Event::Key { key: Key::Char(','), mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true });
+    b.on_event(Event::Char(','));
+    b.on_event(Event::Char('\u{1b}'));
+    b.on_event(Event::Char('x'));
+    assert_eq!(b.settings.as_ref().unwrap().query, "x", "the chord's own character is still swallowed");
+}

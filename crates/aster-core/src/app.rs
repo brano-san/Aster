@@ -166,6 +166,7 @@ pub struct App {
     backdrop: bool,
     pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
+    swallow_chord: Option<Key>,
     swallow_control: bool,
     pub(crate) blink_on: bool,
     blink_since: Instant,
@@ -236,6 +237,7 @@ impl App {
             backdrop: false,
             search: None,
             swallow_char: false,
+            swallow_chord: None,
             swallow_control: false,
             blink_on: true,
             blink_since: Instant::now(),
@@ -1138,7 +1140,8 @@ impl App {
     fn on_key(&mut self, key: Key, mods: Mods) {
         let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.settings.is_some() || self.files.is_some();
         self.swallow_char = false;
-        self.swallow_control = modal && matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
+        self.swallow_chord = None;
+        self.swallow_control = modal &&matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
         if self.overlay.is_some() {
             self.overlay_key(key, mods);
             return;
@@ -1185,10 +1188,10 @@ impl App {
         }
         match outcome {
             Outcome::Action(a) => {
-                self.swallow_char = true;
+                self.swallow_chord = Some(key);
                 self.run(a);
             }
-            Outcome::Pending => self.swallow_char = true,
+            Outcome::Pending => self.swallow_chord = Some(key),
             Outcome::None if self.search.is_some() => {}
             Outcome::None => {
                 if let Some(e) = encode_key(key, mods, self.mode()) {
@@ -1202,6 +1205,11 @@ impl App {
     fn on_char(&mut self, c: char, alt: bool) {
         if std::mem::take(&mut self.swallow_char) {
             return;
+        }
+        if let Some(key) = self.swallow_chord.take() {
+            if c.is_control() || matches!(key, Key::Char(k) if k.eq_ignore_ascii_case(&c)) {
+                return;
+            }
         }
         if std::mem::take(&mut self.swallow_control) && c.is_control() {
             return;

@@ -230,7 +230,7 @@
 "Custom" = "Свой"
 "Detected" = "Найден"
 "Default  ·  {kind}" = "По умолчанию  ·  {kind}"
-"Create a profile with its own command, folder or SSH host" = "Создать профиль со своей командой, папкой или хостом SSH"
+"Create a profile for a command, an SSH host, a serial port or a Telnet or TCP address" = "Создать профиль для команды, хоста SSH, последовательного порта или адреса Telnet и TCP"
 "Enter to edit  ·  Ctrl+Enter to make default  ·  Del to delete" = "Enter изменить  ·  Ctrl+Enter сделать по умолчанию  ·  Del удалить"
 "No matches" = "Совпадений нет"
 "New administrator tab" = "Новая вкладка администратора"
