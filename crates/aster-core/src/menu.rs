@@ -116,6 +116,7 @@ impl App {
             item("Duplicate", Action::DuplicateTab, true),
             item("Duplicate as administrator", Action::DuplicateAsAdmin, self.can_elevate() && self.focused_pane().and_then(|p| self.panes.get(&p)).is_some_and(|p| p.profile.is_local())),
             item("Rename", Action::RenameTab, true),
+            item("Color", Action::SetTabColor, true),
             Entry::Separator,
             item("Move left", Action::MoveTabLeft, index > 0),
             item("Move right", Action::MoveTabRight, index + 1 < n),

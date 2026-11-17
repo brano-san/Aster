@@ -26,6 +26,8 @@ const BELL_FLASH: Duration = Duration::from_millis(150);
 const CLOSED_TABS: usize = 10;
 const PANE_STEP: f32 = 0.1;
 
+pub const TAB_COLORS: [(&str, &str); 9] = [("No color", ""), ("Red", "#E5534B"), ("Orange", "#E0823D"), ("Yellow", "#D4B13B"), ("Green", "#57AB5A"), ("Teal", "#39B6A8"), ("Blue", "#4C8DF6"), ("Purple", "#9D6CE0"), ("Pink", "#D9619F")];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Broadcast {
     Tab,
@@ -106,6 +108,7 @@ pub(crate) struct Tab {
     pub focus: PaneId,
     pub zoomed: Option<PaneId>,
     pub title: Option<String>,
+    pub color: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -580,7 +583,7 @@ impl App {
     pub fn open_tab(&mut self, profile: Profile) {
         let id = self.new_pane(profile);
         let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
-        self.tabs.insert(at, Tab { root: Node::Leaf(id), focus: id, zoomed: None, title: None });
+        self.tabs.insert(at, Tab { root: Node::Leaf(id), focus: id, zoomed: None, title: None, color: None });
         self.active = at;
         self.overlay = None;
         self.dirty = true;
@@ -707,6 +710,13 @@ impl App {
 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    pub(crate) fn tab_color(&self, index: usize) -> Option<aster_gfx::render::Color> {
+        let tab = self.tabs.get(index)?;
+        let own = tab.color.clone();
+        let hex = own.or_else(|| self.panes.get(&tab.focus).and_then(|p| p.profile.color.clone()))?;
+        aster_vt::schemes::parse_hex(&hex).map(crate::theme::color)
     }
 
     pub(crate) fn tab_activity(&self, index: usize) -> bool {
@@ -937,6 +947,7 @@ impl App {
             ProfileSelector => self.open_overlay(OverlayKind::Profiles),
             Search => self.open_search(),
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
+            SetTabColor => self.open_overlay(OverlayKind::TabColors),
             Settings => self.open_settings(),
             RenameTab => self.start_rename(self.active),
             OpenFiles => self.open_files(),
@@ -1057,6 +1068,7 @@ impl App {
                 .collect(),
             OverlayKind::Profiles => self.profiles.iter().map(|p| Pick { label: p.name.clone(), hint: String::new(), value: p.id.clone() }).collect(),
             OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), hint: String::new(), value: n }).collect(),
+            OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string() }).collect(),
         };
         let mut overlay = Overlay::new(kind, items);
         if kind == OverlayKind::Profiles && self.ssh.is_some() {
@@ -1093,6 +1105,11 @@ impl App {
             OverlayKind::Profiles => {
                 if let Some(p) = self.profiles.iter().find(|p| p.id == value).cloned() {
                     self.open_tab(p);
+                }
+            }
+            OverlayKind::TabColors => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.color = (!value.is_empty()).then_some(value);
                 }
             }
             OverlayKind::Schemes => {
@@ -1202,13 +1219,13 @@ impl App {
         if rest.is_empty() {
             return;
         }
-        let focus = tab.focus;
+        let (focus, color) = (tab.focus, tab.color.clone());
         tab.root = Node::Leaf(first);
         tab.focus = first;
         tab.zoomed = None;
         let at = self.active;
         for (i, &id) in rest.iter().enumerate() {
-            self.tabs.insert(at + 1 + i, Tab { root: Node::Leaf(id), focus: id, zoomed: None, title: None });
+            self.tabs.insert(at + 1 + i, Tab { root: Node::Leaf(id), focus: id, zoomed: None, title: None, color: color.clone() });
         }
         self.active = at + panes.iter().position(|p| *p == focus).unwrap_or(0);
         self.dirty = true;
@@ -1248,7 +1265,7 @@ impl App {
         let order = root.panes();
         let focus = order.get(state.focus).or(order.first()).copied().unwrap_or(0);
         let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
-        self.tabs.insert(at, Tab { root, focus, zoomed: None, title: state.title });
+        self.tabs.insert(at, Tab { root, focus, zoomed: None, title: state.title, color: state.color });
         self.active = at;
         self.overlay = None;
         self.dirty = true;

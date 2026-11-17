@@ -49,11 +49,12 @@ fn keyboard_navigation_skips_separators_and_disabled_items() {
     key(&mut a, Key::Down);
     key(&mut a, Key::Down);
     key(&mut a, Key::Down);
+    key(&mut a, Key::Down);
     let m = a.menu.as_ref().unwrap();
     assert_eq!(m.action(m.selected.unwrap()), Some(Action::CloseTab), "moving and other closing items are disabled with one tab");
     key(&mut a, Key::Up);
     let m = a.menu.as_ref().unwrap();
-    assert_eq!(m.action(m.selected.unwrap()), Some(Action::RenameTab));
+    assert_eq!(m.action(m.selected.unwrap()), Some(Action::SetTabColor));
     key(&mut a, Key::Escape);
     assert!(!a.menu_open());
 }

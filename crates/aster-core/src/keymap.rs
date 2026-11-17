@@ -67,6 +67,7 @@ pub enum Action {
     CombineTabs,
     BroadcastToTab,
     BroadcastToAllTabs,
+    SetTabColor,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -132,6 +133,7 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::CombineTabs, "combine-tabs", "Combine all tabs into one"),
     (Action::BroadcastToTab, "pane-focus-all", "Type into all panes of the tab"),
     (Action::BroadcastToAllTabs, "focus-all-tabs", "Type into all tabs"),
+    (Action::SetTabColor, "set-tab-color", "Set tab color"),
 ];
 
 impl Action {
