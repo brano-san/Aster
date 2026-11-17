@@ -1,7 +1,7 @@
 use crate::app::{App, Drag, Effect, Metrics};
 use crate::i18n::{t, tf};
 use crate::input::HitArea;
-use crate::overlay::{Overlay, VISIBLE};
+use crate::overlay::{Overlay, OverlayKind, VISIBLE};
 use crate::panes::PaneId;
 use crate::theme::color;
 use aster_gfx::render::{Color, Rect};
@@ -86,23 +86,45 @@ pub struct OverlayGeometry {
     pub frame: Rect,
     pub input: Rect,
     pub items: Vec<(usize, Rect)>,
+    pub headers: Vec<(String, Rect)>,
+    pub dividers: Vec<Rect>,
 }
 
 pub fn overlay_geometry(app: &App, o: &Overlay) -> OverlayGeometry {
     let s = app.scale;
     let (w, _) = app.size;
-    let width = (560.0 * s).min(w - 32.0 * s).max(200.0 * s).round();
+    let profiles = o.kind == OverlayKind::Profiles;
+    let width = (if profiles { 520.0 } else { 560.0 } * s).min(w - 32.0 * s).max(200.0 * s).round();
     let x = ((w - width) / 2.0).round();
     let y = app.chrome.content.y + (10.0 * s).round();
-    let input_h = (40.0 * s).round();
-    let item_h = (30.0 * s).round();
+    let input_h = (if profiles { 44.0 } else { 40.0 } * s).round();
+    let item_h = (if profiles { 34.0 } else { 30.0 } * s).round();
+    let header_h = (30.0 * s).round();
     let pad = (6.0 * s).round();
     let n = o.shown.len().min(VISIBLE);
-    let rows = n.max(1);
-    let frame = Rect::new(x, y, width, input_h + rows as f32 * item_h + 2.0 * pad);
     let input = Rect::new(x, y, width, input_h);
-    let items = (0..n).map(|k| (o.scroll + k, Rect::new(x + pad, y + input_h + pad + k as f32 * item_h, width - 2.0 * pad, item_h))).collect();
-    OverlayGeometry { frame, input, items }
+    let mut cursor = y + input_h + pad;
+    let mut items = Vec::new();
+    let mut headers = Vec::new();
+    let mut dividers = Vec::new();
+    for k in 0..n {
+        let position = o.scroll + k;
+        if let Some(title) = o.header_before(position) {
+            headers.push((title.to_owned(), Rect::new(x + pad, cursor, width - 2.0 * pad, header_h)));
+            cursor += header_h;
+        } else if k > 0 && o.items[o.shown[position].0].group.is_empty() && !o.items[o.shown[position - 1].0].group.is_empty() {
+            let gap = (12.0 * s).round();
+            dividers.push(Rect::new(x + pad, cursor + (gap / 2.0).round(), width - 2.0 * pad, (1.0 * s).round().max(1.0)));
+            cursor += gap;
+        }
+        items.push((position, Rect::new(x + pad, cursor, width - 2.0 * pad, item_h)));
+        cursor += item_h;
+    }
+    if n == 0 {
+        cursor += item_h;
+    }
+    let frame = Rect::new(x, y, width, cursor + pad - y);
+    OverlayGeometry { frame, input, items, headers, dividers }
 }
 
 pub fn overlay_hit(app: &App, o: &Overlay, x: f32, y: f32) -> Option<Option<usize>> {
@@ -1100,20 +1122,63 @@ impl App {
             return;
         }
         let (mx, my) = self.mouse;
+        let bold = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), true);
+        for (title, r) in &geo.headers {
+            let y = baseline(g, *r, bold);
+            g.text(r.x + (10.0 * s).round(), y, title, bold, theme.text_dim, r.w);
+        }
+        for r in &geo.dividers {
+            g.dl.rect(*r, theme.overlay_border);
+        }
+        let profiles = o.kind == OverlayKind::Profiles;
         for (i, r) in &geo.items {
             let (item, _) = &o.shown[*i];
             let pick = &o.items[*item];
-            if *i == o.selected {
+            let chosen = *i == o.selected;
+            if chosen {
                 g.dl.round_rect(*r, theme.accent.alpha(0x38), (5.0 * s).round());
             } else if r.contains(mx, my) {
                 g.dl.round_rect(*r, theme.button_hover, (5.0 * s).round());
             }
             let y = baseline(g, *r, ui);
-            let hint_w = if pick.hint.is_empty() { 0.0 } else { g.measure(&pick.hint, small) };
-            g.text(r.x + (10.0 * s).round(), y, &pick.label, ui, theme.text, r.w - hint_w - 30.0 * s);
-            if hint_w > 0.0 {
+            let mut x = r.x + (10.0 * s).round();
+            if profiles {
+                let side = (22.0 * s).round();
+                let mark = Rect::new(x, r.y + ((r.h - side) / 2.0).round(), side, side);
+                match pick.tint {
+                    Some(rgb) => {
+                        g.dl.round_rect(mark, Color::rgb(rgb), (5.0 * s).round());
+                        let size = if pick.badge.chars().count() > 2 { 8.5 } else { 10.0 };
+                        centered(g, mark, &pick.badge, FontStyle::new(FontFamily::Ui, (size * s).round(), true), Color::rgb(0xFFFFFF));
+                    }
+                    None => centered(g, mark, &pick.badge, FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false), theme.text_dim),
+                }
+                x = mark.right() + (10.0 * s).round();
+            }
+            let mut right = r.right() - (10.0 * s).round();
+            if profiles && chosen {
+                let label = t("Enter →");
+                let tag = FontStyle::new(FontFamily::Ui, (10.0 * s).round(), true);
+                let tw = g.measure(label, tag) + (12.0 * s).round();
+                let tag_rect = Rect::new(right - tw, r.y + ((r.h - 18.0 * s) / 2.0).round(), tw.round(), (18.0 * s).round());
+                g.dl.round_rect(tag_rect, theme.surface, (4.0 * s).round());
+                g.dl.outline(tag_rect, theme.overlay_border, (4.0 * s).round(), (1.0 * s).round().max(1.0));
+                centered(g, tag_rect, label, tag, theme.text);
+                right = tag_rect.x - (8.0 * s).round();
+            }
+            let label_w = g.measure(&pick.label, ui).min(right - x);
+            g.text(x, y, &pick.label, ui, theme.text, right - x);
+            if !pick.hint.is_empty() && pick.hint != pick.label {
                 let hy = baseline(g, *r, small);
-                g.text(r.right() - hint_w - (10.0 * s).round(), hy, &pick.hint, small, theme.text_dim, hint_w + 1.0);
+                if profiles {
+                    let hx = x + label_w + (10.0 * s).round();
+                    if right - hx > 24.0 * s {
+                        g.text(hx, hy, &pick.hint, small, theme.text_dim, right - hx);
+                    }
+                } else {
+                    let hint_w = g.measure(&pick.hint, small).min(right - x);
+                    g.text(right - hint_w, hy, &pick.hint, small, theme.text_dim, hint_w + 1.0);
+                }
             }
         }
     }

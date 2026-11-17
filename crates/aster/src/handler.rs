@@ -52,6 +52,7 @@ pub struct Handler<P: Platform> {
     requests: Option<std::sync::mpsc::Receiver<String>>,
     startup: Option<crate::cli::Request>,
     last_focused: Option<WindowId>,
+    recent: Vec<String>,
 }
 
 fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
@@ -70,11 +71,11 @@ fn capturing() -> bool {
     std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_CAPTURE_SESSION").is_none()
 }
 
-fn load_session<P: Platform>() -> Vec<WindowState> {
+fn load_session<P: Platform>() -> SessionState {
     if capturing() {
-        return Vec::new();
+        return SessionState::default();
     }
-    crate::session_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| SessionState::parse(&t)).map(|s| s.windows).unwrap_or_default()
+    crate::session_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| SessionState::parse(&t)).unwrap_or_default()
 }
 
 impl<P: Platform> Handler<P> {
@@ -90,8 +91,10 @@ impl<P: Platform> Handler<P> {
         let (note_tx, note_rx) = unbounded();
         let (elevated_tx, elevated_rx) = unbounded();
         let config_stamp = stamp(&crate::config_path::<P>());
-        let pending = if config.terminal.recover_tabs { load_session::<P>() } else { Vec::new() };
-        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None, requests: None, startup: None, last_focused: None }
+        let saved = load_session::<P>();
+        let recent = saved.recent;
+        let pending = if config.terminal.recover_tabs { saved.windows } else { Vec::new() };
+        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None, requests: None, startup: None, last_focused: None, recent }
     }
 
     pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
@@ -318,6 +321,12 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::Open(target) => P::open(&target),
+            Effect::RecentProfiles(recent) => {
+                for s in self.windows.values_mut() {
+                    s.app.set_recent(recent.clone());
+                }
+                self.recent = recent;
+            }
             Effect::OpenConfigFile => {
                 if let Some(path) = crate::config_path::<P>() {
                     P::open(&path.to_string_lossy());
@@ -440,7 +449,7 @@ impl<P: Platform> Handler<P> {
             return;
         }
         let Some(path) = crate::session_path::<P>() else { return };
-        let state = SessionState { windows: self.windows.values().map(|s| s.app.session_snapshot()).filter(|w| !w.tabs.is_empty()).collect() };
+        let state = SessionState { windows: self.windows.values().map(|s| s.app.session_snapshot()).filter(|w| !w.tabs.is_empty()).collect(), recent: self.recent.clone() };
         let tmp = path.with_extension("tmp");
         if let Err(e) = std::fs::write(&tmp, state.to_text()).and_then(|_| std::fs::rename(&tmp, &path)) {
             tracing::warn!("{}: {e}", path.display());
@@ -516,6 +525,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         app.set_cwd_probe(Arc::new(P::process_cwd));
         app.set_children_probe(Arc::new(P::child_processes));
         app.set_can_elevate(P::can_elevate());
+        app.set_recent(self.recent.clone());
         let restored = (!self.pending.is_empty()).then(|| self.pending.remove(0)).is_some_and(|state| app.restore(&state));
         let startup = self.startup.take().filter(|r| r.command != crate::cli::Command::Window);
         let opens_tab = startup.as_ref().is_some_and(|r| !matches!(r.command, crate::cli::Command::Paste { .. }));

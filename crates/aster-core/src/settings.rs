@@ -388,6 +388,19 @@ impl App {
         self.settings.is_some()
     }
 
+    pub(crate) fn open_profile_settings(&mut self) {
+        if self.settings.is_none() {
+            self.open_settings();
+        }
+        if let Some(page) = self.settings.as_mut() {
+            if let Some(at) = page.shown.iter().position(|&i| page.profile_at(i).is_some() || page.is_new_profile(i)) {
+                page.selected = at;
+            }
+        }
+        self.reveal_selected();
+        self.dirty = true;
+    }
+
     pub(crate) fn open_settings(&mut self) {
         self.overlay = None;
         let mut page = SettingsPage { profiles: self.profile_rows(), ..SettingsPage::default() };

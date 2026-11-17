@@ -47,7 +47,7 @@ fn tabs_splits_profiles_folders_and_buffers_survive_a_restart() {
     a.frame(&mut g, false);
     a.take_effects();
 
-    let state = SessionState { windows: vec![a.snapshot()] };
+    let state = SessionState { windows: vec![a.snapshot()], recent: Vec::new() };
     let text = state.to_text();
     assert!(!text.contains("needle"));
     let parsed = SessionState::parse(&text).unwrap();

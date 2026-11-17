@@ -9,6 +9,8 @@ pub const BUFFER_LINES: usize = 1000;
 #[serde(default)]
 pub struct SessionState {
     pub windows: Vec<WindowState>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

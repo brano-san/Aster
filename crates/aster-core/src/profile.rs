@@ -13,6 +13,8 @@ pub struct Profile {
     pub icon: Option<String>,
     pub color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial: Option<String>,

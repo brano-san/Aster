@@ -1,7 +1,7 @@
 use super::*;
 
 fn items() -> Vec<Pick> {
-    ["New tab", "Split to the right", "Split to the bottom", "Close tab"].iter().map(|l| Pick { label: (*l).into(), hint: String::new(), value: l.to_lowercase() }).collect()
+    ["New tab", "Split to the right", "Split to the bottom", "Close tab"].iter().map(|l| Pick { label: (*l).into(), value: l.to_lowercase(), ..Pick::default() }).collect()
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn quick_connect_offers_an_ssh_target_typed_into_the_selector() {
 fn translated_commands_are_still_found_by_their_english_names() {
     crate::i18n::set_language("ru");
     let actions = [crate::keymap::Action::NewTab, crate::keymap::Action::NewAdminTab];
-    let picks = actions.iter().map(|a| Pick { label: a.label(), hint: String::new(), value: a.id() }).collect();
+    let picks = actions.iter().map(|a| Pick { label: a.label(), value: a.id(), ..Pick::default() }).collect();
     let mut o = Overlay::new(OverlayKind::Commands, picks);
     o.insert("administrator");
     assert_eq!(o.selected_value().as_deref(), Some("new-admin-tab"));
