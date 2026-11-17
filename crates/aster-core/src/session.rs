@@ -95,12 +95,15 @@ impl App {
             NodeState::Pane(p) => {
                 let profile = Profile { elevated: false, ..p.profile.clone() };
                 let id: PaneId = self.new_pane_in(profile, p.cwd.clone());
-                if let Some(pane) = self.panes.get(&id) {
+                if let Some(pane) = self.panes.get_mut(&id) {
                     let mut t = pane.terminal.lock();
                     if !p.buffer.is_empty() {
                         t.feed(&restore_text(&p.buffer));
                     }
                     t.set_cwd(p.cwd.clone());
+                    let seen = t.output_seq();
+                    drop(t);
+                    pane.seen = seen;
                 }
                 Node::Leaf(id)
             }

@@ -10,6 +10,7 @@ use crate::view::{self, Chrome};
 use aster_gfx::render::Rect;
 use aster_vt::schemes::{self, Scheme};
 use aster_vt::{CursorShape, FairMutex, Options, Palette, Scroll, SelectionType, Sink, Size, TermMode, Terminal, VtEvent};
+pub use aster_vt::{Progress, ProgressState};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -75,6 +76,7 @@ pub enum Effect {
     Attention,
     Beep,
     Surface(crate::config::Backdrop),
+    Progress(Option<Progress>),
     Files { pane: PaneId, request: crate::files::FileRequest },
     SendFiles { pane: PaneId, files: Vec<std::path::PathBuf> },
     CancelTransfer { pane: PaneId },
@@ -95,6 +97,7 @@ pub(crate) struct Pane {
     pub pid: Option<u32>,
     pub size: Size,
     pub scroll_acc: f32,
+    pub seen: u64,
 }
 
 pub(crate) struct Tab {
@@ -180,6 +183,7 @@ pub struct App {
     last_tab: Option<PaneId>,
     current_tab: Option<PaneId>,
     pub(crate) broadcast: Option<Broadcast>,
+    pub(crate) shown_progress: Option<Progress>,
     swallow_control: bool,
     pub(crate) blink_on: bool,
     blink_since: Instant,
@@ -256,6 +260,7 @@ impl App {
             last_tab: None,
             current_tab: None,
             broadcast: None,
+            shown_progress: None,
             swallow_control: false,
             blink_on: true,
             blink_since: Instant::now(),
@@ -551,7 +556,7 @@ impl App {
         }
         let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
         let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
-        self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0 });
+        self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0 });
         id
     }
 
@@ -685,6 +690,26 @@ impl App {
 
     pub fn tab_count(&self) -> usize {
         self.tabs.len()
+    }
+
+    pub(crate) fn tab_activity(&self, index: usize) -> bool {
+        index != self.active
+            && self.tabs.get(index).is_some_and(|t| t.root.panes().iter().filter_map(|id| self.panes.get(id)).any(|p| p.exited.is_none() && p.terminal.lock().output_seq() != p.seen))
+    }
+
+    pub fn tab_progress(&self, index: usize) -> Option<aster_vt::Progress> {
+        let tab = self.tabs.get(index)?;
+        let focused = self.panes.get(&tab.focus).and_then(|p| p.terminal.lock().progress());
+        focused.or_else(|| tab.root.panes().iter().filter_map(|id| self.panes.get(id)).find_map(|p| p.terminal.lock().progress()))
+    }
+
+    pub(crate) fn mark_seen(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        for id in tab.root.panes() {
+            if let Some(p) = self.panes.get_mut(&id) {
+                p.seen = p.terminal.lock().output_seq();
+            }
+        }
     }
 
     pub fn tab_title(&self, index: usize) -> String {

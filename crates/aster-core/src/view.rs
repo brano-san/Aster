@@ -133,6 +133,12 @@ impl App {
         let s = self.scale;
         let (w, h) = self.size;
         self.chrome = chrome(w, h, s, self.tabs.len());
+        self.mark_seen();
+        let progress = self.tab_progress(self.active);
+        if progress != self.shown_progress {
+            self.shown_progress = progress;
+            self.effects.push(Effect::Progress(progress));
+        }
         let theme = self.theme;
         g.begin(Color::rgba(0));
         g.dl.rect(self.chrome.tab_bar, theme.chrome);
@@ -230,8 +236,26 @@ impl App {
                 }
                 None => {
                     let title = self.tab_title(i);
-                    g.text(text_x, y, &title, ui, if active { theme.text } else { theme.text_dim }, (text_end - text_x).max(0.0));
+                    let mut x = text_x;
+                    if self.tab_activity(i) {
+                        let d = (6.0 * s).round();
+                        g.dl.circle(Rect::new(x, r.y + ((r.h - d) / 2.0).round(), d, d), theme.accent);
+                        x += d + (6.0 * s).round();
+                    }
+                    g.text(x, y, &title, ui, if active { theme.text } else { theme.text_dim }, (text_end - x).max(0.0));
                 }
+            }
+            if let Some(progress) = self.tab_progress(i) {
+                use aster_vt::ProgressState;
+                let track = Rect::new(r.x + (10.0 * s).round(), r.bottom() - (4.0 * s).round(), r.w - (20.0 * s).round(), (2.0 * s).round().max(1.0));
+                let (fraction, ink) = match progress.state {
+                    ProgressState::Normal => (f32::from(progress.percent) / 100.0, theme.accent),
+                    ProgressState::Error => (1.0, theme.close_hover),
+                    ProgressState::Paused => (f32::from(progress.percent) / 100.0, theme.text_dim),
+                    ProgressState::Indeterminate => (1.0, theme.accent.alpha(0x80)),
+                };
+                g.dl.rect(track, theme.divider);
+                g.dl.rect(Rect::new(track.x, track.y, (track.w * fraction).round(), track.h), ink);
             }
             if show_close {
                 if slot.close.contains(mx, my) {
