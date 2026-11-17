@@ -200,12 +200,19 @@ pub struct CustomScheme {
     pub colors: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct System {
+    pub explorer_menu: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
     pub terminal: Terminal,
     pub appearance: Appearance,
     pub ssh: Ssh,
+    pub system: System,
     pub hotkeys: BTreeMap<String, Vec<String>>,
     pub profiles: Vec<Profile>,
     pub color_schemes: Vec<CustomScheme>,

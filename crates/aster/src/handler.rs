@@ -159,7 +159,17 @@ impl<P: Platform> Handler<P> {
                 s.app.set_config(config.clone());
             }
         }
+        let explorer = config.system.explorer_menu;
+        if explorer != self.config.system.explorer_menu {
+            self.apply_explorer_menu(explorer);
+        }
         self.config = config;
+    }
+
+    fn apply_explorer_menu(&self, enabled: bool) {
+        if !P::set_explorer_menu(aster_core::i18n::t("Open in Aster"), enabled) && enabled {
+            tracing::warn!("could not add the Explorer menu");
+        }
     }
 
     fn reload_config(&mut self) {
@@ -513,6 +523,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         self.windows.insert(window.id(), State { app, gfx: Gfx::new(text, ATLAS), renderer: None });
         if first {
             self.apply_window_prefs(window);
+            if self.config.system.explorer_menu {
+                self.apply_explorer_menu(true);
+            }
         }
         window.request_redraw();
     }

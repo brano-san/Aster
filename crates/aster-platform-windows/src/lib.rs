@@ -3,6 +3,7 @@
 mod conpty;
 mod d3d;
 mod elevate;
+mod explorer;
 mod instance;
 mod process;
 mod secrets;
@@ -80,6 +81,10 @@ impl Platform for Windows {
 
     fn instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>> {
         instance::listen(wake)
+    }
+
+    fn set_explorer_menu(label: &str, enabled: bool) -> bool {
+        explorer::set(label, enabled)
     }
 
     fn instance_send(message: &str) -> bool {

@@ -197,6 +197,7 @@ pub trait Platform: 'static {
     fn child_processes(pid: u32) -> Vec<String>;
     fn instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>>;
     fn instance_send(message: &str) -> bool;
+    fn set_explorer_menu(label: &str, enabled: bool) -> bool;
     fn beep() -> bool;
     fn can_elevate() -> bool;
     fn spawn_elevated(req: &SpawnRequest) -> Result<Spawned, PlatformError>;
