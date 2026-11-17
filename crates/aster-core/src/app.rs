@@ -167,6 +167,7 @@ pub struct App {
     pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
     swallow_chord: Option<Key>,
+    mouse_mods: Mods,
     swallow_control: bool,
     pub(crate) blink_on: bool,
     blink_since: Instant,
@@ -238,6 +239,7 @@ impl App {
             search: None,
             swallow_char: false,
             swallow_chord: None,
+            mouse_mods: Mods::NONE,
             swallow_control: false,
             blink_on: true,
             blink_since: Instant::now(),
@@ -476,7 +478,7 @@ impl App {
         self.apply_language();
         let options = self.options();
         for p in self.panes.values() {
-            p.terminal.lock().set_options(options);
+            p.terminal.lock().set_options(options.clone());
         }
         self.restyle();
     }
@@ -504,7 +506,7 @@ impl App {
             CursorStyle::Beam => CursorShape::Beam,
             CursorStyle::Underline => CursorShape::Underline,
         };
-        Options { scrollback: self.config.terminal.scrollback_lines, cursor, blink: self.config.terminal.cursor_blink }
+        Options { scrollback: self.config.terminal.scrollback_lines, cursor, blink: self.config.terminal.cursor_blink, word_separators: self.config.terminal.word_separator.clone() }
     }
 
     fn new_pane(&mut self, profile: Profile) -> PaneId {
@@ -1110,6 +1112,7 @@ impl App {
             Event::MouseMove { x, y } => self.on_move(x, y),
             Event::MouseDown { x, y, button, clicks } => self.on_down(x, y, button, clicks),
             Event::MouseUp { x, y, button } => self.on_up(x, y, button),
+            Event::Modifiers(mods) => self.mouse_mods = mods,
             Event::Wheel { dy, .. } => self.on_wheel(dy),
             Event::MouseLeave => {
                 self.mouse = (-1.0, -1.0);
@@ -1501,8 +1504,8 @@ impl App {
         }
         let Some((pane, rect)) = self.pane_at(x, y) else { return };
         self.focus_pane(pane);
-        let mods = Mods::NONE;
-        if self.report(pane, rect, MouseAction::Press(button), x, y, mods) {
+        let held = self.mouse_mods;
+        if !held.shift && self.report(pane, rect, MouseAction::Press(button), x, y, Mods { shift: false, ..held }) {
             self.drag = Drag::Report { pane, button };
             return;
         }
@@ -1511,6 +1514,7 @@ impl App {
                 let n = self.click_count(x, y, clicks);
                 let (line, col, side) = self.cell_at(pane, rect, x, y);
                 let ty = match n {
+                    1 if held.alt => SelectionType::Block,
                     1 => SelectionType::Simple,
                     2 => SelectionType::Semantic,
                     _ => SelectionType::Lines,
@@ -1518,9 +1522,13 @@ impl App {
                 if let Some(p) = self.panes.get(&pane) {
                     let mut t = p.terminal.lock();
                     let point = t.viewport_point(line, col);
-                    t.start_selection(ty, point, side);
-                    if n > 1 {
+                    if n == 1 && held.shift && t.has_selection() {
                         t.update_selection(point, side);
+                    } else {
+                        t.start_selection(ty, point, side);
+                        if n > 1 {
+                            t.update_selection(point, side);
+                        }
                     }
                 }
                 self.drag = Drag::Select { pane };

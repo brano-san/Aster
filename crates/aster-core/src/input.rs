@@ -74,6 +74,7 @@ pub enum Event {
     MouseMove { x: f32, y: f32 },
     MouseDown { x: f32, y: f32, button: MouseButton, clicks: u8 },
     MouseUp { x: f32, y: f32, button: MouseButton },
+    Modifiers(Mods),
     Wheel { dx: f32, dy: f32 },
     MouseLeave,
     Key { key: Key, mods: Mods, pressed: bool },

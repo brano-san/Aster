@@ -570,7 +570,10 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
                 self.mods = ModifiersState::empty();
                 handler.event(w, Event::Focus(focused));
             }
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+                handler.event(w, Event::Modifiers(mods(m.state())));
+            }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 let pressed = event.state == ElementState::Pressed;
                 let key = map_key(event.physical_key, &event.key_without_modifiers);

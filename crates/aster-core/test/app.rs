@@ -455,3 +455,51 @@ fn a_translucent_window_paints_each_background_once_over_a_clear_frame() {
     let covering: Vec<_> = g.dl.instances.iter().filter(|i| i.color >> 24 == alpha && i.rect[0] <= content.x && i.rect[1] <= content.y + 1.0 && i.rect[2] >= content.w && i.rect[3] >= content.h).collect();
     assert_eq!(covering.len(), 1, "the terminal background is drawn once");
 }
+
+fn select_with(a: &mut App, mods: Mods, from: (usize, usize), to: (usize, usize), clicks: u8) {
+    let m = a.metrics.unwrap();
+    let inner = view::pane_inner(a.layout.panes[0].1, 1.0);
+    let at = |(col, row): (usize, usize), part: f32| (inner.x + m.w * (col as f32 + part), inner.y + m.h * (row as f32 + 0.5));
+    let (x, y) = at(from, 0.2);
+    a.on_event(Event::Modifiers(mods));
+    a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks });
+    let (x, y) = at(to, 0.8);
+    a.on_event(Event::MouseMove { x, y });
+    a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+    a.on_event(Event::Modifiers(Mods::NONE));
+}
+
+fn selected(a: &App) -> String {
+    a.focused_terminal().unwrap().lock().selection_text().unwrap_or_default()
+}
+
+#[test]
+fn alt_drag_selects_a_block_and_shift_click_extends_the_selection() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.focused_terminal().unwrap().lock().feed(b"abcdef\r\nghijkl\r\nmnopqr");
+    a.frame(&mut g, false);
+    select_with(&mut a, Mods { alt: true, ..Mods::NONE }, (1, 0), (3, 2), 1);
+    assert_eq!(selected(&a), "bcd\nhij\nnop");
+    select_with(&mut a, Mods::NONE, (0, 0), (2, 0), 1);
+    assert_eq!(selected(&a), "abc");
+    select_with(&mut a, Mods { shift: true, ..Mods::NONE }, (4, 1), (4, 1), 1);
+    assert_eq!(selected(&a), "abcdef\nghijk");
+}
+
+#[test]
+fn double_click_words_stop_at_the_configured_separators() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.focused_terminal().unwrap().lock().feed(b"path/to:file.rs end");
+    a.frame(&mut g, false);
+    select_with(&mut a, Mods::NONE, (3, 0), (3, 0), 2);
+    assert_eq!(selected(&a), "path/to:file.rs");
+    let mut config = Config::default();
+    config.terminal.word_separator = " /:".into();
+    a.set_config(config);
+    select_with(&mut a, Mods::NONE, (9, 0), (9, 0), 2);
+    assert_eq!(selected(&a), "file.rs");
+}

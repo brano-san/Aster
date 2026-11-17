@@ -81,16 +81,17 @@ impl Dimensions for Size {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     pub scrollback: usize,
     pub cursor: CursorShape,
     pub blink: bool,
+    pub word_separators: String,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { scrollback: 25_000, cursor: CursorShape::Block, blink: true }
+        Self { scrollback: 25_000, cursor: CursorShape::Block, blink: true, word_separators: " ()[]{}'\"".into() }
     }
 }
 
@@ -126,7 +127,7 @@ impl Terminal {
     pub fn new(size: Size, options: Options, sink: Sink) -> Self {
         let cell = Arc::new(AtomicU32::new(0));
         let listener = Listener { sink, cell: cell.clone() };
-        Self { term: Term::new(config(options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, sniffer: osc::Sniffer::default(), cwd: None, search: None, scrollback: options.scrollback }
+        Self { term: Term::new(config(&options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, sniffer: osc::Sniffer::default(), cwd: None, search: None, scrollback: options.scrollback }
     }
 
     pub fn set_search(&mut self, query: &str, options: search::SearchOptions) -> Result<(), String> {
@@ -199,7 +200,7 @@ impl Terminal {
 
     pub fn set_options(&mut self, options: Options) {
         self.scrollback = options.scrollback;
-        self.term.set_options(config(options));
+        self.term.set_options(config(&options));
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -395,10 +396,11 @@ impl Terminal {
     }
 }
 
-fn config(options: Options) -> Config {
+fn config(options: &Options) -> Config {
     Config {
         scrolling_history: options.scrollback,
         default_cursor_style: CursorStyle { shape: options.cursor, blinking: options.blink },
+        semantic_escape_chars: options.word_separators.clone(),
         osc52: Osc52::OnlyCopy,
         ..Config::default()
     }
