@@ -150,6 +150,15 @@ impl Default for Terminal {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabBar {
+    #[default]
+    Always,
+    Auto,
+    Never,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Appearance {
@@ -168,6 +177,7 @@ pub struct Appearance {
     pub dock_hide_on_blur: bool,
     pub global_hotkey: String,
     pub language: String,
+    pub tab_bar: TabBar,
 }
 
 impl Default for Appearance {
@@ -188,6 +198,7 @@ impl Default for Appearance {
             dock_hide_on_blur: false,
             global_hotkey: "Ctrl-`".into(),
             language: "auto".into(),
+            tab_bar: TabBar::Always,
         }
     }
 }

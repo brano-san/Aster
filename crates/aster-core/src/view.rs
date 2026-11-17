@@ -62,6 +62,10 @@ pub fn chrome(w: f32, h: f32, s: f32, tabs: usize) -> Chrome {
     Chrome { tab_bar: Rect::new(0.0, 0.0, w, bar_h), tabs: slots, plus, min, max, close, content: Rect::new(0.0, bar_h, w, (h - bar_h).max(0.0)) }
 }
 
+pub fn bare_chrome(w: f32, h: f32) -> Chrome {
+    Chrome { tab_bar: Rect::new(0.0, 0.0, w, 0.0), content: Rect::new(0.0, 0.0, w, h), ..Chrome::default() }
+}
+
 pub fn pane_inner(r: Rect, s: f32) -> Rect {
     let p = (PAD * s).round();
     r.inset(p, p)
@@ -154,7 +158,7 @@ impl App {
         self.metrics = Some(m);
         let s = self.scale;
         let (w, h) = self.size;
-        self.chrome = chrome(w, h, s, self.tabs.len());
+        self.chrome = if self.tab_bar_hidden() { bare_chrome(w, h) } else { chrome(w, h, s, self.tabs.len()) };
         self.mark_seen();
         let progress = self.tab_progress(self.active);
         if progress != self.shown_progress {
@@ -164,7 +168,9 @@ impl App {
         let theme = self.theme;
         g.begin(Color::rgba(0));
         g.dl.rect(self.chrome.tab_bar, theme.chrome);
-        self.draw_tab_bar(g, maximized);
+        if !self.tab_bar_hidden() {
+            self.draw_tab_bar(g, maximized);
+        }
         let content = self.chrome.content;
         g.dl.rect(content, theme.background);
         let gap = (1.0 * s).round().max(1.0);
@@ -218,6 +224,7 @@ impl App {
         }
         self.draw_paste(g, m);
         self.draw_close(g);
+        self.draw_tab_toast(g);
         self.draw_menu(g);
         self.mark_drawn();
     }
@@ -690,6 +697,20 @@ impl App {
             }
             centered(g, *r, t(BUTTONS[i]), ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
         }
+    }
+
+    fn draw_tab_toast<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        let Some((text, _)) = self.tab_toast.clone() else { return };
+        let s = self.scale;
+        let theme = self.theme;
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let w = (g.measure(&text, ui) + 28.0 * s).min(self.size.0 - 24.0 * s).round();
+        let h = (32.0 * s).round();
+        let r = Rect::new(((self.size.0 - w) / 2.0).round(), (14.0 * s).round(), w, h);
+        g.dl.shadow(Rect::new(r.x, r.y + 3.0 * s, r.w, r.h), theme.shadow, (8.0 * s).round(), (12.0 * s).round());
+        g.dl.round_rect(r, theme.overlay, (8.0 * s).round());
+        g.dl.outline(r, theme.overlay_border, (8.0 * s).round(), (1.0 * s).round().max(1.0));
+        centered(g, r, &text, ui, theme.text);
     }
 
     fn draw_menu<B: TextBackend>(&mut self, g: &mut Gfx<B>) {

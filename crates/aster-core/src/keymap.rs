@@ -71,6 +71,7 @@ pub enum Action {
     ReportProblem,
     OpenLog,
     OpenConfigFile,
+    ToggleTabBar,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -140,6 +141,7 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::ReportProblem, "report-problem", "Report a problem"),
     (Action::OpenLog, "open-log", "Open the log folder"),
     (Action::OpenConfigFile, "open-config-file", "Open the config file in an editor"),
+    (Action::ToggleTabBar, "toggle-tab-bar", "Show or hide the tab bar"),
 ];
 
 impl Action {
@@ -344,6 +346,7 @@ pub fn defaults() -> Vec<(Action, &'static [&'static str])> {
         (ScrollToBottom, &["Ctrl-PageDown"]),
         (Search, &["Ctrl-Shift-F"]),
         (Settings, &["Ctrl-,"]),
+        (ToggleTabBar, &["Ctrl-Shift-B"]),
         (OpenFiles, &["Ctrl-Shift-O"]),
         (FillPassword, &["Ctrl-Shift-Enter"]),
     ]

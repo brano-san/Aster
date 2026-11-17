@@ -240,3 +240,26 @@ fn command_tabs_stay_after_success_and_are_not_restored() {
     assert_eq!(a.find_profile("local:a").map(|p| p.name), Some("Shell".to_owned()));
     assert!(a.find_profile("nope").is_none());
 }
+
+#[test]
+fn the_tab_bar_hides_by_setting_or_shortcut_and_tab_switches_show_their_name() {
+    let mut a = app(1);
+    assert!(!a.tab_bar_hidden());
+    let mut config = Config::default();
+    config.appearance.tab_bar = crate::config::TabBar::Auto;
+    a.set_config(config.clone());
+    assert!(a.tab_bar_hidden(), "one tab hides the bar in auto mode");
+    a.open_default_tab();
+    assert!(!a.tab_bar_hidden());
+    config.appearance.tab_bar = crate::config::TabBar::Never;
+    a.set_config(config);
+    assert!(a.tab_bar_hidden());
+    key(&mut a, Key::Char('1'), Mods { alt: true, ..Mods::NONE });
+    key(&mut a, Key::Char('2'), Mods { alt: true, ..Mods::NONE });
+    assert!(a.tab_toast.as_ref().is_some_and(|(text, _)| text.starts_with("2 / 2")));
+    assert_eq!(a.hit_test(400.0, 2.0), crate::input::HitArea::Client);
+    key(&mut a, Key::Char('B'), Mods { ctrl: true, shift: true, ..Mods::NONE });
+    assert!(!a.tab_bar_hidden(), "the shortcut overrides the setting");
+    let c = crate::view::bare_chrome(800.0, 600.0);
+    assert_eq!((c.content.y, c.content.h, c.tabs.len()), (0.0, 600.0, 0));
+}

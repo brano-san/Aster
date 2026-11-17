@@ -41,6 +41,7 @@ const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("under
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
 const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("auto", "Follow the system")];
 const BELLS: &[(&str, &str)] = &[("off", "Off"), ("visual", "Flash the pane"), ("audible", "System sound")];
+const TAB_BARS: &[(&str, &str)] = &[("always", "Always"), ("auto", "With two or more tabs"), ("never", "Never")];
 const BACKDROPS: &[(&str, &str)] = &[("none", "None"), ("acrylic", "Acrylic"), ("mica", "Mica")];
 const SSH_CLIENTS: &[(&str, &str)] = &[("native", "Built in"), ("system", "System OpenSSH")];
 const LANGUAGES: &[(&str, &str)] = &[("auto", "Automatic"), ("en", "English"), ("ru", "Russian")];
@@ -79,6 +80,7 @@ pub const SETTINGS: &[Setting] = &[
     item(APPEARANCE, "appearance.opacity", "Opacity", "Background opacity of the terminal", Control::Number { min: 0.2, max: 1.0, step: 0.05 }),
     item(APPEARANCE, "appearance.backdrop", "Backdrop", "System material behind the window on Windows 11", Control::Choice(BACKDROPS)),
     item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Text),
+    item(APPEARANCE, "appearance.tab-bar", "Tab bar", "Hide the tab bar and window buttons to leave only the terminal; Ctrl+Shift+B toggles it", Control::Choice(TAB_BARS)),
     item(APPEARANCE, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
     item(APPEARANCE, "appearance.last-tab-closes-window", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),
     item(DOCK, "appearance.dock", "Dock to edge", "Pin the window to a screen edge", Control::Choice(EDGES)),
