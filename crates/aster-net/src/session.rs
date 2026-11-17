@@ -138,6 +138,11 @@ fn read_loop(stream: &mut TcpStream, shared: &Shared, wire: &Sender<Vec<u8>>) ->
             Ok(mut telnet) => telnet.receive(bytes),
             Err(_) => return 1,
         };
+        for event in &events {
+            if let TelnetEvent::RemoteEcho(on) = event {
+                shared.remote_echo.store(*on, Ordering::SeqCst);
+            }
+        }
         for event in events {
             match event {
                 TelnetEvent::Data(data) => {
@@ -146,7 +151,7 @@ fn read_loop(stream: &mut TcpStream, shared: &Shared, wire: &Sender<Vec<u8>>) ->
                 TelnetEvent::Send(reply) => {
                     let _ = wire.send(reply);
                 }
-                TelnetEvent::RemoteEcho(on) => shared.remote_echo.store(on, Ordering::SeqCst),
+                TelnetEvent::RemoteEcho(_) => {}
             }
         }
     }
