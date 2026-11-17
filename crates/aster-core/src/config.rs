@@ -115,6 +115,7 @@ pub struct Terminal {
     pub search_options: SearchOptions,
     pub recover_tabs: bool,
     pub confirm_close: bool,
+    pub focus_follows_mouse: bool,
 }
 
 impl Default for Terminal {
@@ -142,6 +143,7 @@ impl Default for Terminal {
             search_options: SearchOptions::default(),
             recover_tabs: true,
             confirm_close: true,
+            focus_follows_mouse: false,
         }
     }
 }

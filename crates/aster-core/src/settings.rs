@@ -57,6 +57,7 @@ pub const SETTINGS: &[Setting] = &[
     item(TERMINAL, "terminal.profile", "Default profile", "Shell for new tabs and windows", Control::Profiles),
     item(TERMINAL, "terminal.recover-tabs", "Restore tabs", "Reopen tabs, splits and their folders on start", Control::Toggle),
     item(TERMINAL, "terminal.confirm-close", "Confirm closing running programs", "Ask before closing a tab, pane or window where a program is still running", Control::Toggle),
+    item(TERMINAL, "terminal.focus-follows-mouse", "Focus follows the mouse", "Moving the pointer over a pane makes it the active one", Control::Toggle),
     item(TERMINAL, "terminal.bell", "Bell", "What happens when a program rings the bell", Control::Choice(BELLS)),
     item(TERMINAL, "terminal.scroll-on-input", "Scroll on input", "Typing scrolls back to the bottom", Control::Toggle),
     item(INPUT, "terminal.copy-on-select", "Copy on select", "Selected text goes to the clipboard", Control::Toggle),

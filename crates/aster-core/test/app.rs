@@ -559,3 +559,20 @@ fn background_output_marks_the_tab_and_progress_reaches_the_taskbar() {
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Progress(None))));
     assert_eq!(a.tab_progress(1).map(|p| p.state), Some(ProgressState::Normal));
 }
+
+#[test]
+fn focus_follows_the_mouse_only_when_enabled() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.run(Action::SplitRight);
+    a.frame(&mut g, false);
+    let (left, right) = (a.layout.panes[0], a.layout.panes[1]);
+    assert_eq!(a.focused_pane(), Some(right.0));
+    a.on_event(Event::MouseMove { x: left.1.x + 10.0, y: left.1.y + 10.0 });
+    assert_eq!(a.focused_pane(), Some(right.0));
+    let mut config = Config::default();
+    config.terminal.focus_follows_mouse = true;
+    a.set_config(config);
+    a.on_event(Event::MouseMove { x: left.1.x + 10.0, y: left.1.y + 10.0 });
+    assert_eq!(a.focused_pane(), Some(left.0));
+}
