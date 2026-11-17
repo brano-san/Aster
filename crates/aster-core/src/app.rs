@@ -33,6 +33,7 @@ pub enum Broadcast {
     Tab,
     AllTabs,
 }
+const TOAST: Duration = Duration::from_millis(1200);
 const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +195,8 @@ pub struct App {
     current_tab: Option<PaneId>,
     pub(crate) broadcast: Option<Broadcast>,
     pub(crate) recent: Vec<String>,
+    pub(crate) tab_bar_override: Option<bool>,
+    pub(crate) tab_toast: Option<(String, Instant)>,
     pub(crate) shown_progress: Option<Progress>,
     swallow_control: bool,
     pub(crate) blink_on: bool,
@@ -275,6 +278,8 @@ impl App {
             current_tab: None,
             broadcast: None,
             recent: Vec::new(),
+            tab_bar_override: None,
+            tab_toast: None,
             shown_progress: None,
             swallow_control: false,
             blink_on: true,
@@ -717,6 +722,17 @@ impl App {
         self.tabs.len()
     }
 
+    pub fn tab_bar_hidden(&self) -> bool {
+        if let Some(hidden) = self.tab_bar_override {
+            return hidden;
+        }
+        match self.config.appearance.tab_bar {
+            crate::config::TabBar::Always => false,
+            crate::config::TabBar::Auto => self.tabs.len() < 2,
+            crate::config::TabBar::Never => true,
+        }
+    }
+
     pub(crate) fn tab_color(&self, index: usize) -> Option<aster_gfx::render::Color> {
         let tab = self.tabs.get(index)?;
         let own = tab.color.clone();
@@ -956,6 +972,10 @@ impl App {
             ReportProblem => self.effects.push(Effect::Open(report_url())),
             OpenLog => self.effects.push(Effect::OpenLog),
             OpenConfigFile => self.effects.push(Effect::OpenConfigFile),
+            ToggleTabBar => {
+                self.tab_bar_override = Some(!self.tab_bar_hidden());
+                self.dirty = true;
+            }
             Settings => self.open_settings(),
             RenameTab => self.start_rename(self.active),
             OpenFiles => self.open_files(),
@@ -1195,6 +1215,10 @@ impl App {
 
     pub fn on_timer(&mut self) {
         self.blink_armed = false;
+        if self.tab_toast.as_ref().is_some_and(|(_, t)| t.elapsed() >= TOAST) {
+            self.tab_toast = None;
+            self.dirty = true;
+        }
         if self.bell.is_some_and(|(_, t)| t.elapsed() >= BELL_FLASH) {
             self.bell = None;
             self.dirty = true;
@@ -1217,6 +1241,10 @@ impl App {
             (Some(now), Some(before)) => self.tabs[self.active].root.contains(before) || now == before,
             (now, before) => now == before,
         };
+        if !same && self.tab_bar_hidden() && self.tabs.len() > 1 && self.current_tab.is_some() {
+            self.tab_toast = Some((format!("{} / {}  {}", self.active + 1, self.tabs.len(), self.tab_title(self.active)), Instant::now()));
+            self.dirty = true;
+        }
         if !same {
             if let Some(before) = self.current_tab.filter(|p| self.panes.contains_key(p)) {
                 self.last_tab = Some(before);
@@ -1855,6 +1883,9 @@ impl App {
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> HitArea {
+        if self.tab_bar_hidden() {
+            return HitArea::Client;
+        }
         let c = &self.chrome;
         if c.min.contains(x, y) {
             HitArea::Minimize
@@ -1957,6 +1988,11 @@ impl App {
         }
         if let Some((_, t)) = self.bell {
             let left = BELL_FLASH.saturating_sub(t.elapsed()).as_millis().max(16) as u32;
+            self.effects.push(Effect::Timer(left));
+            self.blink_armed = false;
+        }
+        if let Some((_, t)) = &self.tab_toast {
+            let left = TOAST.saturating_sub(t.elapsed()).as_millis().max(16) as u32;
             self.effects.push(Effect::Timer(left));
             self.blink_armed = false;
         }
