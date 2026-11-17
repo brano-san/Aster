@@ -51,6 +51,19 @@ impl Platform for Linux {
         std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned())
     }
 
+    fn child_processes(pid: u32) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+        entries
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .filter_map(|child| {
+                let stat = std::fs::read_to_string(format!("/proc/{child}/stat")).ok()?;
+                let (name, rest) = stat.split_once('(').and_then(|(_, r)| r.rsplit_once(')'))?;
+                let parent: u32 = rest.split_whitespace().nth(1)?.parse().ok()?;
+                (parent == pid).then(|| name.to_owned())
+            })
+            .collect()
+    }
+
     fn downloads_dir() -> Option<PathBuf> {
         let home = Self::home_dir()?;
         let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));

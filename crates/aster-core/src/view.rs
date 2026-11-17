@@ -195,6 +195,7 @@ impl App {
             self.draw_overlay(g, &o);
         }
         self.draw_paste(g, m);
+        self.draw_close(g);
         self.draw_menu(g);
         self.mark_drawn();
     }
@@ -607,6 +608,52 @@ impl App {
             g.text(inner.x, y.round(), &tf("and {count} more", &[("count", &(lines.len() - PREVIEW_LINES).to_string())]), ui, theme.text_dim, inner.w);
         }
         let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
+        let (mx, my) = self.mouse;
+        for (i, r) in geo.buttons.iter().enumerate() {
+            let chosen = confirm.button == i;
+            if chosen {
+                g.dl.round_rect(*r, theme.accent, (5.0 * s).round());
+            } else {
+                g.dl.round_rect(*r, if r.contains(mx, my) { theme.button_hover } else { theme.tab_active }, (5.0 * s).round());
+                g.dl.outline(*r, theme.overlay_border, (5.0 * s).round(), line);
+            }
+            centered(g, *r, t(BUTTONS[i]), ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
+        }
+    }
+
+    fn draw_close<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        use crate::close::{CloseTarget, BUTTONS, LISTED};
+        let Some(geo) = self.close_geometry() else { return };
+        let Some(confirm) = self.close_confirm.clone() else { return };
+        let s = self.scale;
+        let theme = self.theme;
+        let radius = (8.0 * s).round();
+        let line = (1.0 * s).round().max(1.0);
+        g.dl.rect(self.chrome.content, theme.shadow.alpha(0x40));
+        g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 6.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (18.0 * s).round());
+        g.dl.round_rect(geo.frame, theme.overlay, radius);
+        g.dl.outline(geo.frame, theme.overlay_border, radius, line);
+        let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
+        let heading = match confirm.target {
+            CloseTarget::Pane(_) => t("Close the pane? These programs are still running:"),
+            CloseTarget::Tabs(ref reps) if reps.len() > 1 => t("Close the tabs? These programs are still running:"),
+            CloseTarget::Tabs(_) => t("Close the tab? These programs are still running:"),
+            CloseTarget::Window => t("Close the window? These programs are still running:"),
+        };
+        let ty = baseline(g, geo.title, title);
+        g.text(geo.title.x, ty, heading, title, theme.text, geo.title.w);
+        let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
+        let row = (20.0 * s).round();
+        for (k, name) in confirm.programs.iter().take(LISTED).enumerate() {
+            let r = Rect::new(geo.list.x, geo.list.y + k as f32 * row, geo.list.w, row);
+            let y = baseline(g, r, ui);
+            g.text(r.x + (8.0 * s).round(), y, name, ui, theme.text_dim, r.w);
+        }
+        if confirm.programs.len() > LISTED {
+            let r = Rect::new(geo.list.x, geo.list.y + LISTED as f32 * row, geo.list.w, row);
+            let y = baseline(g, r, ui);
+            g.text(r.x + (8.0 * s).round(), y, &tf("and {count} more", &[("count", &(confirm.programs.len() - LISTED).to_string())]), ui, theme.text_dim, r.w);
+        }
         let (mx, my) = self.mouse;
         for (i, r) in geo.buttons.iter().enumerate() {
             let chosen = confirm.button == i;

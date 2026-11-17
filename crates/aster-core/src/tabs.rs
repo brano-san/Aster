@@ -52,10 +52,9 @@ impl App {
 
     pub(crate) fn close_tabs_except(&mut self, keep: impl Fn(usize, usize) -> bool) {
         let active = self.active;
-        for i in (0..self.tabs.len()).rev() {
-            if !keep(i, active) {
-                self.close_tab(i);
-            }
+        let reps: Vec<_> = self.tabs.iter().enumerate().filter(|(i, _)| !keep(*i, active)).map(|(_, t)| t.focus).collect();
+        if !reps.is_empty() {
+            self.request_close(crate::close::CloseTarget::Tabs(reps));
         }
     }
 }

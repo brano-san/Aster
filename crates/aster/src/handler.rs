@@ -371,7 +371,7 @@ impl<P: Platform> Handler<P> {
             return;
         }
         let Some(path) = crate::session_path::<P>() else { return };
-        let state = SessionState { windows: self.windows.values().map(|s| s.app.snapshot()).filter(|w| !w.tabs.is_empty()).collect() };
+        let state = SessionState { windows: self.windows.values().map(|s| s.app.session_snapshot()).filter(|w| !w.tabs.is_empty()).collect() };
         let tmp = path.with_extension("tmp");
         if let Err(e) = std::fs::write(&tmp, state.to_text()).and_then(|_| std::fs::rename(&tmp, &path)) {
             tracing::warn!("{}: {e}", path.display());
@@ -445,6 +445,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         app.set_ssh(self.ssh.clone());
         app.set_system_language(&P::ui_language());
         app.set_cwd_probe(Arc::new(P::process_cwd));
+        app.set_children_probe(Arc::new(P::child_processes));
         app.set_can_elevate(P::can_elevate());
         let restored = (!self.pending.is_empty()).then(|| self.pending.remove(0)).is_some_and(|state| app.restore(&state));
         if !restored {
@@ -484,7 +485,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         if matches!(event, Event::Focus(false)) && self.config.appearance.dock_hide_on_blur && self.dock_spec().is_some() && self.windows.keys().min() == Some(&window.id()) {
             window.set_visible(false);
         }
-        if matches!(event, Event::SessionEnding) || (matches!(event, Event::CloseRequested) && self.windows.len() == 1) {
+        if matches!(event, Event::SessionEnding) {
             self.save_session();
             self.session_saved = true;
         }

@@ -85,6 +85,10 @@ impl App {
         Some(TabState { root, focus, title: t.title.clone() })
     }
 
+    pub fn session_snapshot(&self) -> WindowState {
+        self.closing.clone().unwrap_or_else(|| self.snapshot())
+    }
+
     pub fn snapshot(&self) -> WindowState {
         let tabs = (0..self.tabs.len()).filter_map(|i| self.tab_state(i)).collect::<Vec<_>>();
         WindowState { active: self.active.min(tabs.len().saturating_sub(1)), tabs }

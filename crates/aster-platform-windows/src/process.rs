@@ -47,3 +47,27 @@ pub fn current_directory(pid: u32) -> Option<String> {
 #[cfg(test)]
 #[path = "../test/process.rs"]
 mod tests;
+
+pub fn children(pid: u32) -> Vec<String> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let mut own = String::new();
+    let mut children = Vec::new();
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return children };
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+        while more {
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            if entry.th32ProcessID == pid {
+                own = name;
+            } else if entry.th32ParentProcessID == pid {
+                children.push(name);
+            }
+            more = Process32NextW(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    children.retain(|name| !name.eq_ignore_ascii_case(&own) && !name.eq_ignore_ascii_case("conhost.exe") && !name.eq_ignore_ascii_case("OpenConsole.exe"));
+    children
+}
