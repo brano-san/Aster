@@ -114,6 +114,7 @@ pub struct Terminal {
     pub environment: BTreeMap<String, String>,
     pub search_options: SearchOptions,
     pub recover_tabs: bool,
+    pub confirm_close: bool,
 }
 
 impl Default for Terminal {
@@ -140,6 +141,7 @@ impl Default for Terminal {
             environment: BTreeMap::new(),
             search_options: SearchOptions::default(),
             recover_tabs: true,
+            confirm_close: true,
         }
     }
 }

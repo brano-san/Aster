@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 pub type Shared = Arc<FairMutex<Terminal>>;
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 pub type CwdProbe = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
+pub type ChildrenProbe = Arc<dyn Fn(u32) -> Vec<String> + Send + Sync>;
 
 pub const BLINK: Duration = Duration::from_millis(530);
 const BELL_FLASH: Duration = Duration::from_millis(150);
@@ -153,6 +154,9 @@ pub struct App {
     home: Option<String>,
     ssh: Option<String>,
     cwd_probe: Option<CwdProbe>,
+    pub(crate) children_probe: Option<ChildrenProbe>,
+    pub(crate) close_confirm: Option<crate::close::CloseConfirm>,
+    pub(crate) closing: Option<crate::session::WindowState>,
     pub(crate) mouse: (f32, f32),
     pub(crate) drag: Drag,
     last_click: Option<(Instant, f32, f32, u8)>,
@@ -230,6 +234,9 @@ impl App {
             home,
             ssh: None,
             cwd_probe: None,
+            children_probe: None,
+            close_confirm: None,
+            closing: None,
             mouse: (-1.0, -1.0),
             drag: Drag::None,
             last_click: None,
@@ -364,6 +371,16 @@ impl App {
             }
             Key::Char('V') if mods.ctrl => self.effects.push(Effect::RequestPaste),
             _ => {}
+        }
+    }
+
+    pub fn set_children_probe(&mut self, probe: ChildrenProbe) {
+        self.children_probe = Some(probe);
+    }
+
+    pub(crate) fn close_tab_asking(&mut self, index: usize) {
+        if let Some(rep) = self.tabs.get(index).map(|t| t.focus) {
+            self.request_close(crate::close::CloseTarget::Tabs(vec![rep]));
         }
     }
 
@@ -932,7 +949,7 @@ impl App {
             ToggleFullscreen => self.effects.push(Effect::ToggleFullscreen),
             NewTab => self.open_default_tab(),
             NewWindow => self.effects.push(Effect::NewWindow),
-            CloseTab => self.close_tab(self.active),
+            CloseTab => self.close_tab_asking(self.active),
             DuplicateTab => {
                 if let Some(p) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.profile.clone()) {
                     self.open_tab(p);
@@ -981,7 +998,7 @@ impl App {
             }
             ClosePane => {
                 if let Some(p) = self.focused_pane() {
-                    self.close_pane(p);
+                    self.request_close(crate::close::CloseTarget::Pane(p));
                 }
             }
             Copy => {
@@ -1132,7 +1149,7 @@ impl App {
     }
 
     pub(crate) fn terminal_has_focus(&self) -> bool {
-        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.paste_confirm.is_none() && self.files.is_none()
+        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.paste_confirm.is_none() && self.close_confirm.is_none() && self.files.is_none()
     }
 
     fn blinking(&self) -> bool {
@@ -1293,7 +1310,8 @@ impl App {
                     self.write_focused(text.into_bytes());
                 }
             }
-            Event::CloseRequested | Event::SessionEnding => {
+            Event::CloseRequested => self.request_close(crate::close::CloseTarget::Window),
+            Event::SessionEnding => {
                 self.close_all();
                 self.effects.push(Effect::Close);
             }
@@ -1303,13 +1321,16 @@ impl App {
     }
 
     fn on_key(&mut self, key: Key, mods: Mods) {
-        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.settings.is_some() || self.files.is_some();
+        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.settings.is_some() || self.files.is_some();
         self.swallow_char = false;
         self.swallow_chord = None;
         self.swallow_control = modal &&matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
         if self.overlay.is_some() {
             self.overlay_key(key, mods);
             return;
+        }
+        if self.close_confirm.is_some() {
+            return self.close_key(key);
         }
         if self.paste_confirm.is_some() {
             return self.paste_key(key);
@@ -1387,7 +1408,7 @@ impl App {
             self.preview_scheme();
             return;
         }
-        if self.menu.is_some() || self.paste_confirm.is_some() {
+        if self.menu.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() {
             return;
         }
         if self.rename.is_some() {
@@ -1605,6 +1626,9 @@ impl App {
             }
             return;
         }
+        if self.close_confirm.is_some() {
+            return self.close_click(x, y);
+        }
         if self.paste_confirm.is_some() {
             return self.paste_click(x, y);
         }
@@ -1647,7 +1671,7 @@ impl App {
             }
             if let Some(i) = self.chrome.tabs.iter().position(|t| t.rect.contains(x, y)) {
                 match button {
-                    MouseButton::Middle => self.close_tab(i),
+                    MouseButton::Middle => self.close_tab_asking(i),
                     MouseButton::Left if self.chrome.tabs[i].close.contains(x, y) => self.drag = Drag::TabClose(i),
                     MouseButton::Left if self.click_count(x, y, clicks) >= 2 => self.start_rename(i),
                     MouseButton::Left => {
@@ -1742,7 +1766,7 @@ impl App {
                 HitArea::Maximize => Effect::ToggleMaximize,
                 _ => Effect::Close,
             }),
-            Drag::TabClose(i) if self.chrome.tabs.get(i).is_some_and(|t| t.close.contains(x, y)) => self.close_tab(i),
+            Drag::TabClose(i) if self.chrome.tabs.get(i).is_some_and(|t| t.close.contains(x, y)) => self.close_tab_asking(i),
             Drag::Plus if self.chrome.plus.contains(x, y) => self.open_default_tab(),
             _ => {}
         }

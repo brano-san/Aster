@@ -73,6 +73,10 @@ impl Platform for Windows {
         process::current_directory(pid)
     }
 
+    fn child_processes(pid: u32) -> Vec<String> {
+        process::children(pid)
+    }
+
     fn downloads_dir() -> Option<PathBuf> {
         use windows::Win32::UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
         let known = unsafe {
