@@ -150,6 +150,7 @@ impl App {
         self.layout = layout.clone();
         let focus = self.focused_pane();
         let split = layout.panes.len() > 1;
+        let broadcast = self.broadcast_targets();
         for (id, rect) in &layout.panes {
             self.draw_pane(g, *id, *rect, focus == Some(*id), m);
             if split && focus != Some(*id) {
@@ -166,6 +167,10 @@ impl App {
                 if let Some(text) = text {
                     self.draw_hint(g, *rect, text);
                 }
+            }
+            if broadcast.contains(id) {
+                let text = if self.broadcast == Some(crate::app::Broadcast::AllTabs) { t("Typing goes to every tab. Click here to stop.") } else { t("Typing goes to every pane of this tab. Click here to stop.") };
+                self.draw_hint(g, *rect, text);
             }
             if let Some((state, typed)) = self.offers.get(id).cloned() {
                 self.draw_offer(g, *rect, state, &typed);
@@ -510,7 +515,7 @@ impl App {
     fn draw_hint<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, text: &str) {
         let s = self.scale;
         let theme = self.theme;
-        let h = (30.0 * s).round();
+        let h = hint_height(s);
         let r = Rect::new(pane.x, pane.bottom() - h, pane.w, h);
         g.dl.rect(r, theme.overlay);
         g.dl.rect(Rect::new(r.x, r.y, r.w, (1.0 * s).round().max(1.0)), theme.accent);
@@ -1038,4 +1043,8 @@ impl App {
             }
         }
     }
+}
+
+pub fn hint_height(scale: f32) -> f32 {
+    (30.0 * scale).round()
 }

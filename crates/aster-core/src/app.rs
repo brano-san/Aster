@@ -23,6 +23,12 @@ pub const BLINK: Duration = Duration::from_millis(530);
 const BELL_FLASH: Duration = Duration::from_millis(150);
 const CLOSED_TABS: usize = 10;
 const PANE_STEP: f32 = 0.1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Broadcast {
+    Tab,
+    AllTabs,
+}
 const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,6 +179,7 @@ pub struct App {
     pub(crate) closed_tabs: Vec<crate::session::TabState>,
     last_tab: Option<PaneId>,
     current_tab: Option<PaneId>,
+    pub(crate) broadcast: Option<Broadcast>,
     swallow_control: bool,
     pub(crate) blink_on: bool,
     blink_since: Instant,
@@ -248,6 +255,7 @@ impl App {
             closed_tabs: Vec::new(),
             last_tab: None,
             current_tab: None,
+            broadcast: None,
             swallow_control: false,
             blink_on: true,
             blink_since: Instant::now(),
@@ -717,9 +725,29 @@ impl App {
     }
 
     fn write_focused(&mut self, bytes: Vec<u8>) {
+        if self.broadcast.is_some() {
+            for p in self.broadcast_targets() {
+                self.write(p, bytes.clone());
+            }
+            return;
+        }
         if let Some(p) = self.focused_pane() {
             self.write(p, bytes);
         }
+    }
+
+    pub(crate) fn broadcast_targets(&self) -> Vec<PaneId> {
+        let tabs: Vec<&Tab> = match self.broadcast {
+            None => return Vec::new(),
+            Some(Broadcast::Tab) => self.tabs.get(self.active).into_iter().collect(),
+            Some(Broadcast::AllTabs) => self.tabs.iter().collect(),
+        };
+        tabs.iter().flat_map(|t| t.root.panes()).filter(|p| self.panes.get(p).is_some_and(|p| p.exited.is_none())).collect()
+    }
+
+    fn toggle_broadcast(&mut self, scope: Broadcast) {
+        self.broadcast = if self.broadcast == Some(scope) { None } else { Some(scope) };
+        self.dirty = true;
     }
 
     fn mode(&self) -> TermMode {
@@ -900,6 +928,8 @@ impl App {
             PaneResizeUp => self.nudge_divider(Axis::Vertical, -PANE_STEP),
             PaneResizeDown => self.nudge_divider(Axis::Vertical, PANE_STEP),
             ExplodeTab => self.explode_tab(),
+            BroadcastToTab => self.toggle_broadcast(Broadcast::Tab),
+            BroadcastToAllTabs => self.toggle_broadcast(Broadcast::AllTabs),
             CombineTabs => self.combine_tabs(),
             ToggleLastTab => self.toggle_last_tab(),
             ReopenTab => self.reopen_tab(),
@@ -1610,6 +1640,11 @@ impl App {
             return;
         }
         let Some((pane, rect)) = self.pane_at(x, y) else { return };
+        if self.broadcast.is_some() && self.broadcast_targets().contains(&pane) && y >= rect.bottom() - view::hint_height(self.scale) {
+            self.broadcast = None;
+            self.dirty = true;
+            return;
+        }
         self.focus_pane(pane);
         let held = self.mouse_mods;
         if !held.shift && self.report(pane, rect, MouseAction::Press(button), x, y, Mods { shift: false, ..held }) {

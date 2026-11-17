@@ -65,6 +65,8 @@ pub enum Action {
     PaneResizeDown,
     ExplodeTab,
     CombineTabs,
+    BroadcastToTab,
+    BroadcastToAllTabs,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -128,6 +130,8 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::PaneResizeDown, "pane-resize-down", "Move the pane divider down"),
     (Action::ExplodeTab, "explode-tab", "Move each pane of the tab to its own tab"),
     (Action::CombineTabs, "combine-tabs", "Combine all tabs into one"),
+    (Action::BroadcastToTab, "pane-focus-all", "Type into all panes of the tab"),
+    (Action::BroadcastToAllTabs, "focus-all-tabs", "Type into all tabs"),
 ];
 
 impl Action {
