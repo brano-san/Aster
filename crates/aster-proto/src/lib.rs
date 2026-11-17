@@ -5,5 +5,6 @@ pub mod newline;
 pub mod prompt;
 pub mod quote;
 pub mod scripts;
+pub mod stream;
 pub mod telnet;
 mod utf8;

@@ -496,6 +496,7 @@ impl App {
             profile.env = source.env.clone();
             profile.icon = source.icon.clone();
             profile.color = source.color.clone();
+            profile.stream = source.stream.clone();
         }
         if ssh.is_some() {
             profile.icon = Some("ssh".into());
@@ -505,6 +506,7 @@ impl App {
             Some(existing) => {
                 profile.env = existing.env.clone();
                 profile.color = existing.color.clone();
+                profile.stream = existing.stream.clone();
                 *existing = profile;
             }
             None => config.profiles.push(profile),

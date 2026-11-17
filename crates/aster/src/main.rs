@@ -5,6 +5,7 @@ mod net;
 mod remote;
 mod serial;
 mod session;
+mod stream;
 mod zmodem;
 
 use aster_core::config::{Config, SchemeMode};

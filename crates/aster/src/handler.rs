@@ -163,13 +163,13 @@ impl<P: Platform> Handler<P> {
             Effect::Spawn { pane, launch, terminal } if launch.serial.is_some() => {
                 let spawned = crate::serial::connect(launch.serial.as_deref().unwrap_or_default());
                 let waker = self.waker.clone();
-                let session = Session::start(self.session_start(id, pane), spawned, terminal, move || waker.wake());
+                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal, move || waker.wake());
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal } if launch.socket.is_some() => {
-                let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str));
+                let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), launch.stream.as_ref().is_none_or(|s| s.input == aster_core::profile::InputMode::Normal));
                 let waker = self.waker.clone();
-                let session = Session::start(self.session_start(id, pane), spawned, terminal, move || waker.wake());
+                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal, move || waker.wake());
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
@@ -189,7 +189,7 @@ impl<P: Platform> Handler<P> {
                 }
                 self.remotes.insert((id, pane), remote.input);
                 let waker = self.waker.clone();
-                let session = Session::start(self.session_start(id, pane), remote.spawned, terminal, move || waker.wake());
+                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(remote.spawned, launch.stream.as_ref()), terminal, move || waker.wake());
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal } => {
@@ -220,7 +220,7 @@ impl<P: Platform> Handler<P> {
                             s.app.set_pane_pid(pane, pid);
                         }
                         let waker = self.waker.clone();
-                        let session = Session::start(self.session_start(id, pane), spawned, terminal, move || waker.wake());
+                        let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal, move || waker.wake());
                         self.sessions.insert((id, pane), session);
                     }
                     Err(e) => {

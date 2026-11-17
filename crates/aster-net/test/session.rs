@@ -5,7 +5,7 @@ use std::time::Instant;
 const WAIT: Duration = Duration::from_secs(5);
 
 fn options() -> Options {
-    Options { term: "xterm-256color".to_owned(), cols: 80, rows: 24 }
+    Options { term: "xterm-256color".to_owned(), cols: 80, rows: 24, echo: true }
 }
 
 fn serve(protocol: Protocol) -> (Connection, TcpStream) {
@@ -111,4 +111,17 @@ fn refused_connection_reports_and_fails() {
     assert_eq!(connection.exit.recv_timeout(Duration::from_secs(15)), Ok(1));
     let text: Vec<u8> = connection.output.try_iter().flatten().collect();
     assert!(String::from_utf8_lossy(&text).starts_with(&format!("Cannot connect to 127.0.0.1:{port}: ")));
+}
+
+#[test]
+fn echo_can_be_left_to_the_stream_layer() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connection = open(Address { protocol: Protocol::Raw, host: "127.0.0.1".to_owned(), port }, Options { echo: false, ..options() });
+    let (mut server, _) = listener.accept().unwrap();
+    server.set_read_timeout(Some(WAIT)).unwrap();
+    connection.input.send(Input::Data(b"q\r".to_vec())).unwrap();
+    assert_eq!(read_exact(&mut server, 3), b"q\r\n");
+    server.write_all(b"done").unwrap();
+    assert_eq!(output_until(&connection, b"done"), b"done");
 }

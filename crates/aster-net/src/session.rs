@@ -31,12 +31,14 @@ pub struct Options {
     pub term: String,
     pub cols: u16,
     pub rows: u16,
+    pub echo: bool,
 }
 
 struct Shared {
     protocol: Protocol,
     telnet: Mutex<Telnet>,
     remote_echo: AtomicBool,
+    echo: bool,
     output: Sender<Vec<u8>>,
 }
 
@@ -56,6 +58,7 @@ pub fn open(address: Address, options: Options) -> Connection {
             protocol: address.protocol,
             telnet: Mutex::new(Telnet::new(&options.term, options.cols, options.rows)),
             remote_echo: AtomicBool::new(false),
+            echo: options.echo,
             output: output_tx,
         });
         let code = match connect(&address) {
@@ -164,7 +167,7 @@ fn write_loop(stream: &mut TcpStream, shared: &Shared, input: &Receiver<Input>, 
         select! {
             recv(input) -> message => match message {
                 Ok(Input::Data(keys)) => {
-                    if !shared.remote_echo.load(Ordering::SeqCst) {
+                    if shared.echo && !shared.remote_echo.load(Ordering::SeqCst) {
                         let shown = echo.feed(&keys).echo;
                         if !shown.is_empty() {
                             let _ = shared.output.send(shown);

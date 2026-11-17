@@ -29,6 +29,7 @@ pub struct Launch {
     pub ssh: Option<String>,
     pub serial: Option<String>,
     pub socket: Option<String>,
+    pub stream: Option<crate::profile::Stream>,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
@@ -529,7 +530,7 @@ impl App {
             terminal.lock().set_cwd(inherited.clone());
         }
         let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
-        let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), serial: profile.serial.clone(), socket: profile.socket.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0 });
         id
     }
