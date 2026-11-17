@@ -2,6 +2,7 @@
 
 mod cli;
 mod handler;
+mod log;
 mod net;
 mod remote;
 mod serial;
@@ -55,7 +56,14 @@ pub fn format_placement(p: &Placement) -> String {
     format!("{} {} {} {} {}", p.x, p.y, p.width, p.height, u8::from(p.maximized))
 }
 
+pub fn log_path<P: Platform>() -> Option<PathBuf> {
+    P::config_dir().map(|d| d.join("aster.log"))
+}
+
 fn run<P: Platform>(request: cli::Request) -> Result<(), aster_platform::PlatformError> {
+    let log = log::open(log_path::<P>().as_deref());
+    tracing_subscriber::fmt().with_ansi(false).with_writer(move || log.clone()).with_max_level(tracing::Level::INFO).init();
+    tracing::info!("Aster {} on {} {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
     let windows = P::Windows::new()?;
     let waker = windows.waker();
     let alone = std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_INSTANCE").is_none();
@@ -79,6 +87,7 @@ fn say(text: &str) {
 }
 
 fn host<P: Platform>(base: &str, token: &str) -> i32 {
+    tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(tracing::Level::INFO).init();
     match P::connect_host(base) {
         Ok((reader, writer)) => match aster_platform::host::serve(reader, writer, token, &|req| P::spawn(req)) {
             Ok(()) => 0,
@@ -95,7 +104,6 @@ fn host<P: Platform>(base: &str, token: &str) -> i32 {
 }
 
 fn main() {
-    tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(tracing::Level::INFO).init();
     let args: Vec<String> = std::env::args().collect();
     if let (Some("--host"), Some(base), Some(token)) = (args.get(1).map(String::as_str), args.get(2), args.get(3)) {
         #[cfg(windows)]

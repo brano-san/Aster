@@ -68,6 +68,7 @@ pub enum Effect {
     RequestPaste,
     SaveConfig(String),
     Open(String),
+    OpenLog,
     Title(String),
     Cursor(CursorIcon),
     Minimize,
@@ -948,6 +949,8 @@ impl App {
             Search => self.open_search(),
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             SetTabColor => self.open_overlay(OverlayKind::TabColors),
+            ReportProblem => self.effects.push(Effect::Open(report_url())),
+            OpenLog => self.effects.push(Effect::OpenLog),
             Settings => self.open_settings(),
             RenameTab => self.start_rename(self.active),
             OpenFiles => self.open_files(),
@@ -2028,3 +2031,15 @@ pub fn inherit_cwd(profile: &Profile, inherited: Option<String>, home: Option<St
 #[cfg(test)]
 #[path = "../test/app.rs"]
 mod tests;
+
+pub fn report_url() -> String {
+    let body = format!("**What happened**\n\n\n**What you expected**\n\n\n**Steps**\n\n1. \n\n---\nAster {} on {} {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    let encoded: String = body
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => char::from(b).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    format!("https://github.com/brano-san/Aster/issues/new?body={encoded}")
+}

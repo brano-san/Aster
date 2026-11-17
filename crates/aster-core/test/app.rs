@@ -576,3 +576,15 @@ fn focus_follows_the_mouse_only_when_enabled() {
     a.on_event(Event::MouseMove { x: left.1.x + 10.0, y: left.1.y + 10.0 });
     assert_eq!(a.focused_pane(), Some(left.0));
 }
+
+#[test]
+fn reporting_a_problem_opens_a_prefilled_issue_with_the_version() {
+    let (mut a, _) = app();
+    a.run(Action::ReportProblem);
+    let url = a.take_effects().into_iter().find_map(|e| if let Effect::Open(u) = e { Some(u) } else { None }).unwrap();
+    assert!(url.starts_with("https://github.com/brano-san/Aster/issues/new?body="));
+    assert!(url.contains(&format!("Aster%20{}%20on%20{}", env!("CARGO_PKG_VERSION"), std::env::consts::OS)));
+    assert!(!url.contains(' ') && !url.contains('\n'));
+    a.run(Action::OpenLog);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::OpenLog)));
+}
