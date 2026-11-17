@@ -503,3 +503,35 @@ fn double_click_words_stop_at_the_configured_separators() {
     select_with(&mut a, Mods::NONE, (9, 0), (9, 0), 2);
     assert_eq!(selected(&a), "file.rs");
 }
+
+#[test]
+fn broadcast_input_reaches_every_pane_in_scope_until_its_bar_is_clicked() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.run(Action::SplitRight);
+    a.frame(&mut g, false);
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.take_effects();
+    let targets = |effects: &[Effect]| {
+        let mut panes: Vec<PaneId> = effects.iter().filter_map(|e| if let Effect::Write { pane, bytes } = e { (bytes == b"x").then_some(*pane) } else { None }).collect();
+        panes.sort();
+        panes
+    };
+    a.run(Action::BroadcastToAllTabs);
+    a.on_event(Event::Char('x'));
+    assert_eq!(targets(&a.take_effects()).len(), 3);
+    a.run(Action::BroadcastToTab);
+    a.on_event(Event::Char('x'));
+    assert_eq!(targets(&a.take_effects()).len(), 1, "the active tab has one pane");
+    a.activate(0);
+    a.frame(&mut g, false);
+    a.on_event(Event::Char('x'));
+    assert_eq!(targets(&a.take_effects()).len(), 2);
+    let (_, r) = a.layout.panes[1];
+    a.on_event(Event::MouseDown { x: r.x + 20.0, y: r.bottom() - 5.0, button: MouseButton::Left, clicks: 1 });
+    a.on_event(Event::MouseUp { x: r.x + 20.0, y: r.bottom() - 5.0, button: MouseButton::Left });
+    assert_eq!(a.broadcast, None);
+    a.on_event(Event::Char('x'));
+    assert_eq!(targets(&a.take_effects()).len(), 1);
+}
