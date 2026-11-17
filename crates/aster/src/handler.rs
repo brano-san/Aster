@@ -167,7 +167,7 @@ impl<P: Platform> Handler<P> {
     }
 
     fn apply_explorer_menu(&self, enabled: bool) {
-        if !P::set_explorer_menu(aster_core::i18n::t("Open in Aster"), enabled) && enabled {
+        if !P::set_explorer_menu(aster_core::settings::explorer_label(), enabled) && enabled {
             tracing::warn!("could not add the Explorer menu");
         }
     }
