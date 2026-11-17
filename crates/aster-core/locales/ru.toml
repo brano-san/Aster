@@ -235,5 +235,7 @@
 "No matches" = "Совпадений нет"
 "New administrator tab" = "Новая вкладка администратора"
 "Duplicate tab as administrator" = "Дублировать вкладку от имени администратора"
+"Switch to the last used tab" = "Перейти на последнюю использованную вкладку"
+"Reopen closed tab" = "Открыть закрытую вкладку"
 "Duplicate as administrator" = "Дублировать от имени администратора"
 "Administrator: {title}" = "Администратор: {title}"

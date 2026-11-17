@@ -124,6 +124,7 @@ impl App {
             item("Close other tabs", Action::CloseOtherTabs, n > 1),
             item("Close tabs to the right", Action::CloseTabsToRight, index + 1 < n),
             item("Close tabs to the left", Action::CloseTabsToLeft, index > 0),
+            item("Reopen closed tab", Action::ReopenTab, !self.closed_tabs.is_empty()),
         ];
         self.open_menu(entries, x, y);
     }
