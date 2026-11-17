@@ -78,20 +78,19 @@ impl App {
         })
     }
 
+    pub(crate) fn tab_state(&self, index: usize) -> Option<TabState> {
+        let t = self.tabs.get(index)?;
+        let root = self.node_state(&t.root)?;
+        let focus = t.root.panes().iter().position(|p| *p == t.focus).unwrap_or(0);
+        Some(TabState { root, focus, title: t.title.clone() })
+    }
+
     pub fn snapshot(&self) -> WindowState {
-        let tabs = self
-            .tabs
-            .iter()
-            .filter_map(|t| {
-                let root = self.node_state(&t.root)?;
-                let focus = t.root.panes().iter().position(|p| *p == t.focus).unwrap_or(0);
-                Some(TabState { root, focus, title: t.title.clone() })
-            })
-            .collect::<Vec<_>>();
+        let tabs = (0..self.tabs.len()).filter_map(|i| self.tab_state(i)).collect::<Vec<_>>();
         WindowState { active: self.active.min(tabs.len().saturating_sub(1)), tabs }
     }
 
-    fn build(&mut self, state: &NodeState) -> Node {
+    pub(crate) fn build(&mut self, state: &NodeState) -> Node {
         match state {
             NodeState::Pane(p) => {
                 let profile = Profile { elevated: false, ..p.profile.clone() };

@@ -124,3 +124,53 @@ fn administrator_tabs_need_support_and_a_local_shell() {
     b.run(Action::DuplicateAsAdmin);
     assert_eq!(b.tab_count(), 1, "remote tabs are not elevated");
 }
+
+fn alt() -> Mods {
+    Mods { alt: true, ..Mods::NONE }
+}
+
+#[test]
+fn the_last_used_tab_toggles_back_and_forth() {
+    let mut a = app(4);
+    key(&mut a, Key::Char('1'), alt());
+    key(&mut a, Key::Char('3'), alt());
+    a.on_event(Event::Timer);
+    a.run(Action::ToggleLastTab);
+    a.on_event(Event::Timer);
+    assert_eq!(a.active, 0);
+    a.run(Action::ToggleLastTab);
+    a.on_event(Event::Timer);
+    assert_eq!(a.active, 2);
+    key(&mut a, Key::Char('W'), Mods { ctrl: true, shift: true, ..Mods::NONE });
+    a.run(Action::ToggleLastTab);
+    assert_eq!(a.active, 0, "the last tab survives closing the current one");
+}
+
+#[test]
+fn closed_tabs_reopen_with_their_title_and_layout_in_reverse_order() {
+    let mut a = app(2);
+    a.tabs[1].title = Some("logs".into());
+    a.run(Action::SplitRight);
+    a.panes.values().for_each(|p| p.terminal.lock().feed(b"tail line"));
+    a.run(Action::CloseTab);
+    a.run(Action::CloseTab);
+    assert_eq!(a.tabs.len(), 0);
+    assert_eq!(a.closed_tabs.len(), 2);
+    let mut a = app(2);
+    a.tabs[1].title = Some("logs".into());
+    a.run(Action::SplitRight);
+    a.panes.values().for_each(|p| p.terminal.lock().feed(b"tail line"));
+    a.run(Action::CloseTab);
+    a.take_effects();
+    assert_eq!(a.tabs.len(), 1);
+    a.run(Action::ReopenTab);
+    assert_eq!(a.tabs.len(), 2);
+    assert_eq!(a.active, 1);
+    assert_eq!(a.tab_title(1), "logs");
+    assert_eq!(a.tabs[1].root.panes().len(), 2);
+    let text = a.focused_terminal().unwrap().lock().tail_lines(10).join("\n");
+    assert!(text.contains("tail line"));
+    assert_eq!(a.take_effects().iter().filter(|e| matches!(e, Effect::Spawn { .. })).count(), 0, "spawns wait for the next frame");
+    a.run(Action::ReopenTab);
+    assert_eq!(a.tabs.len(), 2, "nothing left to reopen");
+}

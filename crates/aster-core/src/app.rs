@@ -21,6 +21,7 @@ pub type CwdProbe = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
 
 pub const BLINK: Duration = Duration::from_millis(530);
 const BELL_FLASH: Duration = Duration::from_millis(150);
+const CLOSED_TABS: usize = 10;
 const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -168,6 +169,9 @@ pub struct App {
     swallow_char: bool,
     swallow_chord: Option<Key>,
     mouse_mods: Mods,
+    pub(crate) closed_tabs: Vec<crate::session::TabState>,
+    last_tab: Option<PaneId>,
+    current_tab: Option<PaneId>,
     swallow_control: bool,
     pub(crate) blink_on: bool,
     blink_since: Instant,
@@ -240,6 +244,9 @@ impl App {
             swallow_char: false,
             swallow_chord: None,
             mouse_mods: Mods::NONE,
+            closed_tabs: Vec::new(),
+            last_tab: None,
+            current_tab: None,
             swallow_control: false,
             blink_on: true,
             blink_since: Instant::now(),
@@ -602,6 +609,12 @@ impl App {
     }
 
     fn remove_tab(&mut self, index: usize) {
+        if let Some(state) = self.tab_state(index) {
+            if self.closed_tabs.len() == CLOSED_TABS {
+                self.closed_tabs.remove(0);
+            }
+            self.closed_tabs.push(state);
+        }
         let tab = self.tabs.remove(index);
         for id in tab.root.panes() {
             if let Some(p) = self.panes.remove(&id) {
@@ -881,6 +894,8 @@ impl App {
                     self.open_admin_tab(p);
                 }
             }
+            ToggleLastTab => self.toggle_last_tab(),
+            ReopenTab => self.reopen_tab(),
             NextTab => self.cycle(1),
             PreviousTab => self.cycle(-1),
             MoveTabLeft => self.move_tab(-1),
@@ -1076,6 +1091,44 @@ impl App {
     }
 
     pub fn on_event(&mut self, event: Event) {
+        self.handle(event);
+        self.track_tab();
+    }
+
+    fn track_tab(&mut self) {
+        let current = self.tabs.get(self.active).map(|t| t.focus);
+        let same = match (current, self.current_tab) {
+            (Some(now), Some(before)) => self.tabs[self.active].root.contains(before) || now == before,
+            (now, before) => now == before,
+        };
+        if !same {
+            if let Some(before) = self.current_tab.filter(|p| self.panes.contains_key(p)) {
+                self.last_tab = Some(before);
+            }
+        }
+        self.current_tab = current;
+    }
+
+    fn toggle_last_tab(&mut self) {
+        let Some(last) = self.last_tab else { return };
+        if let Some(index) = self.tabs.iter().position(|t| t.root.contains(last)) {
+            self.activate(index);
+        }
+    }
+
+    fn reopen_tab(&mut self) {
+        let Some(state) = self.closed_tabs.pop() else { return };
+        let root = self.build(&state.root);
+        let order = root.panes();
+        let focus = order.get(state.focus).or(order.first()).copied().unwrap_or(0);
+        let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
+        self.tabs.insert(at, Tab { root, focus, zoomed: None, title: state.title });
+        self.active = at;
+        self.overlay = None;
+        self.dirty = true;
+    }
+
+    fn handle(&mut self, event: Event) {
         match event {
             Event::Resized { width, height } => {
                 self.size = (width as f32, height as f32);
