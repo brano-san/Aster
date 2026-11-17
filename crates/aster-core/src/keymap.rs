@@ -59,6 +59,12 @@ pub enum Action {
     DuplicateAsAdmin,
     ToggleLastTab,
     ReopenTab,
+    PaneResizeLeft,
+    PaneResizeRight,
+    PaneResizeUp,
+    PaneResizeDown,
+    ExplodeTab,
+    CombineTabs,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -116,6 +122,12 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::DuplicateAsAdmin, "duplicate-as-admin", "Duplicate tab as administrator"),
     (Action::ToggleLastTab, "toggle-last-tab", "Switch to the last used tab"),
     (Action::ReopenTab, "reopen-tab", "Reopen closed tab"),
+    (Action::PaneResizeLeft, "pane-resize-left", "Move the pane divider to the left"),
+    (Action::PaneResizeRight, "pane-resize-right", "Move the pane divider to the right"),
+    (Action::PaneResizeUp, "pane-resize-up", "Move the pane divider up"),
+    (Action::PaneResizeDown, "pane-resize-down", "Move the pane divider down"),
+    (Action::ExplodeTab, "explode-tab", "Move each pane of the tab to its own tab"),
+    (Action::CombineTabs, "combine-tabs", "Combine all tabs into one"),
 ];
 
 impl Action {
@@ -297,6 +309,10 @@ pub fn defaults() -> Vec<(Action, &'static [&'static str])> {
         (PaneNavPrevious, &["Ctrl-Alt-["]),
         (PaneNavNext, &["Ctrl-Alt-]"]),
         (PaneMaximize, &["Ctrl-Alt-Enter"]),
+        (PaneResizeLeft, &["Alt-Shift-Left"]),
+        (PaneResizeRight, &["Alt-Shift-Right"]),
+        (PaneResizeUp, &["Alt-Shift-Up"]),
+        (PaneResizeDown, &["Alt-Shift-Down"]),
         (CtrlC, &["Ctrl-C"]),
         (Copy, &["Ctrl-Shift-C"]),
         (Paste, &["Ctrl-Shift-V", "Shift-Insert"]),

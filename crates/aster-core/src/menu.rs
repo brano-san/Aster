@@ -119,6 +119,8 @@ impl App {
             Entry::Separator,
             item("Move left", Action::MoveTabLeft, index > 0),
             item("Move right", Action::MoveTabRight, index + 1 < n),
+            item("Panes to separate tabs", Action::ExplodeTab, self.tabs.get(index).is_some_and(|t| t.root.panes().len() > 1)),
+            item("Combine all tabs", Action::CombineTabs, n > 1),
             Entry::Separator,
             item("Close", Action::CloseTab, true),
             item("Close other tabs", Action::CloseOtherTabs, n > 1),
