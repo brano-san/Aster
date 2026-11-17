@@ -49,6 +49,9 @@ pub struct Handler<P: Platform> {
     pending: Vec<WindowState>,
     session_saved: bool,
     applied: Option<(String, Option<DockSpec>)>,
+    requests: Option<std::sync::mpsc::Receiver<String>>,
+    startup: Option<crate::cli::Request>,
+    last_focused: Option<WindowId>,
 }
 
 fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
@@ -88,7 +91,53 @@ impl<P: Platform> Handler<P> {
         let (elevated_tx, elevated_rx) = unbounded();
         let config_stamp = stamp(&crate::config_path::<P>());
         let pending = if config.terminal.recover_tabs { load_session::<P>() } else { Vec::new() };
-        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None }
+        Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_stamp, ssh, pending, session_saved: false, applied: None, requests: None, startup: None, last_focused: None }
+    }
+
+    pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
+        self.requests = requests;
+        self.startup = startup;
+    }
+
+    fn request_target(&self) -> Option<WindowId> {
+        self.last_focused.filter(|id| self.windows.contains_key(id)).or_else(|| self.windows.keys().min().copied())
+    }
+
+    fn serve_request(app: &mut App, request: crate::cli::Request) -> bool {
+        use crate::cli::Command;
+        match request.command {
+            Command::Window => return false,
+            Command::Open { dir } => {
+                if let Some(profile) = app.default_profile() {
+                    app.open_tab_at(profile, Some(dir));
+                }
+            }
+            Command::Run { command } => app.run_command(&command, request.cwd),
+            Command::Profile { name } => match app.find_profile(&name) {
+                Some(profile) => app.open_tab(profile),
+                None => tracing::warn!("no profile named {name}"),
+            },
+            Command::Paste { text } => app.paste(text),
+        }
+        true
+    }
+
+    fn drain_requests(&mut self, window: &Win<P>) {
+        if self.request_target() != Some(window.id()) {
+            return;
+        }
+        let incoming: Vec<String> = self.requests.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        for text in incoming {
+            let Some(request) = crate::cli::Request::decode(&text) else { continue };
+            let handled = self.windows.get_mut(&window.id()).is_some_and(|s| Self::serve_request(&mut s.app, request));
+            if !handled {
+                let dark = self.windows.get(&window.id()).is_none_or(|s| s.app.is_dark());
+                window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark });
+            }
+            window.set_visible(true);
+            window.activate();
+            window.request_redraw();
+        }
     }
 
     fn save_config(&mut self, text: String) {
@@ -448,8 +497,13 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         app.set_children_probe(Arc::new(P::child_processes));
         app.set_can_elevate(P::can_elevate());
         let restored = (!self.pending.is_empty()).then(|| self.pending.remove(0)).is_some_and(|state| app.restore(&state));
-        if !restored {
+        let startup = self.startup.take().filter(|r| r.command != crate::cli::Command::Window);
+        let opens_tab = startup.as_ref().is_some_and(|r| !matches!(r.command, crate::cli::Command::Paste { .. }));
+        if !restored && !opens_tab {
             app.open_default_tab();
+        }
+        if let Some(request) = startup {
+            Self::serve_request(&mut app, request);
         }
         for _ in 0..std::mem::take(&mut self.pending).len() {
             window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: app.is_dark() });
@@ -465,6 +519,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
 
     fn event(&mut self, window: &Win<P>, event: Event) {
         if matches!(event, Event::Focus(true)) {
+            self.last_focused = Some(window.id());
             self.reload_config();
             if self.windows.keys().min() == Some(&window.id()) {
                 self.apply_window_prefs(window);
@@ -555,6 +610,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     }
 
     fn woken(&mut self, window: &Win<P>) {
+        self.drain_requests(window);
         self.drain_exits();
         if let Some(s) = self.windows.get_mut(&window.id()) {
             s.app.woken();

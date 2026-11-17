@@ -153,6 +153,8 @@ dependencies = [
  "aster-vt",
  "aster-zmodem",
  "crossbeam-channel",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

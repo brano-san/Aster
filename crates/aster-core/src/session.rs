@@ -67,7 +67,7 @@ impl App {
     fn node_state(&self, node: &Node) -> Option<NodeState> {
         Some(match node {
             Node::Leaf(id) => {
-                let pane = self.panes.get(id)?;
+                let pane = self.panes.get(id).filter(|p| !p.profile.hold)?;
                 let cwd = self.pane_cwd(*id);
                 let t = pane.terminal.lock();
                 NodeState::Pane(Box::new(PaneState { profile: pane.profile.clone(), cwd, buffer: t.tail_lines(BUFFER_LINES) }))

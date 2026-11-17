@@ -3,6 +3,7 @@
 mod conpty;
 mod d3d;
 mod elevate;
+mod instance;
 mod process;
 mod secrets;
 mod dwrite;
@@ -75,6 +76,14 @@ impl Platform for Windows {
 
     fn child_processes(pid: u32) -> Vec<String> {
         process::children(pid)
+    }
+
+    fn instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>> {
+        instance::listen(wake)
+    }
+
+    fn instance_send(message: &str) -> bool {
+        instance::send(message)
     }
 
     fn downloads_dir() -> Option<PathBuf> {
@@ -152,5 +161,12 @@ impl Platform for Windows {
         unsafe {
             ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
         }
+    }
+}
+
+pub fn attach_console() {
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
     }
 }

@@ -24,6 +24,8 @@ pub struct Profile {
     pub builtin: bool,
     #[serde(skip)]
     pub elevated: bool,
+    #[serde(skip)]
+    pub hold: bool,
 }
 
 impl Profile {

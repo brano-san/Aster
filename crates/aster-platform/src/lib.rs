@@ -195,6 +195,8 @@ pub trait Platform: 'static {
     fn ssh_command() -> Option<String>;
     fn process_cwd(pid: u32) -> Option<String>;
     fn child_processes(pid: u32) -> Vec<String>;
+    fn instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>>;
+    fn instance_send(message: &str) -> bool;
     fn beep() -> bool;
     fn can_elevate() -> bool;
     fn spawn_elevated(req: &SpawnRequest) -> Result<Spawned, PlatformError>;

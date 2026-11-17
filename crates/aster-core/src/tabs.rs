@@ -8,6 +8,28 @@ pub struct Rename {
 }
 
 impl App {
+    pub fn open_tab_at(&mut self, profile: crate::profile::Profile, cwd: Option<String>) {
+        let id = self.new_pane_in(profile, cwd);
+        let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
+        self.tabs.insert(at, crate::app::Tab { root: crate::panes::Node::Leaf(id), focus: id, zoomed: None, title: None, color: None });
+        self.active = at;
+        self.overlay = None;
+        self.dirty = true;
+    }
+
+    pub fn find_profile(&self, name: &str) -> Option<crate::profile::Profile> {
+        let name = name.trim();
+        self.profiles.iter().find(|p| p.id == name).or_else(|| self.profiles.iter().find(|p| p.name.eq_ignore_ascii_case(name))).cloned()
+    }
+
+    pub fn run_command(&mut self, command: &[String], cwd: Option<String>) {
+        let Some((program, args)) = command.split_first() else { return };
+        let mut profile = crate::profile::Profile::new("run", &command.join(" "), program, &[]);
+        profile.args = args.to_vec();
+        profile.hold = true;
+        self.open_tab_at(profile, cwd);
+    }
+
     pub fn renaming(&self) -> Option<&Rename> {
         self.rename.as_ref()
     }

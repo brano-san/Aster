@@ -2,6 +2,7 @@
 
 mod fonts;
 mod gl;
+mod instance;
 mod pty;
 mod shells;
 mod text;
@@ -62,6 +63,14 @@ impl Platform for Linux {
                 (parent == pid).then(|| name.to_owned())
             })
             .collect()
+    }
+
+    fn instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>> {
+        instance::listen(wake)
+    }
+
+    fn instance_send(message: &str) -> bool {
+        instance::send(message)
     }
 
     fn downloads_dir() -> Option<PathBuf> {
