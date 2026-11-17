@@ -1881,7 +1881,7 @@ impl App {
             return;
         }
         p.exited = Some(code);
-        if code == Some(0) {
+        if code == Some(0) && !p.profile.hold {
             self.close_pane(pane);
         } else {
             let text = match code {

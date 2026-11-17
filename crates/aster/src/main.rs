@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cli;
 mod handler;
 mod net;
 mod remote;
@@ -9,7 +10,7 @@ mod stream;
 mod zmodem;
 
 use aster_core::config::{Config, SchemeMode};
-use aster_platform::{Placement, Platform, WindowOptions, WindowSystem};
+use aster_platform::{Placement, Platform, Waker, WindowOptions, WindowSystem};
 use std::path::PathBuf;
 
 pub fn config_path<P: Platform>() -> Option<PathBuf> {
@@ -54,14 +55,27 @@ pub fn format_placement(p: &Placement) -> String {
     format!("{} {} {} {} {}", p.x, p.y, p.width, p.height, u8::from(p.maximized))
 }
 
-fn run<P: Platform>() -> Result<(), aster_platform::PlatformError> {
+fn run<P: Platform>(request: cli::Request) -> Result<(), aster_platform::PlatformError> {
+    let windows = P::Windows::new()?;
+    let waker = windows.waker();
+    let alone = std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_INSTANCE").is_none();
+    let wake = waker.clone();
+    let requests = if alone { None } else { P::instance_listen(std::sync::Arc::new(move || wake.wake())) };
+    if !alone && requests.is_none() && P::instance_send(&request.encode()) {
+        return Ok(());
+    }
     let config = load_config::<P>();
     let dark = config.appearance.color_scheme_mode != SchemeMode::Light;
     let placement = state_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| parse_placement(&t));
-    let windows = P::Windows::new()?;
-    let waker = windows.waker();
-    let handler = handler::Handler::<P>::new(config, waker);
+    let mut handler = handler::Handler::<P>::new(config, waker);
+    handler.set_instance(requests, Some(request));
     windows.run(WindowOptions { title: "Aster".into(), placement, dark }, handler)
+}
+
+fn say(text: &str) {
+    #[cfg(windows)]
+    aster_platform_windows::attach_console();
+    println!("{text}");
 }
 
 fn host<P: Platform>(base: &str, token: &str) -> i32 {
@@ -90,10 +104,27 @@ fn main() {
         let code = host::<aster_platform_linux::Linux>(base, token);
         std::process::exit(code);
     }
+    let cwd = std::env::current_dir().ok();
+    let command = match cli::parse(&args[1..], cwd.as_deref()) {
+        cli::Parsed::Request(command) => command,
+        cli::Parsed::Version => {
+            say(&format!("Aster {}", env!("CARGO_PKG_VERSION")));
+            return;
+        }
+        cli::Parsed::Help => {
+            say(cli::USAGE);
+            return;
+        }
+        cli::Parsed::Error(message) => {
+            say(&format!("{message}\n\n{}", cli::USAGE));
+            std::process::exit(2);
+        }
+    };
+    let request = cli::Request { cwd: cwd.map(|d| d.to_string_lossy().into_owned()), command };
     #[cfg(windows)]
-    let result = run::<aster_platform_windows::Windows>();
+    let result = run::<aster_platform_windows::Windows>(request);
     #[cfg(target_os = "linux")]
-    let result = run::<aster_platform_linux::Linux>();
+    let result = run::<aster_platform_linux::Linux>(request);
     if let Err(e) = result {
         tracing::error!("{e}");
         std::process::exit(1);

@@ -225,3 +225,18 @@ fn tab_colors_come_from_the_picker_or_the_profile_and_survive_the_session() {
     a.panes.get_mut(&pane).unwrap().profile.color = Some("#4C8DF6".into());
     assert!(a.tab_color(0).is_some());
 }
+
+#[test]
+fn command_tabs_stay_after_success_and_are_not_restored() {
+    let mut a = app(1);
+    a.run_command(&["make".to_owned(), "-j".to_owned(), "8".to_owned()], Some("/src".into()));
+    assert_eq!(a.tabs.len(), 2);
+    let pane = a.tabs[1].focus;
+    assert_eq!((a.panes[&pane].profile.command.as_str(), a.panes[&pane].profile.args.clone()), ("make", vec!["-j".to_owned(), "8".to_owned()]));
+    a.exited(pane, Some(0));
+    assert_eq!(a.tabs.len(), 2, "a finished command keeps its output");
+    assert_eq!(a.snapshot().tabs.len(), 1, "command tabs never run again from a saved session");
+    assert_eq!(a.find_profile("shell").map(|p| p.id), Some("local:a".to_owned()));
+    assert_eq!(a.find_profile("local:a").map(|p| p.name), Some("Shell".to_owned()));
+    assert!(a.find_profile("nope").is_none());
+}
