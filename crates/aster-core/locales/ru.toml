@@ -250,6 +250,8 @@
 "Close the tab? These programs are still running:" = "Закрыть вкладку? В ней ещё работают программы:"
 "Close the window? These programs are still running:" = "Закрыть окно? В нём ещё работают программы:"
 "Confirm closing running programs" = "Подтверждать закрытие работающих программ"
+"Focus follows the mouse" = "Фокус следует за мышью"
+"Moving the pointer over a pane makes it the active one" = "Панель под указателем мыши становится активной"
 "Ask before closing a tab, pane or window where a program is still running" = "Спрашивать перед закрытием вкладки, панели или окна, где ещё работает программа"
 "Type into all panes of the tab" = "Вводить во все панели вкладки"
 "Type into all tabs" = "Вводить во все вкладки"

@@ -1551,6 +1551,12 @@ impl App {
             self.set_cursor(CursorIcon::Default);
             return;
         }
+        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.rename.is_some();
+        if self.config.terminal.focus_follows_mouse && !modal && self.drag == Drag::None {
+            if let Some((pane, _)) = self.pane_at(x, y) {
+                self.focus_pane(pane);
+            }
+        }
         let link = self.link_at(x, y);
         if link != self.hover_link {
             self.hover_link = link;
