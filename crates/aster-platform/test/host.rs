@@ -63,7 +63,7 @@ fn fake_shell(seen: Seen) -> Spawned {
             }
         }
     });
-    Spawned { pty: Box::new(FakePty(seen, exit)), reader: Box::new(out_read), writer: Box::new(in_write), wait: Box::new(move || exit_rx.recv().ok()) }
+    Spawned { pty: Box::new(FakePty(seen, exit)), reader: Box::new(out_read), writer: Box::new(in_write), raw: None, wait: Box::new(move || exit_rx.recv().ok()) }
 }
 
 fn connected(token_host: &'static str, token_client: &str, seen: Seen, spawn_fails: bool) -> Result<Spawned, PlatformError> {
@@ -120,7 +120,7 @@ fn frames_round_trip_and_oversized_ones_are_refused() {
 #[test]
 fn a_hosted_shell_echoes_resizes_and_reports_its_exit_code() {
     let seen = Seen::default();
-    let Spawned { pty, mut reader, mut writer, wait } = connected("t0ken", "t0ken", seen.clone(), false).unwrap();
+    let Spawned { pty, mut reader, mut writer, wait, .. } = connected("t0ken", "t0ken", seen.clone(), false).unwrap();
     assert_eq!(pty.pid(), 4242);
     writer.write_all(b"ls").unwrap();
     assert!(read_some(&mut *reader, "echo:ls").contains("echo:ls"));

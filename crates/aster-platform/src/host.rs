@@ -196,6 +196,7 @@ pub fn client(mut reader: Reader, writer: Writer, token: &str, req: &SpawnReques
         pty: Box::new(Remote { writer: writer.clone(), pid }),
         reader: Box::new(Output { rx: out_rx, buf: Vec::new(), at: 0 }),
         writer: Box::new(Keys(writer)),
+        raw: None,
         wait: Box::new(move || exit_rx.recv().ok().flatten()),
     })
 }
@@ -210,7 +211,7 @@ pub fn serve(mut reader: Reader, writer: Writer, token: &str, spawn: &dyn Fn(&Sp
         Some((SPAWN, payload)) => decode_request(&payload).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad spawn request"))?,
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a spawn request")),
     };
-    let Spawned { pty, reader: mut child_out, writer: mut child_in, wait } = match spawn(&req) {
+    let Spawned { pty, reader: mut child_out, writer: mut child_in, wait, .. } = match spawn(&req) {
         Ok(s) => s,
         Err(e) => {
             send(&writer, ERROR, e.message.as_bytes())?;

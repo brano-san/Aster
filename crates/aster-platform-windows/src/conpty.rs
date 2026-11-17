@@ -158,7 +158,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
             waiter.close_console();
             code
         });
-        Ok(Spawned { pty: Box::new(ConPty(inner)), reader: Box::new(file(out_read)), writer: Box::new(file(in_write)), wait })
+        Ok(Spawned { pty: Box::new(ConPty(inner)), reader: Box::new(file(out_read)), writer: Box::new(file(in_write)), raw: None, wait })
     }
 }
 
