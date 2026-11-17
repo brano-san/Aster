@@ -10,11 +10,15 @@ pub enum OverlayKind {
     TabColors,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pick {
     pub label: String,
     pub hint: String,
     pub value: String,
+    pub group: String,
+    pub rank: u32,
+    pub badge: String,
+    pub tint: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -30,8 +34,14 @@ pub struct Overlay {
 }
 
 pub const QUICK: &str = "quick:";
+pub const MANAGE: &str = "manage:";
+pub const CLEAR_RECENT: &str = "clear-recent:";
 
 pub const VISIBLE: usize = 12;
+
+fn quick_pick(label: String, kind: &str, value: String) -> Pick {
+    Pick { label, hint: kind.to_owned(), value, group: t("Connect").to_owned(), badge: "\u{2192}".into(), ..Pick::default() }
+}
 
 impl Overlay {
     pub fn new(kind: OverlayKind, items: Vec<Pick>) -> Self {
@@ -50,7 +60,7 @@ impl Overlay {
     pub fn placeholder(&self) -> &'static str {
         match self.kind {
             OverlayKind::Commands => t("Type a command"),
-            OverlayKind::Profiles => t("Select a profile"),
+            OverlayKind::Profiles => t("Select a profile or enter an address"),
             OverlayKind::Schemes => t("Select a color scheme"),
             OverlayKind::TabColors => t("Select a tab color"),
         }
@@ -59,26 +69,35 @@ impl Overlay {
     fn refilter(&mut self) {
         self.items.truncate(self.base);
         let commands = matches!(self.kind, OverlayKind::Commands);
+        let profiles = matches!(self.kind, OverlayKind::Profiles);
         let english = |p: &Pick| commands.then(|| crate::keymap::Action::from_id(&p.value)).flatten().map(|a| a.source_label()).filter(|e| *e != p.label);
+        let extra = |p: &Pick| profiles.then(|| fuzzy(&self.query, &p.hint).or_else(|| fuzzy(&self.query, &p.group))).flatten().map(|m| m.score - 20);
         let mut scored: Vec<(i32, usize, Vec<Range<usize>>)> = self
             .items
             .iter()
             .enumerate()
-            .filter_map(|(i, p)| fuzzy(&self.query, &p.label).map(|m| (m.score, i, m.ranges)).or_else(|| english(p).and_then(|e| fuzzy(&self.query, &e)).map(|m| (m.score, i, Vec::new()))))
+            .filter_map(|(i, p)| {
+                fuzzy(&self.query, &p.label)
+                    .map(|m| (m.score, i, m.ranges))
+                    .or_else(|| english(p).and_then(|e| fuzzy(&self.query, &e)).map(|m| (m.score, i, Vec::new())))
+                    .or_else(|| extra(p).map(|score| (score, i, Vec::new())))
+            })
             .collect();
         if !self.query.trim().is_empty() {
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            let items = &self.items;
+            scored.retain(|(_, i, _)| !items[*i].value.starts_with(CLEAR_RECENT));
+            scored.sort_by(|a, b| items[a.1].rank.cmp(&items[b.1].rank).then(b.0.cmp(&a.0)).then(a.1.cmp(&b.1)));
         }
         self.shown = scored.into_iter().map(|(_, i, r)| (i, r)).collect();
-        if let Some(address) = (self.kind == OverlayKind::Profiles).then(|| aster_proto::address::parse_url(&self.query)).flatten() {
-            let hint = match address.protocol {
+        if let Some(address) = profiles.then(|| aster_proto::address::parse_url(&self.query)).flatten() {
+            let kind = match address.protocol {
                 aster_proto::address::Protocol::Telnet => "Telnet",
                 aster_proto::address::Protocol::Raw => "TCP",
             };
-            self.items.push(Pick { label: tf("Connect to {target}", &[("target", &address.display())]), hint: hint.into(), value: format!("{QUICK}{}", address.display()) });
+            self.items.push(quick_pick(tf("Connect to {target}", &[("target", &address.display())]), kind, format!("{QUICK}{}", address.display())));
             self.shown.insert(0, (self.items.len() - 1, Vec::new()));
         } else if let Some(target) = self.quick.then(|| crate::ssh::parse_target(&self.query)).flatten() {
-            self.items.push(Pick { label: tf("Connect to {target}", &[("target", &target.display())]), hint: "SSH".into(), value: format!("{QUICK}{}", self.query.trim()) });
+            self.items.push(quick_pick(tf("Connect to {target}", &[("target", &target.display())]), "SSH", format!("{QUICK}{}", self.query.trim())));
             let at = if self.query.contains('@') || self.shown.is_empty() { 0 } else { self.shown.len() };
             self.shown.insert(at, (self.items.len() - 1, Vec::new()));
         }
@@ -125,6 +144,29 @@ impl Overlay {
 
     pub fn selected_value(&self) -> Option<String> {
         self.shown.get(self.selected).map(|(i, _)| self.items[*i].value.clone())
+    }
+
+    pub fn selected_pick(&self) -> Option<&Pick> {
+        self.shown.get(self.selected).map(|(i, _)| &self.items[*i])
+    }
+
+    pub fn header_before(&self, position: usize) -> Option<&str> {
+        let (item, _) = self.shown.get(position)?;
+        let group = self.items[*item].group.as_str();
+        if group.is_empty() {
+            return None;
+        }
+        let previous = position.checked_sub(1).and_then(|p| self.shown.get(p)).map(|(i, _)| self.items[*i].group.as_str());
+        (position == self.scroll || previous != Some(group)).then_some(group)
+    }
+
+    pub fn query_text(&self) -> &str {
+        &self.query
+    }
+
+    pub fn set_query(&mut self, text: &str) {
+        self.query = text.to_owned();
+        self.refilter();
     }
 }
 

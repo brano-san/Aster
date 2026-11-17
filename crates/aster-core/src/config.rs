@@ -116,6 +116,7 @@ pub struct Terminal {
     pub recover_tabs: bool,
     pub confirm_close: bool,
     pub focus_follows_mouse: bool,
+    pub recent_profiles: usize,
 }
 
 impl Default for Terminal {
@@ -144,6 +145,7 @@ impl Default for Terminal {
             recover_tabs: true,
             confirm_close: true,
             focus_follows_mouse: false,
+            recent_profiles: 3,
         }
     }
 }

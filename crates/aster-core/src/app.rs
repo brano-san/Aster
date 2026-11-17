@@ -69,6 +69,7 @@ pub enum Effect {
     SaveConfig(String),
     Open(String),
     OpenLog,
+    RecentProfiles(Vec<String>),
     OpenConfigFile,
     Title(String),
     Cursor(CursorIcon),
@@ -192,6 +193,7 @@ pub struct App {
     last_tab: Option<PaneId>,
     current_tab: Option<PaneId>,
     pub(crate) broadcast: Option<Broadcast>,
+    pub(crate) recent: Vec<String>,
     pub(crate) shown_progress: Option<Progress>,
     swallow_control: bool,
     pub(crate) blink_on: bool,
@@ -272,6 +274,7 @@ impl App {
             last_tab: None,
             current_tab: None,
             broadcast: None,
+            recent: Vec::new(),
             shown_progress: None,
             swallow_control: false,
             blink_on: true,
@@ -1069,11 +1072,11 @@ impl App {
     fn open_overlay(&mut self, kind: OverlayKind) {
         let items = match kind {
             OverlayKind::Commands => Action::all()
-                .map(|a| Pick { label: a.label(), hint: self.keymap.bindings_of(a).next().map(crate::keymap::format_binding).unwrap_or_default(), value: a.id() })
+                .map(|a| Pick { label: a.label(), hint: self.keymap.bindings_of(a).next().map(crate::keymap::format_binding).unwrap_or_default(), value: a.id(), ..Pick::default() })
                 .collect(),
-            OverlayKind::Profiles => self.profiles.iter().map(|p| Pick { label: p.name.clone(), hint: String::new(), value: p.id.clone() }).collect(),
-            OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), hint: String::new(), value: n }).collect(),
-            OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string() }).collect(),
+            OverlayKind::Profiles => self.profile_picks(),
+            OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), value: n, ..Pick::default() }).collect(),
+            OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string(), ..Pick::default() }).collect(),
         };
         let mut overlay = Overlay::new(kind, items);
         if kind == OverlayKind::Profiles && self.ssh.is_some() {
@@ -1107,8 +1110,12 @@ impl App {
                     self.open_tab(t.profile(&ssh));
                 }
             }
+            OverlayKind::Profiles if value == crate::overlay::MANAGE => self.open_profile_settings(),
+            OverlayKind::Profiles if value == crate::overlay::CLEAR_RECENT => self.clear_recent(),
             OverlayKind::Profiles => {
-                if let Some(p) = self.profiles.iter().find(|p| p.id == value).cloned() {
+                let id = value.strip_prefix(crate::picker::RECENT).unwrap_or(&value).to_owned();
+                if let Some(p) = self.profiles.iter().find(|p| p.id == id).cloned() {
+                    self.note_recent(&id);
                     self.open_tab(p);
                 }
             }
@@ -1151,6 +1158,14 @@ impl App {
             Key::Down => o.step(1),
             Key::PageUp => o.step(-8),
             Key::PageDown => o.step(8),
+            Key::Backspace if o.kind == OverlayKind::Profiles && o.query_text().is_empty() => {
+                let id = o.selected_value().unwrap_or_default();
+                let id = id.strip_prefix(crate::picker::RECENT).unwrap_or(&id);
+                let address = self.profiles.iter().find(|p| p.id == id).and_then(|p| p.ssh.clone().or_else(|| p.socket.clone()));
+                if let (Some(address), Some(o)) = (address, self.overlay.as_mut()) {
+                    o.set_query(&address);
+                }
+            }
             Key::Backspace => o.backspace(mods.ctrl),
             Key::Enter => {
                 if let Some(v) = o.selected_value() {

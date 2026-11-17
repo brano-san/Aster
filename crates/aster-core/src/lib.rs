@@ -12,6 +12,7 @@ pub mod menu;
 pub mod overlay;
 pub mod panes;
 pub mod paste;
+pub mod picker;
 pub mod profile;
 pub mod search;
 pub mod session;
