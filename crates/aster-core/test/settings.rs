@@ -360,7 +360,7 @@ fn a_serial_profile_needs_only_a_name_and_a_port() {
         key(&mut a, Key::Tab);
     }
     typed(&mut a, "COM3:9600,8N1");
-    key(&mut a, Key::Enter);
+    a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
     let p = config.profiles.iter().find(|p| p.name == "Router console").unwrap();
     assert_eq!(p.serial.as_deref(), Some("COM3:9600,8N1"));
@@ -385,4 +385,28 @@ fn switching_the_language_setting_translates_the_interface_at_once() {
     assert_eq!(crate::i18n::language(), "en", "automatic follows the English system language");
     assert_eq!(a.setting_text(setting), "Automatic");
     crate::i18n::set_language("en");
+}
+
+#[test]
+fn a_network_profile_stores_a_normalized_address() {
+    let mut a = app();
+    select_profile(&mut a, "");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "Switch");
+    for _ in 0..6 {
+        key(&mut a, Key::Tab);
+    }
+    typed(&mut a, "tcp://switch");
+    key(&mut a, Key::Enter);
+    assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "TCP needs a port");
+    for _ in 0..12 {
+        key(&mut a, Key::Backspace);
+    }
+    typed(&mut a, "switch.lan");
+    key(&mut a, Key::Enter);
+    let config = saved(&mut a).expect("saved");
+    let p = config.profiles.iter().find(|p| p.name == "Switch").unwrap();
+    assert_eq!(p.socket.as_deref(), Some("telnet://switch.lan:23"));
+    assert!(!p.is_local());
+    assert!(a.settings.as_ref().unwrap().profiles.iter().any(|r| r.detail == "telnet://switch.lan:23"));
 }

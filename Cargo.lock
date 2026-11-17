@@ -143,9 +143,11 @@ version = "0.3.0"
 dependencies = [
  "aster-core",
  "aster-gfx",
+ "aster-net",
  "aster-platform",
  "aster-platform-linux",
  "aster-platform-windows",
+ "aster-proto",
  "aster-serial",
  "aster-ssh",
  "aster-vt",
@@ -171,6 +173,14 @@ dependencies = [
 [[package]]
 name = "aster-gfx"
 version = "0.3.0"
+
+[[package]]
+name = "aster-net"
+version = "0.3.0"
+dependencies = [
+ "aster-proto",
+ "crossbeam-channel",
+]
 
 [[package]]
 name = "aster-platform"

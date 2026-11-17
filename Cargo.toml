@@ -20,6 +20,7 @@ aster-ssh = { path = "crates/aster-ssh" }
 aster-proto = { path = "crates/aster-proto" }
 aster-zmodem = { path = "crates/aster-zmodem" }
 aster-serial = { path = "crates/aster-serial" }
+aster-net = { path = "crates/aster-net" }
 regex = "1"
 
 alacritty_terminal = "0.26"

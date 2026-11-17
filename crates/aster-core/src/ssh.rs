@@ -74,6 +74,13 @@ impl Target {
     }
 }
 
+pub fn socket_profile(address: &aster_proto::address::Address) -> Profile {
+    let name = address.display();
+    let mut p = Profile::new(&format!("socket:{name}"), &name, "", &[]);
+    p.socket = Some(name);
+    p
+}
+
 pub fn host_profile(alias: &str, ssh: &str) -> Profile {
     let mut p = Profile::new(&format!("ssh:{alias}"), &format!("SSH: {alias}"), ssh, &[alias]);
     p.icon = Some("ssh".into());

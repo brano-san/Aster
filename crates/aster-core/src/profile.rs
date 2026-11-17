@@ -16,6 +16,8 @@ pub struct Profile {
     pub ssh: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
     #[serde(skip)]
     pub builtin: bool,
     #[serde(skip)]
@@ -32,5 +34,9 @@ impl Profile {
             builtin: true,
             ..Self::default()
         }
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.ssh.is_none() && self.serial.is_none() && self.socket.is_none()
     }
 }

@@ -1,3 +1,4 @@
+pub mod address;
 pub mod hex;
 pub mod input;
 pub mod newline;
