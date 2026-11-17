@@ -57,3 +57,17 @@ fn translated_commands_are_still_found_by_their_english_names() {
     assert_eq!(o.selected_value().as_deref(), Some("new-admin-tab"));
     crate::i18n::set_language("en");
 }
+
+#[test]
+fn quick_connect_offers_telnet_and_tcp_addresses_without_ssh() {
+    let mut o = Overlay::new(OverlayKind::Profiles, items());
+    o.insert("telnet://router");
+    assert_eq!(o.selected_value().as_deref(), Some("quick:telnet://router:23"));
+    assert_eq!(o.items.last().map(|p| p.hint.as_str()), Some("Telnet"));
+    o.backspace(true);
+    o.insert("tcp://10.0.0.5:7000");
+    assert_eq!(o.selected_value().as_deref(), Some("quick:tcp://10.0.0.5:7000"));
+    o.backspace(true);
+    o.insert("router");
+    assert!(o.items.iter().all(|p| !p.value.starts_with(QUICK)), "a bare host needs a scheme or SSH");
+}

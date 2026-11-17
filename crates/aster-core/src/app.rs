@@ -28,6 +28,7 @@ pub struct Launch {
     pub elevated: bool,
     pub ssh: Option<String>,
     pub serial: Option<String>,
+    pub socket: Option<String>,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
@@ -355,7 +356,7 @@ impl App {
         if let Some(dir) = pane.terminal.lock().cwd() {
             return Some(dir.to_owned());
         }
-        let remote = pane.profile.ssh.is_some() || pane.profile.serial.is_some() || pane.profile.id.starts_with("ssh:") || pane.profile.id.starts_with("local:wsl");
+        let remote = !pane.profile.is_local() || pane.profile.id.starts_with("ssh:") || pane.profile.id.starts_with("local:wsl");
         if remote {
             return None;
         }
@@ -528,7 +529,7 @@ impl App {
             terminal.lock().set_cwd(inherited.clone());
         }
         let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
-        let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), serial: profile.serial.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), serial: profile.serial.clone(), socket: profile.socket.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0 });
         id
     }
@@ -983,8 +984,10 @@ impl App {
                 }
             }
             OverlayKind::Profiles if value.starts_with(crate::overlay::QUICK) => {
-                let target = crate::ssh::parse_target(&value[crate::overlay::QUICK.len()..]);
-                if let (Some(t), Some(ssh)) = (target, self.ssh.clone()) {
+                let text = &value[crate::overlay::QUICK.len()..];
+                if let Some(address) = aster_proto::address::parse_url(text) {
+                    self.open_tab(crate::ssh::socket_profile(&address));
+                } else if let (Some(t), Some(ssh)) = (crate::ssh::parse_target(text), self.ssh.clone()) {
                     self.open_tab(t.profile(&ssh));
                 }
             }
@@ -1668,7 +1671,7 @@ impl App {
     }
 
     fn open_admin_tab(&mut self, mut profile: Profile) {
-        let local = profile.ssh.is_none() && profile.serial.is_none();
+        let local = profile.is_local();
         if !self.can_elevate || !local {
             return;
         }

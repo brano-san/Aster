@@ -166,6 +166,12 @@ impl<P: Platform> Handler<P> {
                 let session = Session::start(self.session_start(id, pane), spawned, terminal, move || waker.wake());
                 self.sessions.insert((id, pane), session);
             }
+            Effect::Spawn { pane, launch, terminal } if launch.socket.is_some() => {
+                let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str));
+                let waker = self.waker.clone();
+                let session = Session::start(self.session_start(id, pane), spawned, terminal, move || waker.wake());
+                self.sessions.insert((id, pane), session);
+            }
             Effect::Spawn { pane, launch, terminal } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
                 let destination = launch.ssh.unwrap_or_default();
                 let remote = crate::remote::connect(&destination, launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), P::home_dir(), crate::remote::Options { share: self.config.ssh.share_connections, forward_agent: self.config.ssh.forward_agent, remember: self.config.ssh.remember_passwords, secrets: Arc::new(crate::remote::System::<P>::default()) });

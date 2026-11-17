@@ -68,7 +68,14 @@ impl Overlay {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         }
         self.shown = scored.into_iter().map(|(_, i, r)| (i, r)).collect();
-        if let Some(target) = self.quick.then(|| crate::ssh::parse_target(&self.query)).flatten() {
+        if let Some(address) = (self.kind == OverlayKind::Profiles).then(|| aster_proto::address::parse_url(&self.query)).flatten() {
+            let hint = match address.protocol {
+                aster_proto::address::Protocol::Telnet => "Telnet",
+                aster_proto::address::Protocol::Raw => "TCP",
+            };
+            self.items.push(Pick { label: tf("Connect to {target}", &[("target", &address.display())]), hint: hint.into(), value: format!("{QUICK}{}", address.display()) });
+            self.shown.insert(0, (self.items.len() - 1, Vec::new()));
+        } else if let Some(target) = self.quick.then(|| crate::ssh::parse_target(&self.query)).flatten() {
             self.items.push(Pick { label: tf("Connect to {target}", &[("target", &target.display())]), hint: "SSH".into(), value: format!("{QUICK}{}", self.query.trim()) });
             let at = if self.query.contains('@') || self.shown.is_empty() { 0 } else { self.shown.len() };
             self.shown.insert(at, (self.items.len() - 1, Vec::new()));
