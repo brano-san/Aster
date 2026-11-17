@@ -318,6 +318,11 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::Open(target) => P::open(&target),
+            Effect::OpenLog => {
+                if let Some(dir) = P::config_dir() {
+                    P::open(&dir.to_string_lossy());
+                }
+            }
             Effect::Title(t) => window.set_title(&t),
             Effect::Cursor(c) => window.set_cursor(c),
             Effect::Minimize => window.minimize(),

@@ -68,6 +68,8 @@ pub enum Action {
     BroadcastToTab,
     BroadcastToAllTabs,
     SetTabColor,
+    ReportProblem,
+    OpenLog,
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -134,6 +136,8 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::BroadcastToTab, "pane-focus-all", "Type into all panes of the tab"),
     (Action::BroadcastToAllTabs, "focus-all-tabs", "Type into all tabs"),
     (Action::SetTabColor, "set-tab-color", "Set tab color"),
+    (Action::ReportProblem, "report-problem", "Report a problem"),
+    (Action::OpenLog, "open-log", "Open the log folder"),
 ];
 
 impl Action {
