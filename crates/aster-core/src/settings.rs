@@ -35,6 +35,7 @@ const SEARCH: &str = "Search";
 const APPEARANCE: &str = "Appearance";
 const DOCK: &str = "Docked window";
 const SSH: &str = "SSH";
+const SYSTEM: &str = "System";
 
 const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("underline", "Underline")];
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
@@ -90,6 +91,7 @@ pub const SETTINGS: &[Setting] = &[
     item(SSH, "ssh.remember-passwords", "Offer to save passwords", "After a typed password or key passphrase works, offer to keep it in the system credential store", Control::Toggle),
     item(SSH, "ssh.forward-agent", "Forward the SSH agent", "Let servers use your local SSH agent; ForwardAgent in ~/.ssh/config decides per host", Control::Toggle),
     item(SSH, "ssh.share-connections", "Share connections", "New tabs to a host that is already open reuse its login", Control::Toggle),
+    item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add \"Open in Aster\" to the folder menu of Windows Explorer", Control::Toggle),
 ];
 
 pub fn get(config: &Config, key: &str) -> Option<Value> {

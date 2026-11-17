@@ -69,6 +69,10 @@ impl Platform for Linux {
         instance::listen(wake)
     }
 
+    fn set_explorer_menu(_label: &str, _enabled: bool) -> bool {
+        false
+    }
+
     fn instance_send(message: &str) -> bool {
         instance::send(message)
     }
