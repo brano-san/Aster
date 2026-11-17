@@ -31,11 +31,11 @@ impl Read for Output {
     }
 }
 
-struct Keys(Sender<Input>);
+struct Keys(Sender<Input>, fn(Vec<u8>) -> Input);
 
 impl Write for Keys {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.send(Input::Data(buf.to_vec())).map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        self.0.send((self.1)(buf.to_vec())).map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
         Ok(buf.len())
     }
 
@@ -82,7 +82,8 @@ fn spawned(connection: session::Connection) -> Spawned {
     Spawned {
         pty: Box::new(Link(connection.input.clone())),
         reader: Box::new(Output { rx: connection.output, buf: Vec::new(), at: 0, drained: Some(drained) }),
-        writer: Box::new(Keys(connection.input)),
+        writer: Box::new(Keys(connection.input.clone(), Input::Data)),
+        raw: Some(Box::new(Keys(connection.input, Input::Raw))),
         wait: Box::new(move || {
             let code = exit.recv().ok();
             let _ = finished.recv();

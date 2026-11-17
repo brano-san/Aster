@@ -16,6 +16,7 @@ const CHUNK: usize = 16 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     Data(Vec<u8>),
+    Raw(Vec<u8>),
     Resize(u16, u16),
     Close,
 }
@@ -116,7 +117,6 @@ fn run(stream: TcpStream, shared: &Arc<Shared>, input: &Receiver<Input>) -> u32 
 }
 
 fn read_loop(stream: &mut TcpStream, shared: &Shared, wire: &Sender<Vec<u8>>) -> u32 {
-    let mut incoming = NewlineConverter::new(Newlines::ImplicitCr);
     let mut buf = vec![0u8; CHUNK];
     loop {
         let n = match stream.read(&mut buf) {
@@ -131,7 +131,7 @@ fn read_loop(stream: &mut TcpStream, shared: &Shared, wire: &Sender<Vec<u8>>) ->
         };
         let bytes = &buf[..n];
         if shared.protocol == Protocol::Raw {
-            let _ = shared.output.send(incoming.convert(bytes));
+            let _ = shared.output.send(bytes.to_vec());
             continue;
         }
         let events = match shared.telnet.lock() {
@@ -177,6 +177,12 @@ fn write_loop(stream: &mut TcpStream, shared: &Shared, input: &Receiver<Input>, 
                     if telnet {
                         bytes = Telnet::escape_outgoing(&bytes);
                     }
+                    if !send(stream, &bytes) {
+                        return Some(1);
+                    }
+                }
+                Ok(Input::Raw(bytes)) => {
+                    let bytes = if telnet { Telnet::escape_outgoing(&bytes) } else { bytes };
                     if !send(stream, &bytes) {
                         return Some(1);
                     }

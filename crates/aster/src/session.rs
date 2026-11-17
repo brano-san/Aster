@@ -12,8 +12,13 @@ const PUMP_QUEUE: usize = 64;
 
 pub struct Session {
     pub pty: Box<dyn Pty>,
-    writer: Sender<Vec<u8>>,
+    writer: Sender<Out>,
     ctx: Ctx,
+}
+
+enum Out {
+    Keys(Vec<u8>),
+    Transfer(Vec<u8>),
 }
 
 pub type Exit = (WindowId, PaneId, Option<u32>);
@@ -25,7 +30,7 @@ struct Ctx {
     pane: PaneId,
     terminal: Shared,
     transfer: Arc<Mutex<Transfer>>,
-    writer: Sender<Vec<u8>>,
+    writer: Sender<Out>,
     pump: Sender<()>,
     notes: Sender<TransferNote>,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -37,7 +42,7 @@ impl Ctx {
             self.terminal.lock().feed(&out.terminal);
         }
         for bytes in out.write {
-            let _ = self.writer.send(bytes);
+            let _ = self.writer.send(Out::Transfer(bytes));
         }
         if let Some(note) = out.note {
             let _ = self.notes.send((self.window, self.pane, note));
@@ -60,8 +65,8 @@ pub struct Start {
 impl Session {
     pub fn start(start: Start, spawned: Spawned, terminal: Shared, wake: impl Fn() + Clone + Send + Sync + 'static) -> Session {
         let Start { window, pane, downloads, exits, notes } = start;
-        let Spawned { pty, mut reader, mut writer, wait } = spawned;
-        let (tx, rx) = unbounded::<Vec<u8>>();
+        let Spawned { pty, mut reader, mut writer, mut raw, wait } = spawned;
+        let (tx, rx) = unbounded::<Out>();
         let (pump_tx, pump_rx) = unbounded::<()>();
         let ctx = Ctx { window, pane, terminal, transfer: Arc::new(Mutex::new(Transfer::new(downloads))), writer: tx.clone(), pump: pump_tx, notes, wake: Arc::new(wake.clone()) };
         let reading = ctx.clone();
@@ -94,7 +99,7 @@ impl Session {
                         while pumping.writer.len() > PUMP_QUEUE {
                             std::thread::sleep(Duration::from_millis(2));
                         }
-                        if pumping.writer.send(bytes).is_err() {
+                        if pumping.writer.send(Out::Transfer(bytes)).is_err() {
                             return;
                         }
                     }
@@ -104,8 +109,12 @@ impl Session {
         std::thread::Builder::new()
             .name(format!("aster-pty-write-{pane}"))
             .spawn(move || {
-                for bytes in rx {
-                    if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() {
+                for out in rx {
+                    let (target, bytes): (&mut Box<dyn Write + Send>, Vec<u8>) = match out {
+                        Out::Keys(bytes) => (&mut writer, bytes),
+                        Out::Transfer(bytes) => (raw.as_mut().unwrap_or(&mut writer), bytes),
+                    };
+                    if target.write_all(&bytes).and_then(|_| target.flush()).is_err() {
                         break;
                     }
                 }
@@ -123,7 +132,7 @@ impl Session {
     }
 
     pub fn write(&self, bytes: Vec<u8>) {
-        let _ = self.writer.send(bytes);
+        let _ = self.writer.send(Out::Keys(bytes));
     }
 
     pub fn send_files(&self, files: &[PathBuf]) {

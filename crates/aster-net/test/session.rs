@@ -80,7 +80,7 @@ fn telnet_data_reaches_the_terminal_without_commands() {
 fn raw_tcp_echoes_and_sends_crlf() {
     let (connection, mut server) = serve(Protocol::Raw);
     server.write_all(b"hello\nworld\r\n").unwrap();
-    output_until(&connection, b"hello\r\nworld\r\n");
+    output_until(&connection, b"hello\nworld\r\n");
     connection.input.send(Input::Data(b"x\r".to_vec())).unwrap();
     assert_eq!(read_exact(&mut server, 3), b"x\r\n");
     output_until(&connection, b"x\r\n");
@@ -124,4 +124,16 @@ fn echo_can_be_left_to_the_stream_layer() {
     assert_eq!(read_exact(&mut server, 3), b"q\r\n");
     server.write_all(b"done").unwrap();
     assert_eq!(output_until(&connection, b"done"), b"done");
+}
+
+#[test]
+fn raw_input_skips_echo_and_newline_conversion() {
+    let (connection, mut server) = serve(Protocol::Telnet);
+    connection.input.send(Input::Raw(vec![b'\r', 0x18, 255, b'\n'])).unwrap();
+    assert_eq!(read_exact(&mut server, 5), [b'\r', 0x18, 255, 255, b'\n']);
+    let (connection, mut server) = serve(Protocol::Raw);
+    connection.input.send(Input::Raw(b"a\rb".to_vec())).unwrap();
+    assert_eq!(read_exact(&mut server, 3), b"a\rb");
+    server.write_all(b"end").unwrap();
+    assert_eq!(output_until(&connection, b"end"), b"end");
 }

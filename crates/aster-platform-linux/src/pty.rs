@@ -133,7 +133,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
             Some(128 + libc::WTERMSIG(status) as u32)
         }
     });
-    Ok(Spawned { pty: Box::new(UnixPty { master, pid }), reader: Box::new(File::from(reader)), writer: Box::new(File::from(writer)), wait })
+    Ok(Spawned { pty: Box::new(UnixPty { master, pid }), reader: Box::new(File::from(reader)), writer: Box::new(File::from(writer)), raw: None, wait })
 }
 
 #[cfg(test)]

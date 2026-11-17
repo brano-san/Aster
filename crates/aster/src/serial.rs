@@ -79,6 +79,7 @@ fn failed(message: String) -> Spawned {
         pty: Box::new(Line(None)),
         reader: Box::new(Message { text: io::Cursor::new(format!("{message}\r\n").into_bytes()), done: Some(done) }),
         writer: Box::new(io::sink()),
+        raw: None,
         wait: Box::new(move || {
             let _ = finished.recv();
             Some(1)
@@ -98,6 +99,7 @@ pub fn connect(spec: &str) -> Spawned {
                 pty: Box::new(Line(Some(conn.input.clone()))),
                 reader: Box::new(Output { rx: conn.output, buf: Vec::new(), at: 0 }),
                 writer: Box::new(Keys(conn.input)),
+                raw: None,
                 wait: Box::new(move || exit.recv().ok()),
             }
         }

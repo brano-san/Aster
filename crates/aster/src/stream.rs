@@ -92,15 +92,16 @@ pub fn wrap(spawned: Spawned, stream: Option<&Stream>) -> Spawned {
         Some(options) if !options.is_plain() => options,
         _ => return spawned,
     };
-    let Spawned { pty, mut reader, writer, wait } = spawned;
+    let Spawned { pty, mut reader, writer, raw, wait } = spawned;
     let line: Line = Arc::new(Mutex::new(writer));
+    let raw: Line = raw.map_or_else(|| line.clone(), |raw| Arc::new(Mutex::new(raw)));
     let (data_tx, data) = unbounded();
     let (echo_tx, echo) = unbounded();
     let (mut incoming, error) = Incoming::new(&options);
     if let Some(error) = error {
         let _ = data_tx.send(format!("\x1b[31mLogin script: {error}\x1b[0m\r\n").into_bytes());
     }
-    let replies = line.clone();
+    let replies = raw.clone();
     let started = std::thread::Builder::new().name("aster-stream".into()).spawn(move || {
         if !send_reply(&replies, &incoming.start()) {
             return;
@@ -128,6 +129,7 @@ pub fn wrap(spawned: Spawned, stream: Option<&Stream>) -> Spawned {
         pty,
         reader: Box::new(Shown { data, echo: Some(echo), buf: Vec::new(), at: 0, drained: Some(drained) }),
         writer: Box::new(Keys { line, outgoing: Outgoing::new(&options), echo: echo_tx }),
+        raw: Some(Box::new(Locked(raw))),
         wait: Box::new(move || {
             let code = wait();
             let _ = finished.recv_timeout(DRAIN);
@@ -135,3 +137,21 @@ pub fn wrap(spawned: Spawned, stream: Option<&Stream>) -> Spawned {
         }),
     }
 }
+
+struct Locked(Line);
+
+impl Write for Locked {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let mut line = self.0.lock().map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        line.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.lock().map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?.flush()
+    }
+}
+
+#[cfg(test)]
+#[path = "../test/stream.rs"]
+mod tests;

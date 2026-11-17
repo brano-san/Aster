@@ -154,6 +154,7 @@ pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, 
         pty: Box::new(Channel(conn.input.clone())),
         reader: Box::new(Output { rx: conn.output, buf: Vec::new(), at: 0 }),
         writer: Box::new(Keys(conn.input.clone())),
+        raw: None,
         wait: Box::new(move || exit.recv().ok()),
     };
     Remote { spawned, input: conn.input, files: conn.files }

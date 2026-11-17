@@ -177,6 +177,7 @@ pub struct Spawned {
     pub pty: Box<dyn Pty>,
     pub reader: Box<dyn Read + Send>,
     pub writer: Box<dyn Write + Send>,
+    pub raw: Option<Box<dyn Write + Send>>,
     pub wait: Box<dyn FnOnce() -> Option<u32> + Send>,
 }
 
