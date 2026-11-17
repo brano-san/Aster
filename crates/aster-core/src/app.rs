@@ -22,6 +22,7 @@ pub type CwdProbe = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
 pub const BLINK: Duration = Duration::from_millis(530);
 const BELL_FLASH: Duration = Duration::from_millis(150);
 const CLOSED_TABS: usize = 10;
+const PANE_STEP: f32 = 0.1;
 const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -894,6 +895,12 @@ impl App {
                     self.open_admin_tab(p);
                 }
             }
+            PaneResizeLeft => self.nudge_divider(Axis::Horizontal, -PANE_STEP),
+            PaneResizeRight => self.nudge_divider(Axis::Horizontal, PANE_STEP),
+            PaneResizeUp => self.nudge_divider(Axis::Vertical, -PANE_STEP),
+            PaneResizeDown => self.nudge_divider(Axis::Vertical, PANE_STEP),
+            ExplodeTab => self.explode_tab(),
+            CombineTabs => self.combine_tabs(),
             ToggleLastTab => self.toggle_last_tab(),
             ReopenTab => self.reopen_tab(),
             NextTab => self.cycle(1),
@@ -1107,6 +1114,53 @@ impl App {
             }
         }
         self.current_tab = current;
+    }
+
+    fn nudge_divider(&mut self, axis: Axis, delta: f32) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        if tab.zoomed.is_none() && tab.root.nudge(tab.focus, axis, delta) {
+            self.dirty = true;
+        }
+    }
+
+    fn explode_tab(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let panes = tab.root.panes();
+        let Some((&first, rest)) = panes.split_first() else { return };
+        if rest.is_empty() {
+            return;
+        }
+        let focus = tab.focus;
+        tab.root = Node::Leaf(first);
+        tab.focus = first;
+        tab.zoomed = None;
+        let at = self.active;
+        for (i, &id) in rest.iter().enumerate() {
+            self.tabs.insert(at + 1 + i, Tab { root: Node::Leaf(id), focus: id, zoomed: None, title: None });
+        }
+        self.active = at + panes.iter().position(|p| *p == focus).unwrap_or(0);
+        self.dirty = true;
+    }
+
+    fn combine_tabs(&mut self) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+        let focus = self.tabs[self.active].focus;
+        let mut tabs = std::mem::take(&mut self.tabs).into_iter();
+        let Some(first) = tabs.next() else { return };
+        let mut combined = first;
+        let mut count = 1.0;
+        for tab in tabs {
+            let root = std::mem::replace(&mut combined.root, Node::Leaf(0));
+            combined.root = Node::Split { axis: Axis::Horizontal, ratio: count / (count + 1.0), a: Box::new(root), b: Box::new(tab.root) };
+            count += 1.0;
+        }
+        combined.focus = focus;
+        combined.zoomed = None;
+        self.tabs = vec![combined];
+        self.active = 0;
+        self.dirty = true;
     }
 
     fn toggle_last_tab(&mut self) {

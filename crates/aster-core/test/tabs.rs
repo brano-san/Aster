@@ -174,3 +174,34 @@ fn closed_tabs_reopen_with_their_title_and_layout_in_reverse_order() {
     a.run(Action::ReopenTab);
     assert_eq!(a.tabs.len(), 2, "nothing left to reopen");
 }
+
+#[test]
+fn panes_explode_into_tabs_and_tabs_combine_into_one_without_restarting() {
+    let mut a = app(2);
+    a.run(Action::SplitRight);
+    a.run(Action::SplitBottom);
+    let panes = a.tabs[1].root.panes();
+    let focus = a.tabs[1].focus;
+    a.take_effects();
+    a.run(Action::ExplodeTab);
+    assert_eq!(a.tabs.len(), 4);
+    assert_eq!(a.tabs[1..].iter().map(|t| t.focus).collect::<Vec<_>>(), panes);
+    assert_eq!(a.tabs[a.active].focus, focus);
+    a.run(Action::CombineTabs);
+    assert_eq!(a.tabs.len(), 1);
+    assert_eq!(a.tabs[0].root.panes().len(), 4);
+    assert_eq!(a.tabs[0].focus, focus);
+    assert!(a.take_effects().iter().all(|e| !matches!(e, Effect::Kill { .. } | Effect::Spawn { .. })));
+    let widths: Vec<f32> = a.tabs[0].root.layout(aster_gfx::render::Rect::new(0.0, 0.0, 403.0, 100.0), 1.0).panes.iter().map(|(_, r)| r.w).collect();
+    assert_eq!(widths, [100.0, 100.0, 100.0, 100.0]);
+}
+
+#[test]
+fn keyboard_resizing_moves_the_nearest_divider() {
+    let mut a = app(1);
+    a.run(Action::SplitRight);
+    a.run(Action::PaneResizeLeft);
+    assert!(matches!(a.tabs[0].root, crate::panes::Node::Split { ratio, .. } if (ratio - 0.4).abs() < 1e-6));
+    a.run(Action::PaneResizeDown);
+    assert!(matches!(a.tabs[0].root, crate::panes::Node::Split { ratio, .. } if (ratio - 0.4).abs() < 1e-6), "no vertical divider to move");
+}

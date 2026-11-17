@@ -108,23 +108,16 @@ impl Node {
         }
     }
 
-    pub fn grow(&mut self, pane: PaneId, axis: Axis, delta: f32) -> bool {
+    pub fn nudge(&mut self, pane: PaneId, axis: Axis, delta: f32) -> bool {
         let Node::Split { axis: own, ratio, a, b } = self else { return false };
-        if a.grow(pane, axis, delta) || b.grow(pane, axis, delta) {
+        if a.nudge(pane, axis, delta) || b.nudge(pane, axis, delta) {
             return true;
         }
-        if *own != axis {
+        if *own != axis || !(a.contains(pane) || b.contains(pane)) {
             return false;
         }
-        if a.contains(pane) {
-            *ratio = (*ratio + delta).clamp(0.05, 0.95);
-            true
-        } else if b.contains(pane) {
-            *ratio = (*ratio - delta).clamp(0.05, 0.95);
-            true
-        } else {
-            false
-        }
+        *ratio = (*ratio + delta).clamp(0.05, 0.95);
+        true
     }
 
     pub fn layout(&self, r: Rect, gap: f32) -> Layout {

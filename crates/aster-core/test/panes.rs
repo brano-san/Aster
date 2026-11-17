@@ -32,14 +32,14 @@ fn removing_a_pane_collapses_its_split() {
 }
 
 #[test]
-fn ratios_change_by_path_and_by_growing_a_pane() {
+fn ratios_change_by_path_and_by_nudging_the_nearest_divider() {
     let mut n = Node::Leaf(1);
     n.split(1, Side::Right, 2);
     n.set_ratio(&[], 0.25);
     assert_eq!(n.layout(area(), 1.0).panes[0].1.w, 50.0);
-    assert!(n.grow(2, Axis::Horizontal, 0.25));
+    assert!(n.nudge(2, Axis::Horizontal, -0.5));
     assert_eq!(n.layout(area(), 1.0).panes[0].1.w, 10.0);
-    assert!(!n.grow(2, Axis::Vertical, 0.1));
+    assert!(!n.nudge(2, Axis::Vertical, 0.1));
     n.set_ratio(&[], 2.0);
     assert!(matches!(n, Node::Split { ratio, .. } if ratio == 0.95));
 }
