@@ -264,6 +264,7 @@ impl<P: Platform> Handler<P> {
             Effect::Minimize => window.minimize(),
             Effect::ToggleMaximize => window.toggle_maximize(),
             Effect::ToggleFullscreen => window.toggle_fullscreen(),
+            Effect::Progress(progress) => window.set_progress(progress),
             Effect::Close => {
                 if self.windows.len() == 1 && !std::mem::take(&mut self.session_saved) {
                     self.save_session();

@@ -200,3 +200,23 @@ fn search_options_build_the_expected_patterns() {
     assert_eq!(t.visible_matches().len(), 2);
     assert!(t.set_search("(", SearchOptions { regex: true, ..Default::default() }).is_err());
 }
+
+#[test]
+fn progress_reports_set_and_clear_the_state_and_count_as_output() {
+    let (mut t, _) = term(20, 3);
+    assert_eq!(t.progress(), None);
+    let before = t.output_seq();
+    t.feed(b"\x1b]9;4;1;42\x07");
+    assert_eq!(t.progress(), Some(Progress { state: ProgressState::Normal, percent: 42 }));
+    assert!(t.output_seq() > before);
+    t.feed(b"\x1b]9;4;3\x1b\\");
+    assert_eq!(t.progress().map(|p| p.state), Some(ProgressState::Indeterminate));
+    t.feed(b"\x1b]9;4;2;250\x07");
+    assert_eq!(t.progress(), Some(Progress { state: ProgressState::Error, percent: 100 }));
+    t.feed(b"\x1b]9;4;9;1\x07");
+    assert_eq!(t.progress().map(|p| p.state), Some(ProgressState::Error), "unknown states are ignored");
+    t.feed(b"\x1b]9;4;0\x07");
+    assert_eq!(t.progress(), None);
+    t.feed(b"\x1b]9;9;C:/work\x07");
+    assert_eq!(t.progress(), None);
+}

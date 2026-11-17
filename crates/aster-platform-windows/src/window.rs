@@ -371,6 +371,30 @@ impl Window for Win32Window {
         }
     }
 
+    fn set_progress(&self, progress: Option<aster_core::app::Progress>) {
+        use aster_core::app::ProgressState;
+        use windows::Win32::UI::Shell::{TBPF_ERROR, TBPF_INDETERMINATE, TBPF_NOPROGRESS, TBPF_NORMAL, TBPF_PAUSED};
+        let Some(list) = taskbar() else { return };
+        let h = self.hwnd();
+        unsafe {
+            let Some(p) = progress else {
+                let _ = list.SetProgressState(h, TBPF_NOPROGRESS);
+                return;
+            };
+            let state = match p.state {
+                ProgressState::Normal => TBPF_NORMAL,
+                ProgressState::Error => TBPF_ERROR,
+                ProgressState::Paused => TBPF_PAUSED,
+                ProgressState::Indeterminate => TBPF_INDETERMINATE,
+            };
+            let _ = list.SetProgressState(h, state);
+            if p.state != ProgressState::Indeterminate {
+                let done = if p.state == ProgressState::Error { 100 } else { u64::from(p.percent) };
+                let _ = list.SetProgressValue(h, done, 100);
+            }
+        }
+    }
+
     fn set_global_hotkey(&self, key: Option<(Key, Mods)>) -> bool {
         unsafe {
             let _ = UnregisterHotKey(Some(self.hub), HOTKEY_ID);
@@ -1260,4 +1284,17 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
         }
         _ => None,
     }
+}
+
+thread_local! {
+    static TASKBAR: Option<windows::Win32::UI::Shell::ITaskbarList3> = unsafe {
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let list: Option<windows::Win32::UI::Shell::ITaskbarList3> = CoCreateInstance(&windows::Win32::UI::Shell::TaskbarList, None, CLSCTX_INPROC_SERVER).ok();
+        list.filter(|l| l.HrInit().is_ok())
+    };
+}
+
+fn taskbar() -> Option<windows::Win32::UI::Shell::ITaskbarList3> {
+    TASKBAR.with(Clone::clone)
 }

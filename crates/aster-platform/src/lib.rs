@@ -122,6 +122,7 @@ pub trait Window {
     fn is_foreground(&self) -> bool;
     fn dock(&self, spec: Option<DockSpec>);
     fn set_global_hotkey(&self, key: Option<(aster_core::input::Key, aster_core::input::Mods)>) -> bool;
+    fn set_progress(&self, progress: Option<aster_core::app::Progress>);
 }
 
 pub trait WindowHandler<W: WindowSystem> {

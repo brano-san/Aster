@@ -89,3 +89,33 @@ pub fn cwd(payload: &[u8]) -> Option<String> {
     };
     (!path.is_empty()).then_some(path)
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressState {
+    Normal,
+    Error,
+    Indeterminate,
+    Paused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub state: ProgressState,
+    pub percent: u8,
+}
+
+pub fn progress(payload: &[u8]) -> Option<Option<Progress>> {
+    let text = std::str::from_utf8(payload).ok()?.strip_prefix("9;4")?;
+    let mut parts = text.strip_prefix(';').unwrap_or(text).split(';');
+    let state = parts.next().unwrap_or("0").trim();
+    let percent = parts.next().and_then(|p| p.trim().parse::<u32>().ok()).unwrap_or(0).min(100) as u8;
+    let state = match state {
+        "" | "0" => return Some(None),
+        "1" => ProgressState::Normal,
+        "2" => ProgressState::Error,
+        "3" => ProgressState::Indeterminate,
+        "4" => ProgressState::Paused,
+        _ => return None,
+    };
+    Some(Some(Progress { state, percent }))
+}

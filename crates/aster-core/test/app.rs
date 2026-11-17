@@ -535,3 +535,27 @@ fn broadcast_input_reaches_every_pane_in_scope_until_its_bar_is_clicked() {
     a.on_event(Event::Char('x'));
     assert_eq!(targets(&a.take_effects()).len(), 1);
 }
+
+#[test]
+fn background_output_marks_the_tab_and_progress_reaches_the_taskbar() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.take_effects();
+    assert!(!a.tab_activity(0));
+    a.tabs[0].root.panes().iter().for_each(|p| a.panes[p].terminal.lock().feed(b"build done"));
+    assert!(a.tab_activity(0));
+    assert!(!a.tab_activity(1));
+    a.focused_terminal().unwrap().lock().feed(b"\x1b]9;4;1;30\x07");
+    a.frame(&mut g, false);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Progress(Some(p)) if p.percent == 30)));
+    a.frame(&mut g, false);
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Progress(_))), "unchanged progress is not sent again");
+    a.activate(0);
+    a.frame(&mut g, false);
+    assert!(!a.tab_activity(0));
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Progress(None))));
+    assert_eq!(a.tab_progress(1).map(|p| p.state), Some(ProgressState::Normal));
+}

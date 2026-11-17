@@ -10,6 +10,7 @@ pub use alacritty_terminal::sync::FairMutex;
 pub use alacritty_terminal::term::cell::{Cell, Flags};
 pub use alacritty_terminal::term::TermMode;
 pub use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
+pub use osc::{Progress, ProgressState};
 pub use palette::Palette;
 pub use search::{SearchStatus, VisibleMatch};
 
@@ -102,6 +103,8 @@ pub struct Terminal {
     cell: Arc<AtomicU32>,
     title: Option<String>,
     seq: u64,
+    output_seq: u64,
+    progress: Option<osc::Progress>,
     sniffer: osc::Sniffer,
     cwd: Option<String>,
     search: Option<search::Search>,
@@ -127,7 +130,7 @@ impl Terminal {
     pub fn new(size: Size, options: Options, sink: Sink) -> Self {
         let cell = Arc::new(AtomicU32::new(0));
         let listener = Listener { sink, cell: cell.clone() };
-        Self { term: Term::new(config(&options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, sniffer: osc::Sniffer::default(), cwd: None, search: None, scrollback: options.scrollback }
+        Self { term: Term::new(config(&options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, output_seq: 0, progress: None, sniffer: osc::Sniffer::default(), cwd: None, search: None, scrollback: options.scrollback }
     }
 
     pub fn set_search(&mut self, query: &str, options: search::SearchOptions) -> Result<(), String> {
@@ -205,16 +208,20 @@ impl Terminal {
 
     pub fn feed(&mut self, bytes: &[u8]) {
         let anchor = self.search.as_ref().map(|_| search::Search::anchor(&self.term, self.scrollback));
-        let cwd = &mut self.cwd;
+        let (cwd, progress) = (&mut self.cwd, &mut self.progress);
         self.sniffer.feed(bytes, |payload| {
             if let Some(dir) = osc::cwd(payload) {
                 *cwd = Some(dir);
+            }
+            if let Some(state) = osc::progress(payload) {
+                *progress = state;
             }
         });
         self.parser.advance(&mut self.term, bytes);
         if let (Some(found), Some(anchor)) = (self.search.as_mut(), anchor) {
             found.after_feed(&self.term, anchor);
         }
+        self.output_seq = self.output_seq.wrapping_add(1);
         self.bump();
     }
 
@@ -224,6 +231,14 @@ impl Terminal {
 
     pub fn seq(&self) -> u64 {
         self.seq
+    }
+
+    pub fn output_seq(&self) -> u64 {
+        self.output_seq
+    }
+
+    pub fn progress(&self) -> Option<Progress> {
+        self.progress
     }
 
     pub fn size(&self) -> Size {

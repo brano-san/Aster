@@ -201,6 +201,8 @@ impl Window for LinuxWindow {
     fn set_global_hotkey(&self, _key: Option<(Key, Mods)>) -> bool {
         false
     }
+
+    fn set_progress(&self, _progress: Option<aster_core::app::Progress>) {}
 }
 
 fn cursor(icon: CursorIcon) -> WinitCursor {
