@@ -900,11 +900,16 @@ impl App {
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let radius = (8.0 * s).round();
-        let w = (560.0 * s).min(area.w).round();
         let field_h = (30.0 * s).round();
         let label_h = (20.0 * s).round();
         let pad = (18.0 * s).round();
-        let h = pad * 2.0 + (30.0 * s).round() + FIELDS.len() as f32 * (label_h + field_h + 8.0 * s) + (48.0 * s).round();
+        let height = |rows: usize| pad * 2.0 + (30.0 * s).round() + rows as f32 * (label_h + field_h + 8.0 * s) + (48.0 * s).round();
+        let cols = if height(FIELDS.len()) > area.h - 12.0 * s && area.w >= 600.0 * s { 2 } else { 1 };
+        let rows = FIELDS.len().div_ceil(cols);
+        let w = (if cols == 2 { 820.0 } else { 560.0 } * s).min(area.w).round();
+        let h = height(rows);
+        let gap = (16.0 * s).round();
+        let col_w = ((w - 2.0 * pad - gap * (cols - 1) as f32) / cols as f32).floor();
         let frame = Rect::new((area.x + (area.w - w) / 2.0).round(), area.y + (6.0 * s).round(), w, h.round());
         g.dl.shadow(Rect::new(frame.x, frame.y + 6.0 * s, frame.w, frame.h), theme.shadow, radius, (18.0 * s).round());
         g.dl.round_rect(frame, theme.overlay, radius);
@@ -918,12 +923,15 @@ impl App {
         g.text(head.x, ty, if editor.original.is_some() { t("Edit profile") } else { t("New profile") }, title, theme.text, head.w);
         y += (30.0 * s).round();
         let caret_h = (16.0 * s).round();
+        let fields_top = y;
         for (i, label) in FIELDS.iter().enumerate() {
-            let lr = Rect::new(frame.x + pad, y, frame.w - 2.0 * pad, label_h);
+            let (row, col) = (i / cols, i % cols);
+            let x = frame.x + pad + col as f32 * (col_w + gap);
+            let y = fields_top + row as f32 * (label_h + field_h + (8.0 * s).round());
+            let lr = Rect::new(x, y, col_w, label_h);
             let ly = baseline(g, lr, small);
             g.text(lr.x, ly, t(label), small, theme.text_dim, lr.w);
-            y += label_h;
-            let fr = Rect::new(frame.x + pad, y, frame.w - 2.0 * pad, field_h);
+            let fr = Rect::new(x, y + label_h, col_w, field_h);
             let focused = editor.focus == i;
             g.dl.round_rect(fr, theme.surface, (5.0 * s).round());
             g.dl.outline(fr, if focused { theme.accent } else { theme.overlay_border }, (5.0 * s).round(), line);
@@ -933,8 +941,8 @@ impl App {
             if focused {
                 g.dl.rect(Rect::new(inner.x + tw + 1.0, fr.y + ((fr.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
             }
-            y += field_h + (8.0 * s).round();
         }
+        let y = fields_top + rows as f32 * (label_h + field_h + (8.0 * s).round());
         let foot = Rect::new(frame.x + pad, y + (6.0 * s).round(), frame.w - 2.0 * pad, (24.0 * s).round());
         let fy = baseline(g, foot, small);
         match &editor.error {
