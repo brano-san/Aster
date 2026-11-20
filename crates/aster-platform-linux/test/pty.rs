@@ -33,3 +33,49 @@ fn environment_overrides_replace_inherited_variables() {
     assert_eq!(homes.len(), 1);
     assert_eq!(homes[0].to_bytes(), b"HOME=/x");
 }
+
+fn simulate_shutdown(exit_on: Option<libc::c_int>) -> (Vec<libc::c_int>, Duration) {
+    let alive = std::cell::Cell::new(true);
+    let mut signals = Vec::new();
+    let mut elapsed = Duration::ZERO;
+    let mut signal = |sig| {
+        signals.push(sig);
+        if Some(sig) == exit_on {
+            alive.set(false);
+        }
+    };
+    hang_up(&mut signal);
+    escalate(|| alive.get(), signal, |interval| {
+        assert_eq!(interval, Duration::from_millis(50));
+        elapsed += interval;
+    });
+    (signals, elapsed)
+}
+
+#[test]
+fn a_group_that_exits_on_hangup_needs_no_escalation() {
+    assert_eq!(simulate_shutdown(Some(libc::SIGHUP)), (vec![libc::SIGHUP, libc::SIGCONT], Duration::ZERO));
+}
+
+#[test]
+fn a_group_that_exits_on_term_is_spared_kill() {
+    assert_eq!(simulate_shutdown(Some(libc::SIGTERM)), (vec![libc::SIGHUP, libc::SIGCONT, libc::SIGTERM], TERM_AFTER));
+}
+
+#[test]
+fn a_surviving_group_receives_kill_after_both_delays() {
+    assert_eq!(simulate_shutdown(None), (vec![libc::SIGHUP, libc::SIGCONT, libc::SIGTERM, libc::SIGKILL], TERM_AFTER + KILL_AFTER));
+}
+
+#[test]
+fn a_shell_that_ignores_hangup_exits_on_term() {
+    let req = SpawnRequest { command: "sh".into(), args: vec!["-c".into(), r#"trap "" HUP; printf ready; sleep 30"#.into()], ..Default::default() };
+    let mut spawned = spawn(&req).expect("spawn");
+    let mut ready = [0; 5];
+    spawned.reader.read_exact(&mut ready).expect("shell ready");
+    assert_eq!(&ready, b"ready");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send((spawned.wait)()).unwrap());
+    spawned.pty.kill();
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("shell exit"), Some(128 + libc::SIGTERM as u32));
+}
