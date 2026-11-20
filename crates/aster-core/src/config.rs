@@ -231,11 +231,25 @@ pub struct System {
     pub explorer_menu: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Vault {
+    pub sealed: String,
+    pub remember_minutes: u32,
+}
+
+impl Default for Vault {
+    fn default() -> Self {
+        Self { sealed: String::new(), remember_minutes: 15 }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
     pub terminal: Terminal,
     pub appearance: Appearance,
+    pub vault: Vault,
     pub ssh: Ssh,
     pub system: System,
     pub hotkeys: BTreeMap<String, Vec<String>>,

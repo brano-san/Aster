@@ -109,7 +109,7 @@ pub trait Window {
     fn activate(&self);
     fn open_window(&self, opts: WindowOptions);
     fn placement(&self) -> Placement;
-    fn clipboard_text(&self) -> Option<String>;
+    fn clipboard_text(&self, vault_input: Option<u64>) -> Option<String>;
     fn set_clipboard_text(&self, text: &str);
     fn set_ime_area(&self, area: Rect);
     fn is_dark_mode(&self) -> bool;

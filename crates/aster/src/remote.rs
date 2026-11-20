@@ -110,28 +110,6 @@ pub struct Options {
     pub secrets: Arc<dyn Secrets>,
 }
 
-pub struct System<P>(std::marker::PhantomData<fn() -> P>);
-
-impl<P> Default for System<P> {
-    fn default() -> Self {
-        Self(std::marker::PhantomData)
-    }
-}
-
-impl<P: aster_platform::Platform> Secrets for System<P> {
-    fn get(&self, key: &str) -> Option<String> {
-        P::secret_get(key)
-    }
-
-    fn set(&self, key: &str, value: &str) -> bool {
-        P::secret_set(key, value)
-    }
-
-    fn delete(&self, key: &str) {
-        P::secret_delete(key)
-    }
-}
-
 pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, home: Option<PathBuf>, options: Options) -> Remote {
     let home = home.unwrap_or_default();
     let req = Request {

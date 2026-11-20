@@ -44,8 +44,86 @@ fn a_saved_password_is_typed_on_request_at_a_sudo_prompt() {
     let effects = a.take_effects();
     assert!(effects.iter().any(|e| matches!(e, Effect::FillSecret { key, .. } if key == "sudo:ann@box")));
     assert!(!effects.iter().any(|e| matches!(e, Effect::Write { .. })), "the shortcut itself is not typed");
+    let request = a.pending_secret_fill(pane).unwrap();
+    assert!(a.finish_secret_fill(pane, "sudo:ann@box", request, true));
+    assert!(!a.finish_secret_fill(pane, "sudo:ann@box", request, true));
     output(&mut a, pane, b"\r\nHit:1 http://archive\r\n");
     assert!(a.password_prompt(pane).is_none());
+}
+
+#[test]
+fn a_delayed_fill_rechecks_the_live_prompt_before_woken() {
+    for replacement in [b"\r\x1b[2K$ ".as_slice(), b"\r\x1b[2KOther password: ", b"\r\nPassword: "] {
+        let (mut a, pane) = ssh_app();
+        output(&mut a, pane, b"Password: ");
+        a.secret_known(pane, true);
+        press(&mut a, Key::Enter, FILL);
+        let request = a.pending_secret_fill(pane).unwrap();
+        a.panes[&pane].terminal.lock().feed(replacement);
+        assert!(!a.finish_secret_fill(pane, "sudo:ann@box", request, true));
+    }
+}
+
+#[test]
+fn input_cancels_a_pending_fill_even_when_the_next_request_uses_the_same_line() {
+    let (mut a, pane) = ssh_app();
+    output(&mut a, pane, b"Password: ");
+    a.secret_known(pane, true);
+    press(&mut a, Key::Enter, FILL);
+    let first = a.pending_secret_fill(pane).unwrap();
+    a.note_input(pane, b"\x15");
+    assert!(a.pending_secret_fill(pane).is_none());
+    press(&mut a, Key::Enter, FILL);
+    let second = a.pending_secret_fill(pane).unwrap();
+    assert!(!a.finish_secret_fill(pane, "sudo:ann@box", first, true));
+    assert!(a.finish_secret_fill(pane, "sudo:ann@box", second, true));
+}
+
+#[test]
+fn a_missing_fill_result_allows_the_manual_password_to_be_saved() {
+    let (mut a, pane) = ssh_app();
+    output(&mut a, pane, b"Password: ");
+    a.secret_known(pane, true);
+    press(&mut a, Key::Enter, FILL);
+    let request = a.pending_secret_fill(pane).unwrap();
+    assert!(!a.finish_secret_fill(pane, "sudo:ann@box", request, false));
+    a.note_input(pane, b"manual\r");
+    output(&mut a, pane, b"\r\n$ ");
+    assert!(a.password_prompt(pane).unwrap().offer);
+}
+
+#[test]
+fn an_open_prompt_tracks_vault_changes_without_losing_manual_input_or_save_offers() {
+    let (mut a, pane) = ssh_app();
+    let key = "sudo:ann@box";
+    let locked = VaultView { configured: true, ..VaultView::default() };
+    let mut open = VaultView { unlocked: true, entries: vec![("password".into(), key.into())], ..locked.clone() };
+    output(&mut a, pane, b"Password: ");
+    a.secret_known(pane, true);
+    press(&mut a, Key::Enter, FILL);
+    let request = a.pending_secret_fill(pane).unwrap();
+    a.vault_state(open.clone());
+    assert!(!a.finish_secret_fill(pane, key, request, true));
+    a.vault_state(locked.clone());
+    assert_eq!(a.password_prompt(pane).unwrap().saved, Some(false));
+    a.note_input(pane, b"man");
+    a.vault_state(open.clone());
+    assert_eq!(a.password_prompt(pane).unwrap().saved, Some(true));
+    assert!(!a.fill_password());
+    open.entries.clear();
+    a.vault_state(open);
+    assert_eq!(a.password_prompt(pane).unwrap().saved, Some(false));
+    a.take_effects();
+    a.vault_state(VaultView::default());
+    assert_eq!(a.password_prompt(pane).unwrap().saved, None);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::CheckSecret { key: k, .. } if k == key)));
+    a.secret_known(pane, false);
+    a.note_input(pane, b"ual\r");
+    output(&mut a, pane, b"\r\n$ ");
+    a.vault_state(locked);
+    assert!(a.password_prompt(pane).unwrap().offer);
+    press(&mut a, Key::Enter, FILL);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::SaveSecret { value, .. } if value == "manual")));
 }
 
 #[test]

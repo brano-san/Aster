@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cli;
+mod config_file;
 mod handler;
 mod log;
 mod net;
 mod remote;
+mod secrets;
 mod serial;
 mod session;
 mod stream;
@@ -75,7 +77,8 @@ fn run<P: Platform>(request: cli::Request) -> Result<(), aster_platform::Platfor
     let config = load_config::<P>();
     let dark = config.appearance.color_scheme_mode != SchemeMode::Light;
     let placement = state_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| parse_placement(&t));
-    let mut handler = handler::Handler::<P>::new(config, waker);
+    let (mut handler, _vault_worker) = handler::Handler::<P>::new(config, waker)
+        .map_err(|e| aster_platform::PlatformError::new(0, format!("vault worker: {e}")))?;
     handler.set_instance(requests, Some(request));
     windows.run(WindowOptions { title: "Aster".into(), placement, dark }, handler)
 }

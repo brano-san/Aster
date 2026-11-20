@@ -175,7 +175,7 @@ fn a_typed_password_can_be_saved_and_is_then_used_without_asking() {
     first.send("yes\r");
     first.wait_for("password: ");
     first.send("secret\r");
-    first.wait_for("system credential store (yes/no)? ");
+    first.wait_for("for future connections (yes/no)? ");
     first.send("yes\r");
     first.wait_for("welcome");
     let key = crate::secrets::password_key("ann", "127.0.0.1", port);
@@ -212,7 +212,7 @@ fn declining_keeps_nothing_and_a_saved_passphrase_unlocks_the_key() {
     first.send("yes\r");
     first.wait_for("Enter passphrase");
     first.send("pw\r");
-    first.wait_for("credential store (yes/no)? ");
+    first.wait_for("for future connections (yes/no)? ");
     first.send("no\r");
     first.wait_for("welcome");
     assert_eq!(secrets.get(&crate::secrets::passphrase_key(&key)), None);

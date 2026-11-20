@@ -27,6 +27,15 @@ pub(crate) fn err(e: windows::core::Error) -> PlatformError {
     PlatformError::new(e.code().0 as i64, e.message())
 }
 
+pub fn replace_file(target: &std::path::Path, replacement: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::ReplaceFileW;
+    let wide = |path: &std::path::Path| path.as_os_str().encode_wide().chain([0]).collect::<Vec<_>>();
+    let (target, replacement) = (wide(target), wide(replacement));
+    unsafe { ReplaceFileW(PCWSTR(target.as_ptr()), PCWSTR(replacement.as_ptr()), None, Default::default(), None, None) }
+        .map_err(std::io::Error::other)
+}
+
 pub(crate) fn dark_mode() -> bool {
     let mut v = 1u32;
     let mut n = 4u32;

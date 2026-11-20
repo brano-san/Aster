@@ -56,3 +56,25 @@ fn the_language_defaults_to_automatic_and_round_trips() {
     assert_eq!(config.appearance.language, "ru");
     assert_eq!(Config::parse(&config.to_text()).unwrap().appearance.language, "ru");
 }
+
+#[test]
+fn old_configs_and_partial_vault_sections_keep_vault_defaults() {
+    let old = Config::parse("[ssh]\nremember-passwords = false").unwrap();
+    assert!(old.vault.sealed.is_empty());
+    assert_eq!(old.vault.remember_minutes, 15);
+    let partial = Config::parse("[vault]\nremember-minutes = 0").unwrap();
+    assert!(partial.vault.sealed.is_empty());
+    assert_eq!(partial.vault.remember_minutes, 0);
+}
+
+#[test]
+fn sealed_vault_and_unlock_duration_round_trip() {
+    let sealed = "aster-vault:1:Ab+/9Q==";
+    let mut config = Config::parse(&format!("[vault]\nsealed = \"{sealed}\"")).unwrap();
+    assert_eq!(config.vault.remember_minutes, 15);
+    assert_eq!(config.vault.sealed, sealed);
+    config.vault.remember_minutes = 1440;
+    let text = config.to_text();
+    assert!(text.contains("remember-minutes = 1440"));
+    assert_eq!(Config::parse(&text).unwrap(), config);
+}

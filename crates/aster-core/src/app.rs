@@ -68,6 +68,7 @@ pub enum Effect {
     Kill { pane: PaneId },
     SetClipboard(String),
     RequestPaste,
+    RequestVaultPaste(u64),
     SaveConfig(String),
     Open(String),
     OpenLog,
@@ -93,6 +94,12 @@ pub enum Effect {
     CheckSecret { pane: PaneId, key: String },
     FillSecret { pane: PaneId, key: String },
     SaveSecret { key: String, value: String },
+    VaultCreate { passphrase: String },
+    VaultUnlock { passphrase: String },
+    VaultLock,
+    VaultChange { old: String, new: String },
+    VaultErase,
+    VaultRemove { kind: String, key: String },
     ImeArea(Rect),
 }
 
@@ -173,6 +180,8 @@ pub struct App {
     pub(crate) hover_link: Option<HoverLink>,
     pub(crate) overlay: Option<Overlay>,
     pub(crate) settings: Option<crate::settings::SettingsPage>,
+    pub(crate) vault: crate::settings::VaultView,
+    pub(crate) vault_input_id: u64,
     pub(crate) menu: Option<crate::menu::Menu>,
     pub(crate) rename: Option<crate::tabs::Rename>,
     pub(crate) paste_confirm: Option<crate::paste::PasteConfirm>,
@@ -222,6 +231,8 @@ impl App {
         let (sender, events) = channel();
         let keymap = Keymap::new(&config.hotkeys);
         let mut app = App {
+            vault: crate::settings::VaultView { configured: !config.vault.sealed.is_empty(), ..Default::default() },
+            vault_input_id: 0,
             config,
             profiles,
             detected,
@@ -868,6 +879,12 @@ impl App {
         self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.terminal.lock().mode()).unwrap_or(TermMode::empty())
     }
 
+    pub fn paste_vault(&mut self, input: u64, text: String) {
+        if input == self.vault_input_id && self.settings.as_ref().is_some_and(|p| p.editing_passphrase()) {
+            self.settings_text(&text);
+        }
+    }
+
     pub fn paste(&mut self, text: String) {
         if text.is_empty() {
             return;
@@ -1301,6 +1318,9 @@ impl App {
             self.settings = Some(page);
             self.dirty = true;
         } else if !on && self.settings.is_some() {
+            if let Some(page) = self.settings.as_mut() {
+                page.cancel_vault_input();
+            }
             self.settings_stash = self.settings.take();
             self.dirty = true;
         }
@@ -1409,8 +1429,9 @@ impl App {
             Event::Char(c) => self.on_char(c, false),
             Event::AltChar(c) => self.on_char(c, true),
             Event::Pasted(t) => self.paste(t),
+            Event::VaultPasted { input, text } => self.paste_vault(input, text),
             Event::Preedit(p) => {
-                self.preedit = p;
+                self.preedit = if self.settings.as_ref().is_some_and(|page| page.editing_passphrase()) { Preedit::default() } else { p };
                 self.dirty = true;
             }
             Event::Focus(f) => {
@@ -1497,7 +1518,7 @@ impl App {
             if self.settings.as_ref().is_some_and(|p| p.capture.is_some()) {
                 return self.settings_key(key, mods);
             }
-            let editing = self.settings.as_ref().is_some_and(|p| p.editing.is_some() || p.editor.is_some());
+            let editing = self.settings.as_ref().is_some_and(|p| p.editing() || p.editor.is_some());
             match self.keymap.press(Chord { key, mods }) {
                 Outcome::Action(Action::Settings) => return self.close_settings(),
                 Outcome::Action(a) if !editing && a.works_beside_settings() => {
