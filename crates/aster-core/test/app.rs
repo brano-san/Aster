@@ -588,3 +588,19 @@ fn reporting_a_problem_opens_a_prefilled_issue_with_the_version() {
     a.run(Action::OpenLog);
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::OpenLog)));
 }
+
+#[test]
+fn text_padding_shrinks_the_grid_from_every_edge() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let pane = a.tabs[0].focus;
+    let before = a.panes[&pane].size;
+    let mut config = Config::default();
+    config.terminal.padding = 40.0;
+    a.set_config(config);
+    a.frame(&mut g, false);
+    let after = a.panes[&pane].size;
+    assert!((8..=9).contains(&(before.cols - after.cols)), "68 px less width at 8 px per column");
+    assert!(after.rows < before.rows);
+}
