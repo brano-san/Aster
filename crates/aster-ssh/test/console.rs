@@ -47,3 +47,12 @@ fn ctrl_c_or_closing_the_pane_cancels_the_question() {
 fn printed_text_uses_terminal_line_endings() {
     assert_eq!(crlf("a\nb\r\nc"), "a\r\nb\r\nc");
 }
+
+#[test]
+fn service_lines_reset_each_line_and_escape_terminal_controls() {
+    let (c, out, _) = console();
+    c.note("one\r\ntwo\n");
+    c.warn("warning");
+    c.error("bad\x1b[2J");
+    assert_eq!(shown(&out), "\x1b[2mone\x1b[0m\r\n\x1b[2mtwo\x1b[0m\r\n\x1b[33mwarning\x1b[0m\r\n\x1b[31mbad[2J\x1b[0m\r\n");
+}

@@ -108,7 +108,6 @@ impl App {
                     if !p.buffer.is_empty() {
                         t.feed(&restore_text(&p.buffer));
                     }
-                    t.set_cwd(p.cwd.clone());
                     let seen = t.output_seq();
                     drop(t);
                     pane.seen = seen;

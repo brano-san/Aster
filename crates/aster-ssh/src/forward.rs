@@ -6,7 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedSender;
 use crate::socks::{Handshake, Step};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Forward {
     Local { bind: String, port: u16, host: String, host_port: u16 },
     Remote { bind: String, port: u16, host: String, host_port: u16 },
@@ -63,6 +63,10 @@ pub fn parse(kind: &str, spec: &str) -> Result<Forward, String> {
 
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
+
+pub(crate) async fn pump(a: &mut (impl AsyncRead + AsyncWrite + Unpin), b: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> std::io::Result<()> {
+    tokio::io::copy_bidirectional(a, b).await.map(|_| ())
+}
 pub type Opened = Pin<Box<dyn Future<Output = Result<Box<dyn Stream>, String>> + Send>>;
 pub trait Opener: Send + Sync + 'static { fn open(&self, host: String, port: u16) -> Opened; }
 
@@ -154,7 +158,7 @@ async fn handle(mut socket: TcpStream, forward: Forward, opener: Arc<dyn Opener>
             if let Some(handshake) = &mut handshake {
                 if socket.write_all(&handshake.success()).await.is_err() || stream.write_all(&handshake.rest()).await.is_err() { return; }
             }
-            let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+            let _ = pump(&mut socket, &mut stream).await;
         }
         Err(error) => {
             let _ = events.send(Event::Refused { forward, host, port, error });

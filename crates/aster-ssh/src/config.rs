@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use aster_proto::ssh::AlgorithmOptions;
 
 const MAX_INCLUDE_DEPTH: usize = 16;
 
@@ -9,6 +10,13 @@ pub struct HostEntry {
     pub user: Option<String>,
     pub port: Option<u16>,
     pub identity_files: Vec<String>,
+    pub keepalive_ms: Option<u64>,
+    pub keepalive_count: Option<usize>,
+    pub ready_timeout_ms: Option<u64>,
+    pub skip_banner: Option<bool>,
+    pub term: Option<String>,
+    pub x11: Option<bool>,
+    pub algorithms: AlgorithmOptions,
     pub proxy_jump: Option<String>,
     pub proxy_command: Option<String>,
     pub local_forwards: Vec<String>,
@@ -250,6 +258,20 @@ fn apply(entry: &mut HostEntry, key: &str, value: &str, home: &Path) {
                 entry.port = first.and_then(|token| token.parse::<u16>().ok());
             }
         }
+        "serveraliveinterval" => set_once(&mut entry.keepalive_ms, seconds_to_ms(first.as_deref())),
+        "serveralivecountmax" => set_once(&mut entry.keepalive_count, first.and_then(|n| n.parse().ok())),
+        "connecttimeout" => set_once(&mut entry.ready_timeout_ms, seconds_to_ms(first.as_deref())),
+        "loglevel" => set_once(&mut entry.skip_banner, first.map(|s| s.eq_ignore_ascii_case("quiet"))),
+        "setenv" => set_once(&mut entry.term, tokens.iter().find_map(|s| s.strip_prefix("TERM=")).map(str::to_owned)),
+        "forwardx11" => set_once(&mut entry.x11, yes_no(first.as_deref())),
+        "kexalgorithms" => set_once(&mut entry.algorithms.kex, names(first.as_deref())),
+        "ciphers" => set_once(&mut entry.algorithms.cipher, names(first.as_deref())),
+        "macs" => set_once(&mut entry.algorithms.mac, names(first.as_deref())),
+        "hostkeyalgorithms" => set_once(&mut entry.algorithms.host_key, names(first.as_deref())),
+        "compression" => {
+            let order = yes_no(first.as_deref()).map(|yes| if yes { vec!["zlib@openssh.com".into(), "zlib".into(), "none".into()] } else { vec!["none".into()] });
+            set_once(&mut entry.algorithms.compression, order);
+        }
         "proxyjump" => set_once(&mut entry.proxy_jump, (!tokens.is_empty()).then(|| tokens.concat())),
         "proxycommand" => {
             if !value.is_empty() {
@@ -258,11 +280,7 @@ fn apply(entry: &mut HostEntry, key: &str, value: &str, home: &Path) {
         }
         "identityfile" => {
             if let Some(token) = first {
-                let expanded = match token.strip_prefix("~/") {
-                    Some(stripped) => home.join(stripped).to_string_lossy().into_owned(),
-                    None => token,
-                };
-                entry.identity_files.push(expanded);
+                entry.identity_files.push(expand_home(&token, home).to_string_lossy().into_owned());
             }
         }
         "forwardagent" => {
@@ -284,7 +302,31 @@ fn apply(entry: &mut HostEntry, key: &str, value: &str, home: &Path) {
     }
 }
 
-fn set_once(slot: &mut Option<String>, value: Option<String>) {
+pub(crate) fn expand_home(token: &str, home: &Path) -> PathBuf {
+    token.strip_prefix("~/").map(|p| home.join(p)).unwrap_or_else(|| PathBuf::from(token))
+}
+
+fn seconds_to_ms(value: Option<&str>) -> Option<u64> {
+    value?.parse::<u64>().ok()?.checked_mul(1000)
+}
+
+fn names(value: Option<&str>) -> Option<Vec<String>> {
+    let value = value?;
+    if value.starts_with(['+', '-', '^']) {
+        return Some(vec![value.to_owned()]);
+    }
+    Some(value.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect())
+}
+
+fn yes_no(value: Option<&str>) -> Option<bool> {
+    match value?.to_ascii_lowercase().as_str() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
+fn set_once<T>(slot: &mut Option<T>, value: Option<T>) {
     if slot.is_none() {
         *slot = value;
     }

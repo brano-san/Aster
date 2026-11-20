@@ -63,10 +63,6 @@ impl Pty for Channel {
     }
 }
 
-pub fn local_user() -> String {
-    std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "root".into())
-}
-
 pub struct Remote {
     pub spawned: Spawned,
     pub input: UnboundedSender<Input>,
@@ -104,6 +100,10 @@ pub fn file_request(request: FileRequest, downloads: PathBuf) -> sftp::Request {
 }
 
 pub struct Options {
+    pub profile: aster_core::profile::SshOptions,
+    pub cwd: Option<String>,
+    pub clear_after_connect: bool,
+    pub x11_display: String,
     pub share: bool,
     pub forward_agent: bool,
     pub remember: bool,
@@ -116,10 +116,13 @@ pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, 
         destination: destination.to_owned(),
         cols,
         rows,
-        term: env_term.unwrap_or("xterm-256color").to_owned(),
+        profile: options.profile,
+        env_term: env_term.map(str::to_owned),
+        cwd: options.cwd,
+        clear_after_connect: options.clear_after_connect,
+        x11_display: options.x11_display,
         ssh_dir: home.join(".ssh"),
         home,
-        user: local_user(),
         use_agent: true,
         share: options.share,
         secrets: Some(options.secrets),

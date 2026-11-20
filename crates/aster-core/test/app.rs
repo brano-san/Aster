@@ -366,6 +366,35 @@ fn a_shell_that_does_not_report_its_directory_is_asked_through_its_process() {
 }
 
 #[test]
+fn native_ssh_duplicate_and_restore_inherit_only_the_remote_cwd() {
+    let (mut a, mut g) = app();
+    let mut remote = profile("remote");
+    remote.ssh = Some("work".into());
+    remote.ssh_options = Some(crate::profile::SshOptions { remember_cwd: Some(true), ..Default::default() });
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.take_effects();
+    a.focused_terminal().unwrap().lock().set_cwd(Some("/local".into()));
+    a.open_tab(remote.clone());
+    a.frame(&mut g, false);
+    assert_eq!(spawns(&a.take_effects())[0].1.cwd, None);
+    a.focused_terminal().unwrap().lock().feed(b"\x1b]7;file://work/srv/app\x07");
+    key(&mut a, Key::Char('D'), CTRL_SHIFT);
+    a.frame(&mut g, false);
+    let duplicate = &spawns(&a.take_effects())[0].1;
+    assert_eq!(duplicate.cwd.as_deref(), Some("/srv/app"));
+    assert_eq!(duplicate.ssh_options.as_deref(), remote.ssh_options.as_ref());
+    let (mut restored, mut graphics) = app();
+    assert!(restored.restore(&a.snapshot()));
+    restored.frame(&mut graphics, false);
+    assert!(spawns(&restored.take_effects()).iter().any(|(_, l)| l.ssh == remote.ssh && l.cwd.as_deref() == Some("/srv/app")));
+    remote.ssh = Some("elsewhere".into());
+    a.open_tab(remote);
+    a.frame(&mut g, false);
+    assert_eq!(spawns(&a.take_effects())[0].1.cwd, None);
+}
+
+#[test]
 fn wsl_profiles_receive_a_unix_directory_through_their_cd_argument() {
     let wsl = Profile::new("local:wsl:u", "WSL", "wsl.exe", &["-d", "Ubuntu", "--cd", "~"]);
     let (args, cwd) = inherit_cwd(&wsl, Some("/srv/app".into()), Some(r"C:\home".into()));
