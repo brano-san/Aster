@@ -3,6 +3,34 @@ use std::ffi::CString;
 use std::fs::File;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::time::Duration;
+
+const TERM_AFTER: Duration = Duration::from_secs(1);
+const KILL_AFTER: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn hang_up(mut signal: impl FnMut(libc::c_int)) {
+    signal(libc::SIGHUP);
+    signal(libc::SIGCONT);
+}
+
+fn escalate(mut alive: impl FnMut() -> bool, mut signal: impl FnMut(libc::c_int), mut sleep: impl FnMut(Duration)) {
+    for (delay, next_signal) in [(TERM_AFTER, libc::SIGTERM), (KILL_AFTER, libc::SIGKILL)] {
+        let mut remaining = delay;
+        loop {
+            if !alive() {
+                return;
+            }
+            if remaining.is_zero() {
+                break;
+            }
+            let interval = remaining.min(POLL_INTERVAL);
+            sleep(interval);
+            remaining -= interval;
+        }
+        signal(next_signal);
+    }
+}
 
 fn last_error(what: &str) -> PlatformError {
     let e = std::io::Error::last_os_error();
@@ -27,8 +55,14 @@ impl Pty for UnixPty {
     }
 
     fn kill(&self) {
-        unsafe {
-            libc::kill(self.pid, libc::SIGHUP);
+        let pid = self.pid;
+        let signal = move |sig| unsafe { libc::kill(-pid, sig); };
+        hang_up(signal);
+        let reaper = std::thread::Builder::new().name("aster-pty-reaper".into()).spawn(move || {
+            escalate(|| unsafe { libc::kill(-pid, 0) == 0 }, signal, std::thread::sleep);
+        });
+        if reaper.is_err() {
+            signal(libc::SIGKILL);
         }
     }
 
