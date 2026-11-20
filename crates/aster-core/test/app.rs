@@ -604,3 +604,25 @@ fn text_padding_shrinks_the_grid_from_every_edge() {
     assert!((8..=9).contains(&(before.cols - after.cols)), "68 px less width at 8 px per column");
     assert!(after.rows < before.rows);
 }
+
+#[test]
+fn panes_use_the_profile_color_scheme_or_the_window_palette() {
+    let (mut a, _) = app();
+    let scheme = a.schemes.iter().find(|s| s.palette.background != a.palette.background).unwrap();
+    let background = scheme.palette.background;
+    a.palette.bold_is_bright = !scheme.palette.bold_is_bright;
+    let mut themed = profile("custom:themed");
+    themed.scheme = Some(scheme.name.clone());
+    a.open_tab(themed);
+    a.open_default_tab();
+    let mut unknown = profile("custom:unknown");
+    unknown.scheme = Some("unknown scheme".into());
+    a.open_tab(unknown);
+
+    let palette = a.pane_palette(a.tabs[0].focus);
+    assert_eq!(palette.background, background);
+    assert_ne!(palette.background, a.palette.background);
+    assert_eq!(palette.bold_is_bright, a.palette.bold_is_bright);
+    assert_eq!(a.pane_palette(a.tabs[1].focus).background, a.palette.background);
+    assert_eq!(a.pane_palette(a.tabs[2].focus).background, a.palette.background);
+}

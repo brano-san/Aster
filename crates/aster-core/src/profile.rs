@@ -15,6 +15,8 @@ pub struct Profile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial: Option<String>,

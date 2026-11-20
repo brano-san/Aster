@@ -328,6 +328,7 @@ impl App {
         let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
         let mut effects = Vec::new();
         let window_focused = self.terminal_has_focus();
+        let palette = self.pane_palette(id);
         let Some(pane) = self.panes.get_mut(&id) else { return };
         if let Some(mut launch) = pane.pending.take() {
             launch.cols = size.cols as u16;
@@ -353,7 +354,6 @@ impl App {
                 effects.push(Effect::Resize { pane: id, cols: size.cols as u16, rows: size.rows as u16 });
             }
         }
-        let palette = self.palette;
         let blink_on = self.blink_on || !self.config.terminal.cursor_blink;
         let theme = self.theme;
         let terminal = pane.terminal.clone();
@@ -369,7 +369,7 @@ impl App {
         }
         let overrides = *t.colors();
         let default_bg = palette.background(&overrides);
-        if default_bg != palette.background {
+        if default_bg != self.palette.background {
             g.dl.rect(rect, rgb(default_bg));
         }
         g.dl.set_clip(Some(rect));
