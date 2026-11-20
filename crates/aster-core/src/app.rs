@@ -613,7 +613,13 @@ impl App {
     fn split(&mut self, side: Side) {
         let Some(focus) = self.focused_pane().filter(|p| *p != SETTINGS_PANE) else { return };
         let profile = self.panes.get(&focus).map(|p| p.profile.clone()).or_else(|| self.default_profile());
-        let Some(profile) = profile else { return };
+        if let Some(profile) = profile {
+            self.split_with(side, profile);
+        }
+    }
+
+    fn split_with(&mut self, side: Side, profile: Profile) {
+        let Some(focus) = self.focused_pane().filter(|p| *p != SETTINGS_PANE) else { return self.open_tab(profile) };
         let id = self.new_pane(profile);
         let tab = &mut self.tabs[self.active];
         tab.zoomed = None;
@@ -1193,6 +1199,15 @@ impl App {
                 }
             }
             Key::Backspace => o.backspace(mods.ctrl),
+            Key::Enter if mods.ctrl && o.kind == OverlayKind::Profiles => {
+                let value = o.selected_value().unwrap_or_default();
+                let id = value.strip_prefix(crate::picker::RECENT).unwrap_or(&value).to_owned();
+                if let Some(p) = self.profiles.iter().find(|p| p.id == id).cloned() {
+                    self.overlay = None;
+                    self.note_recent(&id);
+                    self.split_with(Side::Right, p);
+                }
+            }
             Key::Enter => {
                 if let Some(v) = o.selected_value() {
                     let kind = o.kind;
