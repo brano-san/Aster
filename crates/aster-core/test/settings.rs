@@ -407,16 +407,19 @@ fn a_network_profile_stores_a_normalized_address() {
         key(&mut a, Key::Tab);
     }
     typed(&mut a, "tcp://switch");
-    key(&mut a, Key::Enter);
+    a.on_event(ctrl(Key::Enter));
     assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "TCP needs a port");
     for _ in 0..12 {
         key(&mut a, Key::Backspace);
     }
     typed(&mut a, "switch.lan");
+    key(&mut a, Key::Tab);
+    typed(&mut a, "Network");
     key(&mut a, Key::Enter);
     let config = saved(&mut a).expect("saved");
     let p = config.profiles.iter().find(|p| p.name == "Switch").unwrap();
     assert_eq!(p.socket.as_deref(), Some("telnet://switch.lan:23"));
+    assert_eq!(p.group.as_deref(), Some("Network"));
     assert!(!p.is_local());
     assert!(a.settings.as_ref().unwrap().profiles.iter().any(|r| r.detail == "telnet://switch.lan:23"));
 }
