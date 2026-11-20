@@ -22,12 +22,18 @@ pub enum Note {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
     pub terminal: Vec<u8>,
+    pub raw: std::ops::Range<usize>,
     pub write: Vec<Vec<u8>>,
     pub note: Option<Note>,
     pub pump: bool,
 }
 
 impl Outcome {
+    fn passthrough(&mut self, bytes: &[u8]) {
+        self.raw = self.terminal.len()..self.terminal.len() + bytes.len();
+        self.terminal.extend_from_slice(bytes);
+    }
+
     fn say(&mut self, text: &str) {
         self.terminal.extend_from_slice(format!("\r\n\x1b[1m[{text}]\x1b[0m\r\n").as_bytes());
     }
@@ -120,7 +126,7 @@ impl Transfer {
                 if waiting.len() > MAX_WAITING {
                     let text = std::mem::take(waiting);
                     self.mode = Mode::Idle;
-                    out.terminal.extend_from_slice(&text);
+                    out.passthrough(&text);
                     out.note = Some(Note::Ended);
                 }
             }
@@ -148,9 +154,9 @@ impl Transfer {
     fn idle(&mut self, bytes: &[u8], out: &mut Outcome) {
         let bytes = self.strip(bytes);
         match detect(bytes) {
-            None => out.terminal.extend_from_slice(bytes),
+            None => out.passthrough(bytes),
             Some((at, kind)) => {
-                out.terminal.extend_from_slice(&bytes[..at]);
+                out.passthrough(&bytes[..at]);
                 self.trailer.clear();
                 match kind {
                     Detected::Receive => {

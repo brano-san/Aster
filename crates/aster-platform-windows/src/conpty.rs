@@ -95,7 +95,8 @@ pub fn command_line(command: &str, args: &[String]) -> String {
 }
 
 pub fn environment(overrides: &[(String, String)]) -> Vec<u16> {
-    let mut vars: Vec<(String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();
+    let mut vars: Vec<(String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+        .filter(|(k, _)| !k.eq_ignore_ascii_case("TERM_PROGRAM") && !k.eq_ignore_ascii_case("TERM_PROGRAM_VERSION")).collect();
     for (k, v) in overrides {
         vars.retain(|(name, _)| !name.eq_ignore_ascii_case(k));
         vars.push((k.clone(), v.clone()));

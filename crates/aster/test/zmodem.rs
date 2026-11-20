@@ -31,10 +31,12 @@ fn files_sent_by_the_remote_side_land_in_the_downloads_folder() {
     let mut t = Transfer::new(downloads.clone());
     let start = [b"sending\r\n".to_vec(), hex_header(Header::new(ZRQINIT, [0; 4]))].concat();
     let out = t.input(&start);
+    assert_eq!(&out.terminal[out.raw.clone()], b"sending\r\n");
     let mut shown = out.terminal.clone();
     assert!(text(&shown).starts_with("sending"));
     assert_eq!(out.note, Some(Note::Incoming));
     let mut out = t.accept();
+    assert!(out.raw.is_empty());
     assert_eq!(out.note, Some(Note::Running));
     let mut to_remote = std::mem::take(&mut out.write);
     for _ in 0..100_000 {
@@ -43,6 +45,7 @@ fn files_sent_by_the_remote_side_land_in_the_downloads_folder() {
         }
         while let Some(b) = remote.poll() {
             let o = t.input(&b);
+            assert!(o.raw.is_empty());
             shown.extend(o.terminal);
             to_remote.extend(o.write);
         }

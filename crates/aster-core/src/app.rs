@@ -71,6 +71,7 @@ pub enum Effect {
     SaveConfig(String),
     Open(String),
     OpenLog,
+    SaveOutput { pane: PaneId },
     RecentProfiles(Vec<String>),
     OpenConfigFile,
     Title(String),
@@ -601,8 +602,12 @@ impl App {
         let terminal = Arc::new(FairMutex::new(Terminal::new(size, self.options(), sink)));
         let mut env = self.config.terminal.environment.clone();
         env.extend(profile.env.clone());
-        for (k, v) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor"), ("TERM_PROGRAM", "Aster")] {
+        for (k, v) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")] {
             env.entry(k.to_owned()).or_insert_with(|| v.to_owned());
+        }
+        if self.config.terminal.identification == crate::config::Identification::Aster {
+            env.entry("TERM_PROGRAM".to_owned()).or_insert_with(|| "Aster".to_owned());
+            env.entry("TERM_PROGRAM_VERSION".to_owned()).or_insert_with(|| env!("CARGO_PKG_VERSION").to_owned());
         }
         if inherited.is_some() {
             terminal.lock().set_cwd(inherited.clone());
@@ -627,7 +632,11 @@ impl App {
     }
 
     pub fn focused_terminal(&self) -> Option<Shared> {
-        self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.terminal.clone())
+        self.focused_pane().and_then(|p| self.terminal(p)).cloned()
+    }
+
+    pub fn terminal(&self, pane: PaneId) -> Option<&Shared> {
+        self.panes.get(&pane).map(|p| &p.terminal)
     }
 
     fn split(&mut self, side: Side) {
@@ -1002,6 +1011,16 @@ impl App {
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             SetTabColor => self.open_overlay(OverlayKind::TabColors),
             ReportProblem => self.effects.push(Effect::Open(report_url())),
+            DebugCopyState => {
+                if let Some(terminal) = self.focused_terminal() {
+                    self.effects.push(Effect::SetClipboard(terminal.lock().debug_dump()));
+                }
+            }
+            DebugSaveOutput => {
+                if let Some(pane) = self.focused_pane().filter(|p| self.panes.contains_key(p)) {
+                    self.effects.push(Effect::SaveOutput { pane });
+                }
+            }
             OpenLog => self.effects.push(Effect::OpenLog),
             OpenConfigFile => self.effects.push(Effect::OpenConfigFile),
             ToggleTabBar => {

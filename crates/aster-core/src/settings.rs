@@ -43,6 +43,7 @@ const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("under
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
 const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("auto", "Follow the system")];
 const BELLS: &[(&str, &str)] = &[("off", "Off"), ("visual", "Flash the pane"), ("audible", "System sound")];
+const IDENTIFICATION: &[(&str, &str)] = &[("aster", "Aster"), ("xterm", "Compatibility")];
 const TAB_BARS: &[(&str, &str)] = &[("always", "Always"), ("auto", "With two or more tabs"), ("never", "Never")];
 const BACKDROPS: &[(&str, &str)] = &[("none", "None"), ("acrylic", "Acrylic"), ("mica", "Mica")];
 const SSH_CLIENTS: &[(&str, &str)] = &[("native", "Built in"), ("system", "System OpenSSH")];
@@ -60,6 +61,7 @@ pub const SETTINGS: &[Setting] = &[
     item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
     item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
     item(TERMINAL, "terminal.profile", "Default profile", "Shell for new tabs and windows", Control::Profiles),
+    item(TERMINAL, "terminal.identification", "Terminal identification", "Report the Aster name and version to new shells", Control::Choice(IDENTIFICATION)),
     item(TERMINAL, "terminal.recover-tabs", "Restore tabs", "Reopen tabs, splits and their folders on start", Control::Toggle),
     item(TERMINAL, "terminal.confirm-close", "Confirm closing running programs", "Ask before closing a tab, pane or window where a program is still running", Control::Toggle),
     item(TERMINAL, "terminal.focus-follows-mouse", "Focus follows the mouse", "Moving the pointer over a pane makes it the active one", Control::Toggle),
