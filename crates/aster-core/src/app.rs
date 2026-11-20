@@ -25,6 +25,7 @@ pub const BLINK: Duration = Duration::from_millis(530);
 const BELL_FLASH: Duration = Duration::from_millis(150);
 const CLOSED_TABS: usize = 10;
 const PANE_STEP: f32 = 0.1;
+pub(crate) const SETTINGS_PANE: PaneId = PaneId::MAX;
 
 pub const TAB_COLORS: [(&str, &str); 9] = [("No color", ""), ("Red", "#E5534B"), ("Orange", "#E0823D"), ("Yellow", "#D4B13B"), ("Green", "#57AB5A"), ("Teal", "#39B6A8"), ("Blue", "#4C8DF6"), ("Purple", "#9D6CE0"), ("Pink", "#D9619F")];
 
@@ -197,6 +198,7 @@ pub struct App {
     pub(crate) recent: Vec<String>,
     pub(crate) tab_bar_override: Option<bool>,
     pub(crate) tab_toast: Option<(String, Instant)>,
+    pub(crate) settings_stash: Option<crate::settings::SettingsPage>,
     pub(crate) shown_progress: Option<Progress>,
     swallow_control: bool,
     pub(crate) blink_on: bool,
@@ -280,6 +282,7 @@ impl App {
             recent: Vec::new(),
             tab_bar_override: None,
             tab_toast: None,
+            settings_stash: None,
             shown_progress: None,
             swallow_control: false,
             blink_on: true,
@@ -608,7 +611,7 @@ impl App {
     }
 
     fn split(&mut self, side: Side) {
-        let Some(focus) = self.focused_pane() else { return };
+        let Some(focus) = self.focused_pane().filter(|p| *p != SETTINGS_PANE) else { return };
         let profile = self.panes.get(&focus).map(|p| p.profile.clone()).or_else(|| self.default_profile());
         let Some(profile) = profile else { return };
         let id = self.new_pane(profile);
@@ -652,7 +655,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn remove_tab(&mut self, index: usize) {
+    pub(crate) fn remove_tab(&mut self, index: usize) {
         if let Some(state) = self.tab_state(index) {
             if self.closed_tabs.len() == CLOSED_TABS {
                 self.closed_tabs.remove(0);
@@ -762,6 +765,9 @@ impl App {
 
     pub fn tab_title(&self, index: usize) -> String {
         let Some(tab) = self.tabs.get(index) else { return String::new() };
+        if tab.focus == SETTINGS_PANE {
+            return crate::i18n::t("Settings").to_owned();
+        }
         if let Some(t) = &tab.title {
             return t.clone();
         }
@@ -1236,6 +1242,18 @@ impl App {
     }
 
     fn track_tab(&mut self) {
+        let on = self.tabs.get(self.active).is_some_and(|t| t.focus == SETTINGS_PANE);
+        if on && self.settings.is_none() {
+            let page = self.settings_stash.take().unwrap_or_else(|| self.fresh_settings_page());
+            self.settings = Some(page);
+            self.dirty = true;
+        } else if !on && self.settings.is_some() {
+            self.settings_stash = self.settings.take();
+            self.dirty = true;
+        }
+        if !self.tabs.iter().any(|t| t.focus == SETTINGS_PANE) {
+            self.settings_stash = None;
+        }
         let current = self.tabs.get(self.active).map(|t| t.focus);
         let same = match (current, self.current_tab) {
             (Some(now), Some(before)) => self.tabs[self.active].root.contains(before) || now == before,
@@ -1280,11 +1298,15 @@ impl App {
     }
 
     fn combine_tabs(&mut self) {
-        if self.tabs.len() < 2 {
+        let active = self.tabs.get(self.active).map(|t| t.focus).filter(|f| *f != SETTINGS_PANE);
+        let (settings, terminals): (Vec<Tab>, Vec<Tab>) = std::mem::take(&mut self.tabs).into_iter().partition(|t| t.focus == SETTINGS_PANE);
+        if terminals.len() < 2 {
+            self.tabs = terminals.into_iter().chain(settings).collect();
+            self.active = self.active.min(self.tabs.len().saturating_sub(1));
             return;
         }
-        let focus = self.tabs[self.active].focus;
-        let mut tabs = std::mem::take(&mut self.tabs).into_iter();
+        let focus = active.unwrap_or(terminals[0].focus);
+        let mut tabs = terminals.into_iter();
         let Some(first) = tabs.next() else { return };
         let mut combined = first;
         let mut count = 1.0;
@@ -1295,7 +1317,7 @@ impl App {
         }
         combined.focus = focus;
         combined.zoomed = None;
-        self.tabs = vec![combined];
+        self.tabs = std::iter::once(combined).chain(settings).collect();
         self.active = 0;
         self.dirty = true;
     }
@@ -1422,8 +1444,14 @@ impl App {
             if self.settings.as_ref().is_some_and(|p| p.capture.is_some()) {
                 return self.settings_key(key, mods);
             }
-            if self.keymap.press(Chord { key, mods }) == Outcome::Action(Action::Settings) {
-                return self.close_settings();
+            let editing = self.settings.as_ref().is_some_and(|p| p.editing.is_some() || p.editor.is_some());
+            match self.keymap.press(Chord { key, mods }) {
+                Outcome::Action(Action::Settings) => return self.close_settings(),
+                Outcome::Action(a) if !editing && a.works_beside_settings() => {
+                    self.swallow_chord = Some(key);
+                    return self.run(a);
+                }
+                _ => {}
             }
             return self.settings_key(key, mods);
         }

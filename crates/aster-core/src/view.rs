@@ -975,6 +975,23 @@ impl App {
             g.dl.round_rect(geo.close, theme.button_hover, radius);
         }
         centered(g, geo.close, G_CLOSE, FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false), theme.text);
+        for (k, r) in geo.pages.iter().enumerate() {
+            let current = !page.searching() && page.page == k;
+            if current {
+                g.dl.round_rect(*r, theme.accent.alpha(0x30), radius);
+                g.dl.round_rect(Rect::new(r.x, r.y + (8.0 * s).round(), (3.0 * s).round(), r.h - (16.0 * s).round()), theme.accent, (1.5 * s).round());
+            } else if r.contains(mx, my) {
+                g.dl.round_rect(*r, theme.button_hover, radius);
+            }
+            let inner = r.inset((14.0 * s).round(), 0.0);
+            let y = baseline(g, inner, ui);
+            g.text(inner.x, y, t(crate::settings::PAGES[k]), ui, if current { theme.text } else { theme.text_dim }, inner.w);
+        }
+        if let Some(last) = geo.pages.last() {
+            let r = Rect::new(last.x, last.bottom() + (18.0 * s).round(), last.w, (24.0 * s).round()).inset((14.0 * s).round(), 0.0);
+            let y = baseline(g, r, small);
+            g.text(r.x, y, &format!("Aster {}", env!("CARGO_PKG_VERSION")), small, theme.text_dim, r.w);
+        }
         if page.shown.is_empty() {
             centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), t("No settings match"), ui, theme.text_dim);
             return;
@@ -1056,6 +1073,11 @@ impl App {
                             let knob = (c.h - 6.0 * s).round();
                             let kx = if on { c.right() - knob - 3.0 * s } else { c.x + 3.0 * s };
                             g.dl.circle(Rect::new(kx.round(), c.y + ((c.h - knob) / 2.0).round(), knob, knob), if on { Color::rgb(0xFFFFFF) } else { theme.text_dim });
+                        }
+                        Control::Run(_) => {
+                            g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
+                            g.dl.outline(c, if selected { theme.accent } else { theme.overlay_border }, radius, line);
+                            centered(g, c, t("Open"), ui, theme.text);
                         }
                         control => {
                             let editing = selected && page.editing.is_some() && matches!(control, Control::Text | Control::Number { .. });

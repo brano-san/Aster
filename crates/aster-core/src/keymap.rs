@@ -145,6 +145,14 @@ const NAMED: &[(Action, &str, &str)] = &[
 ];
 
 impl Action {
+    pub fn works_beside_settings(self) -> bool {
+        use Action::*;
+        matches!(
+            self,
+            Tab(_) | NextTab | PreviousTab | MoveTabLeft | MoveTabRight | NewTab | NewWindow | NewAdminTab | CloseTab | ReopenTab | ToggleLastTab | ProfileSelector | CommandSelector | ToggleFullscreen | ToggleTabBar | SelectColorScheme
+        )
+    }
+
     pub fn all() -> impl Iterator<Item = Action> {
         NAMED.iter().map(|(a, _, _)| *a).chain((1..=10).map(Action::Tab))
     }
