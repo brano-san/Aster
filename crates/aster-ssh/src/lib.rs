@@ -1,3 +1,4 @@
+mod algorithms;
 pub mod client;
 pub mod config;
 pub mod console;
@@ -7,6 +8,7 @@ pub mod sftp;
 pub mod sftp_tree;
 pub mod socks;
 pub mod forward;
+pub(crate) mod x11;
 
 #[cfg(test)]
 #[path = "../test/server.rs"]

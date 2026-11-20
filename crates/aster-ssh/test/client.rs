@@ -2,6 +2,77 @@ use super::*;
 use crate::console::Input;
 use crate::test_server::*;
 
+#[tokio::test]
+async fn handshake_cancellation_releases_a_stalled_stream() {
+    use tokio::io::AsyncReadExt;
+    let (stream, _peer) = tokio::io::duplex(64);
+    let (ready, pending) = tokio::sync::oneshot::channel();
+    let mut guarded = HandshakeStream { stream: Some(stream), pending: Some(pending) };
+    drop(ready);
+    assert_eq!(guarded.read_u8().await.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[tokio::test]
+async fn completed_handshake_keeps_the_transport_readable() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (stream, mut peer) = tokio::io::duplex(64);
+    let (ready, pending) = tokio::sync::oneshot::channel();
+    let mut guarded = HandshakeStream { stream: Some(stream), pending: Some(pending) };
+    ready.send(()).unwrap();
+    peer.write_u8(42).await.unwrap();
+    assert_eq!(guarded.read_u8().await.unwrap(), 42);
+}
+
+#[tokio::test]
+async fn cancelled_handshake_releases_the_unanswered_host_key_prompt() {
+    use russh::client::Handler;
+    let dir = temp_ssh_dir();
+    let req = request("ann@host".into(), dir.clone());
+    let (out, messages) = crossbeam_channel::unbounded();
+    let (_input, rx) = tokio::sync::mpsc::unbounded_channel();
+    let console = Arc::new(Mutex::new(Console::new(out, rx, (80, 24))));
+    let dest = context_destination(&req.destination, &req, &req.profile, &console).await.unwrap();
+    let (ready, pending) = tokio::sync::oneshot::channel();
+    let mut handler = Client::new(&dest, &req, console.clone(), pending);
+    let key = PublicKey::from_openssh(CLIENT_PUB).unwrap().into();
+    let check = handler.check_server_key(&key);
+    tokio::pin!(check);
+    tokio::select! {
+        biased;
+        _ = &mut check => panic!("the new key requires confirmation"),
+        _ = std::future::ready(()) => {}
+    }
+    assert!(messages.try_iter().any(|b| b.starts_with(b"Are you sure")));
+    drop(ready);
+    assert!(matches!(check.await, Err(russh::Error::ConnectionTimeout)));
+    assert!(console.try_lock().is_ok());
+    assert!(!dir.join("known_hosts").exists());
+}
+
+#[test]
+fn remembered_cwd_is_a_single_shell_argument() {
+    assert_eq!(cwd_command(true, Some("/src/it's $(odd)")), Some(r#"cd '/src/it'\''s $(odd)' && exec "$SHELL" -l"#.into()));
+    assert_eq!(cwd_command(false, Some("/tmp")), None);
+    assert_eq!(cwd_command(true, Some("-")), None);
+    assert_eq!(cwd_command(true, None), None);
+}
+
+#[tokio::test]
+async fn missing_login_is_prompted_in_the_pane_before_pool_lookup() {
+    let (out, shown) = crossbeam_channel::unbounded();
+    let (send, input) = tokio::sync::mpsc::unbounded_channel();
+    let console = Arc::new(Mutex::new(Console::new(out, input, (90, 25))));
+    let req = request("example".into(), temp_ssh_dir());
+    send.send(Input::Data(b"\r".to_vec())).unwrap();
+    send.send(Input::Data(b"alice\r".to_vec())).unwrap();
+    let destination = context_destination(&req.destination, &req, &req.profile, &console).await.unwrap();
+    assert_eq!(destination.user, "alice");
+    let shown: Vec<u8> = shown.try_iter().flatten().collect();
+    assert_eq!(String::from_utf8(shown).unwrap().matches("Login as: ").count(), 2);
+    send.send(Input::Close).unwrap();
+    assert!(context_destination(&req.destination, &req, &req.profile, &console).await.is_err());
+}
+
 #[test]
 fn a_new_host_is_confirmed_then_a_password_opens_a_shell_that_follows_the_pane() {
     let (port, seen) = serve();
@@ -13,6 +84,7 @@ fn a_new_host_is_confirmed_then_a_password_opens_a_shell_that_follows_the_pane()
     pane.wait_for("ann@127.0.0.1's password: ");
     pane.send("secret\r");
     pane.wait_for("welcome");
+    assert!(pane.seen.contains("\x1b[H\x1b[2Jwelcome"));
     assert!(!pane.seen.contains("secret"), "the password is never echoed");
     pane.send("hi\r");
     pane.wait_for("got:hi");
@@ -118,7 +190,7 @@ fn shared(port: u16, dir: PathBuf) -> Pane {
 
 #[test]
 fn tabs_to_the_same_host_share_one_login_until_the_last_one_closes() {
-    let (port, _) = serve();
+    let (port, seen) = serve();
     let dir = temp_ssh_dir();
     let mut first = shared(port, dir.clone());
     first.wait_for("(yes/no)? ");
@@ -127,8 +199,16 @@ fn tabs_to_the_same_host_share_one_login_until_the_last_one_closes() {
     first.send("secret\r");
     first.wait_for("welcome");
 
-    let mut second = shared(port, dir.clone());
-    second.wait_for("welcome");
+    let mut req = request(format!("ann@127.0.0.1:{port}"), dir.clone());
+    req.share = true;
+    req.profile.term = Some("vt100".into());
+    req.profile.remember_cwd = Some(true);
+    req.cwd = Some("/remote folder".into());
+    req.clear_after_connect = false;
+    let mut second = Pane { conn: start(req), seen: String::new() };
+    second.wait_for("cd '/remote folder' && exec \"$SHELL\" -l");
+    assert_eq!(seen.terms.lock().unwrap().as_slice(), ["xterm-256color", "vt100"]);
+    assert!(!second.seen.contains("\x1b[2J"));
     assert!(!second.seen.contains("password"), "the second tab reuses the login: {:?}", second.seen);
 
     first.send("exit\r");
@@ -147,12 +227,16 @@ fn tabs_to_the_same_host_share_one_login_until_the_last_one_closes() {
 fn unshared_tabs_each_log_in() {
     let (port, _) = serve();
     let dir = temp_ssh_dir();
-    let mut first = connect_to(port, dir.clone());
+    let mut req = request(format!("ann@127.0.0.1:{port}"), dir.clone());
+    req.profile.x11 = Some(true);
+    req.x11_display = "localhost:12.3".into();
+    let mut first = Pane { conn: start(req), seen: String::new() };
     first.wait_for("(yes/no)? ");
     first.send("yes\r");
     first.wait_for("password: ");
     first.send("secret\r");
     first.wait_for("welcome");
+    assert!(first.seen.contains("X11 forwarding enabled."));
     let mut second = connect_to(port, dir);
     second.wait_for("password: ");
 }

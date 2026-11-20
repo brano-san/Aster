@@ -30,6 +30,29 @@ impl Console {
         let _ = self.out.send(crlf(text).into_bytes());
     }
 
+    fn service(&self, color: u8, text: &str) {
+        let mut output = String::new();
+        for line in text.lines() {
+            use std::fmt::Write;
+            let _ = write!(output, "\x1b[{color}m");
+            output.extend(line.chars().filter(|c| !c.is_control()));
+            output.push_str("\x1b[0m\r\n");
+        }
+        self.write(output.into_bytes());
+    }
+
+    pub fn note(&self, text: &str) {
+        self.service(2, text);
+    }
+
+    pub fn warn(&self, text: &str) {
+        self.service(33, text);
+    }
+
+    pub fn error(&self, text: &str) {
+        self.service(31, text);
+    }
+
     pub fn write(&self, bytes: Vec<u8>) {
         let _ = self.out.send(bytes);
     }

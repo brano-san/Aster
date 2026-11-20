@@ -41,6 +41,7 @@ const BELL_GAP: Duration = Duration::from_millis(250);
 pub struct Launch {
     pub elevated: bool,
     pub ssh: Option<String>,
+    pub ssh_options: Option<Box<crate::profile::SshOptions>>,
     pub serial: Option<String>,
     pub socket: Option<String>,
     pub stream: Option<crate::profile::Stream>,
@@ -598,11 +599,19 @@ impl App {
     }
 
     fn new_pane(&mut self, profile: Profile) -> PaneId {
-        let inherited = self.focused_pane().and_then(|p| self.pane_cwd(p));
+        let inherited = self.focused_pane().and_then(|id| {
+            let source = &self.panes.get(&id)?.profile;
+            if profile.ssh.is_some() && (source.ssh != profile.ssh || source.ssh_options != profile.ssh_options) {
+                return None;
+            }
+            self.pane_cwd(id)
+        });
         self.new_pane_in(profile, inherited)
     }
 
     pub(crate) fn new_pane_in(&mut self, profile: Profile, inherited: Option<String>) -> PaneId {
+        let native_ssh = profile.ssh.is_some() && self.config.ssh.client == crate::config::SshClient::Native;
+        let inherited = inherited.filter(|_| !native_ssh || profile.ssh_options.as_ref().and_then(|o| o.remember_cwd) == Some(true));
         let id = self.next_id;
         self.next_id += 1;
         let sender = self.sender.clone();
@@ -625,8 +634,12 @@ impl App {
         if inherited.is_some() {
             terminal.lock().set_cwd(inherited.clone());
         }
-        let (args, cwd) = inherit_cwd(&profile, inherited, self.home.clone());
-        let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let (args, cwd) = if native_ssh {
+            (profile.args.clone(), inherited)
+        } else {
+            inherit_cwd(&profile, inherited, self.home.clone())
+        };
+        let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0 });
         id
     }

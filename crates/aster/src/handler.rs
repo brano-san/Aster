@@ -298,7 +298,17 @@ impl<P: Platform> Handler<P> {
             }
             Effect::Spawn { pane, launch, terminal } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
                 let destination = launch.ssh.unwrap_or_default();
-                let remote = crate::remote::connect(&destination, launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), P::home_dir(), crate::remote::Options { share: self.config.ssh.share_connections, forward_agent: self.config.ssh.forward_agent, remember: self.config.ssh.remember_passwords, secrets: Arc::new(self.secrets.clone()) });
+                let options = crate::remote::Options {
+                    profile: launch.ssh_options.map(|o| *o).unwrap_or_default(),
+                    cwd: launch.cwd,
+                    clear_after_connect: self.config.ssh.clear_after_connect,
+                    x11_display: self.config.ssh.x11_display.clone(),
+                    share: self.config.ssh.share_connections,
+                    forward_agent: self.config.ssh.forward_agent,
+                    remember: self.config.ssh.remember_passwords,
+                    secrets: Arc::new(self.secrets.clone()),
+                };
+                let remote = crate::remote::connect(&destination, launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), P::home_dir(), options);
                 let (files, tx, waker) = (remote.files, self.file_tx.clone(), self.waker.clone());
                 let spawned = std::thread::Builder::new().name(format!("aster-files-{pane}")).spawn(move || {
                     for reply in files {

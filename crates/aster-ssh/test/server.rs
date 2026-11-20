@@ -17,6 +17,7 @@ pub const CLIENT_PUB: &str = include_str!("keys/client.pub");
 #[derive(Clone, Default)]
 pub struct Seen {
     pub sizes: Arc<std::sync::Mutex<Vec<(u32, u32)>>>,
+    pub terms: Arc<std::sync::Mutex<Vec<String>>>,
     pub tunnels: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
@@ -47,7 +48,8 @@ impl server::Handler for Server {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn pty_request(&mut self, _c: ChannelId, _term: &str, cols: u32, rows: u32, _pw: u32, _ph: u32, _modes: &[(russh::Pty, u32)], _s: &mut Session) -> Result<(), Self::Error> {
+    async fn pty_request(&mut self, _c: ChannelId, term: &str, cols: u32, rows: u32, _pw: u32, _ph: u32, _modes: &[(russh::Pty, u32)], _s: &mut Session) -> Result<(), Self::Error> {
+        self.seen.terms.lock().unwrap().push(term.to_owned());
         self.seen.sizes.lock().unwrap().push((cols, rows));
         Ok(())
     }
@@ -132,6 +134,21 @@ impl server::Handler for Server {
         Ok(())
     }
 
+    async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        session.data(channel, data.to_vec())?;
+        Ok(())
+    }
+
+    async fn x11_request(&mut self, channel: ChannelId, single: bool, protocol: &str, cookie: &str, screen: u32, session: &mut Session) -> Result<(), Self::Error> {
+        if !single && protocol == "MIT-MAGIC-COOKIE-1" && cookie.len() == 32 && cookie.bytes().all(|c| c.is_ascii_hexdigit()) && screen == 3 {
+            session.channel_success(channel)?;
+        } else {
+            session.channel_failure(channel)?;
+        }
+        Ok(())
+    }
+
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
         if !self.sessions.contains(&channel) {
             return Ok(());
@@ -190,7 +207,7 @@ pub fn temp_ssh_dir() -> PathBuf {
 }
 
 pub fn request(destination: String, ssh_dir: PathBuf) -> Request {
-    Request { destination, cols: 90, rows: 25, term: "xterm-256color".into(), home: ssh_dir.clone(), ssh_dir, user: "ann".into(), ..Request::default() }
+    Request { destination, cols: 90, rows: 25, home: ssh_dir.clone(), ssh_dir, ..Request::default() }
 }
 
 pub struct Pane {

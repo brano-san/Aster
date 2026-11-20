@@ -103,6 +103,8 @@ pub const SETTINGS: &[Setting] = &[
     item(SSH, "ssh.remember-passwords", "Offer to save passwords", "After a typed password or key passphrase works, offer to save it", Control::Toggle),
     item(SSH, "ssh.forward-agent", "Forward the SSH agent", "Let servers use your local SSH agent; ForwardAgent in ~/.ssh/config decides per host", Control::Toggle),
     item(SSH, "ssh.share-connections", "Share connections", "New tabs to a host that is already open reuse its login", Control::Toggle),
+    item(SSH, "ssh.clear-after-connect", "Clear after login", "Clear connection messages before the remote shell starts", Control::Toggle),
+    item(SSH, "ssh.x11-display", "Local X11 display", "For X11 forwarding. Leave empty to use DISPLAY", Control::Text),
     item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
     item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add \"Open in Aster\" to the folder menu of Windows Explorer", Control::Toggle),
     item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run(Action::OpenLog)),
@@ -848,6 +850,7 @@ impl App {
             profile.icon = source.icon.clone();
             profile.color = source.color.clone();
             profile.stream = source.stream.clone();
+            profile.ssh_options = source.ssh_options.clone();
         }
         if ssh.is_some() {
             profile.icon = Some("ssh".into());
@@ -858,6 +861,7 @@ impl App {
                 profile.env = existing.env.clone();
                 profile.color = existing.color.clone();
                 profile.stream = existing.stream.clone();
+                profile.ssh_options = existing.ssh_options.clone();
                 *existing = profile;
             }
             None => config.profiles.push(profile),

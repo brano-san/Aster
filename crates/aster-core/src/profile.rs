@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+pub use aster_proto::ssh::SshOptions;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -18,6 +19,8 @@ pub struct Profile {
     pub scheme: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh: Option<String>,
+    #[serde(default, rename = "ssh-options", skip_serializing_if = "Option::is_none")]
+    pub ssh_options: Option<SshOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

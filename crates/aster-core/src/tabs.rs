@@ -9,6 +9,7 @@ pub struct Rename {
 
 impl App {
     pub fn open_tab_at(&mut self, profile: crate::profile::Profile, cwd: Option<String>) {
+        let cwd = cwd.filter(|_| profile.ssh.is_none() || self.config.ssh.client != crate::config::SshClient::Native);
         let id = self.new_pane_in(profile, cwd);
         let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
         self.tabs.insert(at, crate::app::Tab { root: crate::panes::Node::Leaf(id), focus: id, zoomed: None, title: None, color: None });

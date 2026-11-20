@@ -47,3 +47,20 @@ fn profiles_without_a_stream_table_stay_plain() {
     assert!(Stream::default().options().is_plain());
     assert!(!config.to_text().contains("stream"));
 }
+
+#[test]
+fn ssh_options_round_trip_without_filling_missing_fields() {
+    let text = "[[profiles]]\nssh = 'web'\n[profiles.ssh-options]\nidentity-files = ['~/first', '~/second']\nkeepalive-ms = 800\nremember-cwd = true\n[profiles.ssh-options.algorithms]\nhost-key = []\n";
+    let config = Config::parse(text).unwrap();
+    let profile = &config.profiles[0];
+    let options = profile.ssh_options.as_ref().unwrap();
+    assert_eq!(options.identity_files, Some(vec!["~/first".into(), "~/second".into()]));
+    assert_eq!(options.keepalive_ms, Some(800));
+    assert_eq!(options.remember_cwd, Some(true));
+    assert_eq!(options.port, None);
+    let algorithms = options.algorithms.as_ref().unwrap();
+    assert_eq!(algorithms.host_key, Some(Vec::new()));
+    assert_eq!(algorithms.kex, None);
+    assert_eq!(&Config::parse(&config.to_text()).unwrap().profiles[0], profile);
+    assert!(!toml::to_string(&Profile::default()).unwrap().contains("ssh-options"));
+}

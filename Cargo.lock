@@ -230,6 +230,7 @@ name = "aster-proto"
 version = "0.8.0"
 dependencies = [
  "regex",
+ "serde",
 ]
 
 [[package]]
@@ -246,6 +247,7 @@ version = "0.8.0"
 dependencies = [
  "aster-proto",
  "crossbeam-channel",
+ "getrandom 0.4.3",
  "russh",
  "russh-sftp",
  "tokio",
