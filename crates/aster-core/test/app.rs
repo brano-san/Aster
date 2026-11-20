@@ -8,7 +8,7 @@ impl TextBackend for Mono {
     fn shape(&mut self, text: &str, _: FontStyle, out: &mut ShapedText) {
         out.glyphs.clear();
         for (i, (b, c)) in text.char_indices().enumerate() {
-            out.glyphs.push(ShapedGlyph { font: 0, id: c as u16, x: i as f32 * 8.0, y: 0.0, cluster: b as u32 });
+            out.glyphs.push(ShapedGlyph { font: 0, id: c as u16, x: i as f32 * 8.0, y: 0.0, cluster: b as u32, cluster_x: i as f32 * 8.0 });
         }
         out.width = out.glyphs.len() as f32 * 8.0;
     }
@@ -33,6 +33,50 @@ fn app() -> (App, Gfx<Mono>) {
 
 fn spawns(effects: &[Effect]) -> Vec<(PaneId, Launch)> {
     effects.iter().filter_map(|e| if let Effect::Spawn { pane, launch, .. } = e { Some((*pane, launch.clone())) } else { None }).collect()
+}
+
+#[test]
+fn pane_shapes_ligatures_only_across_adjacent_cells_with_the_same_style() {
+    #[derive(Default)]
+    struct Recorder(Vec<String>);
+
+    impl TextBackend for Recorder {
+        fn shape(&mut self, text: &str, style: FontStyle, out: &mut ShapedText) {
+            if style.ligatures {
+                self.0.push(text.to_owned());
+            }
+            Mono.shape(text, style, out);
+        }
+        fn rasterize(&mut self, key: GlyphKey, out: &mut GlyphBitmap) -> bool {
+            Mono.rasterize(key, out)
+        }
+        fn metrics(&mut self, style: FontStyle) -> FontMetrics {
+            Mono.metrics(style)
+        }
+    }
+
+    let (mut app, _) = app();
+    let mut g = Gfx::new(Recorder::default(), 1024);
+    app.open_default_tab();
+    app.frame(&mut g, false);
+    let terminal = app.focused_terminal().unwrap();
+    terminal.lock().feed("=>界e\u{301}\x1b[31m!=\x1b[0m\r\n->".as_bytes());
+    app.frame(&mut g, false);
+    assert!(g.text.0.is_empty());
+    app.config.terminal.ligatures = true;
+    app.frame(&mut g, false);
+    assert_eq!(g.text.0, ["=>界e\u{301}", "!=", "->"]);
+    let mut vt = terminal.lock();
+    vt.start_selection(SelectionType::Simple, vt_point(0), aster_vt::Side::Left);
+    vt.update_selection(vt_point(0), aster_vt::Side::Right);
+    drop(vt);
+    g.text.0.clear();
+    app.frame(&mut g, false);
+    assert_eq!(g.text.0, ["=", ">界e\u{301}"]);
+
+    fn vt_point(col: usize) -> aster_vt::Point {
+        aster_vt::Point::new(aster_vt::Line(0), aster_vt::Column(col))
+    }
 }
 
 fn writes(effects: &[Effect]) -> Vec<Vec<u8>> {
@@ -104,6 +148,48 @@ fn debug_actions_target_the_focused_terminal() {
     let effects = a.take_effects();
     assert!(effects.iter().any(|e| matches!(e, Effect::SetClipboard(s) if s.contains("second pane") && !s.contains("first pane"))));
     assert!(effects.iter().any(|e| matches!(e, Effect::SaveOutput { pane: id } if *id == pane)));
+}
+
+#[test]
+fn export_buffer_snapshots_the_focused_panes_history_and_screen() {
+    let (mut a, _) = app();
+    a.open_default_tab();
+    a.focused_terminal().unwrap().lock().feed(b"other pane");
+    a.run(Action::SplitRight);
+    let id = a.focused_pane().unwrap();
+    let terminal = a.focused_terminal().unwrap();
+    let mut vt = terminal.lock();
+    vt.resize(Size::new(5, 2));
+    vt.feed("abcdef\r\n\x1b[31me\u{301}界\r\nlast".as_bytes());
+    vt.scroll(Scroll::Top);
+    drop(vt);
+    a.run(Action::from_id("export-buffer").unwrap());
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::ExportBuffer { pane, text } if *pane == id && text == "abcdef\ne\u{301}界\nlast")));
+}
+
+#[test]
+fn copy_as_html_keeps_plain_text_and_styles_only_the_selected_cells() {
+    let (mut a, _) = app();
+    a.open_default_tab();
+    let terminal = a.focused_terminal().unwrap();
+    let mut vt = terminal.lock();
+    vt.resize(Size::new(6, 2));
+    vt.feed("x\x1b[1;38;2;1;2;3;48;2;4;5;6m<&>界e\u{301}\x1b[0m\r\nend\r\nlast".as_bytes());
+    vt.scroll(Scroll::Top);
+    let start = vt.viewport_point(0, 1);
+    vt.start_selection(SelectionType::Simple, start, aster_vt::Side::Left);
+    vt.update_selection(aster_vt::Point::new(aster_vt::Line(0), aster_vt::Column(2)), aster_vt::Side::Right);
+    drop(vt);
+    a.run(Action::Copy);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::SetClipboard(text) if text == "<&>界e\u{301}\nend")));
+    a.config.terminal.copy_as_html = true;
+    a.run(Action::Copy);
+    let effects = a.take_effects();
+    let (plain, html) = effects.iter().find_map(|e| match e { Effect::SetClipboardHtml { text, html } => Some((text, html)), _ => None }).unwrap();
+    assert_eq!(plain, "<&>界e\u{301}\nend");
+    assert!(html.starts_with("<pre><span style=\"color:#010203;background-color:#040506;font-weight:bold\">&lt;&amp;&gt;界e\u{301}"));
+    assert!(html.ends_with("end</span></pre>"));
+    assert_eq!(html.matches("<span ").count(), 2);
 }
 
 #[test]

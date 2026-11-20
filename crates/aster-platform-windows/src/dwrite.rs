@@ -79,6 +79,12 @@ impl IDWriteTextRenderer_Impl for Collector_Impl {
     }
 }
 
+struct Fallback {
+    mapping: IDWriteFontFallback,
+    family: Vec<u16>,
+    symbol: Option<IDWriteFont>,
+}
+
 pub struct DWriteText {
     factory: IDWriteFactory2,
     collection: IDWriteFontCollection,
@@ -87,6 +93,9 @@ pub struct DWriteText {
     icon_family: PCWSTR,
     default_mono: PCWSTR,
     mono_family: Vec<u16>,
+    mono_symbol: Option<IDWriteFont>,
+    fallback: Option<Fallback>,
+    typography: [IDWriteTypography; 2],
     formats: FxHashMap<FontStyle, IDWriteTextFormat>,
     primary: FxHashMap<(FontFamily, bool, bool), Option<DWRITE_FONT_METRICS>>,
     faces: Vec<IDWriteFontFace>,
@@ -110,6 +119,14 @@ impl DWriteText {
             let default_ui = if has(w!("Segoe UI Variable Text")) { w!("Segoe UI Variable Text") } else { w!("Segoe UI") };
             let icon_family = if has(w!("Segoe Fluent Icons")) { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") };
             let mono_family = if has(w!("Cascadia Mono")) { w!("Cascadia Mono") } else { w!("Consolas") };
+            let typography = |parameter| -> windows_core::Result<IDWriteTypography> {
+                let typography = factory.CreateTypography()?;
+                for tag in [DWRITE_FONT_FEATURE_TAG_STANDARD_LIGATURES, DWRITE_FONT_FEATURE_TAG_CONTEXTUAL_ALTERNATES] {
+                    typography.AddFontFeature(DWRITE_FONT_FEATURE { nameTag: tag, parameter })?;
+                }
+                Ok(typography)
+            };
+            let typography = [typography(0).map_err(err)?, typography(1).map_err(err)?];
             let collector = ComObject::new(Collector { runs: RefCell::default() });
             let renderer: IDWriteTextRenderer = collector.to_interface();
             Ok(Self {
@@ -120,6 +137,9 @@ impl DWriteText {
                 icon_family,
                 default_mono: mono_family,
                 mono_family: mono_family.as_wide().iter().copied().chain([0]).collect(),
+                mono_symbol: None,
+                fallback: None,
+                typography,
                 formats: FxHashMap::default(),
                 primary: FxHashMap::default(),
                 faces: Vec::new(),
@@ -142,6 +162,49 @@ impl DWriteText {
     fn has_family(&self, name: PCWSTR) -> bool {
         let (mut i, mut exists) = (0u32, BOOL(0));
         unsafe { self.collection.FindFamilyName(name, &mut i, &mut exists).is_ok() && exists.as_bool() }
+    }
+
+    fn symbol_font(&self, family: PCWSTR) -> Option<IDWriteFont> {
+        unsafe {
+            let (mut i, mut exists) = (0, BOOL(0));
+            self.collection.FindFamilyName(family, &mut i, &mut exists).ok()?;
+            let font = self.collection.GetFontFamily(i).ok()?.GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL).ok()?;
+            font.IsSymbolFont().as_bool().then_some(font)
+        }
+    }
+
+    fn fallback(&self, name: &str) -> Option<Fallback> {
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        if name.is_empty() || name.contains('\0') || !self.has_family(PCWSTR(wide.as_ptr())) {
+            return None;
+        }
+        unsafe {
+            let builder = self.factory.CreateFontFallbackBuilder().ok()?;
+            let range = DWRITE_UNICODE_RANGE { first: 0, last: 0x10ffff };
+            builder.AddMapping(&[range], &[wide.as_ptr()], &self.collection, PCWSTR::null(), PCWSTR::null(), 1.0).ok()?;
+            builder.AddMappings(&self.factory.GetSystemFontFallback().ok()?).ok()?;
+            let mapping = builder.CreateFontFallback().ok()?;
+            Some(Fallback { mapping, symbol: self.symbol_font(PCWSTR(wide.as_ptr())), family: wide })
+        }
+    }
+
+    fn apply_symbol_fallback(&self, layout: &IDWriteTextLayout, text: &str) -> windows_core::Result<()> {
+        let (Some(primary), Some(fallback)) = (&self.mono_symbol, &self.fallback) else { return Ok(()) };
+        let mut start = 0;
+        for c in text.chars() {
+            let range = DWRITE_TEXT_RANGE { startPosition: start, length: c.len_utf16() as u32 };
+            start += range.length;
+            unsafe {
+                if !primary.HasCharacter(c as u32)?.as_bool() {
+                    let family = match &fallback.symbol {
+                        Some(symbol) if !symbol.HasCharacter(c as u32)?.as_bool() => self.default_mono,
+                        _ => PCWSTR(fallback.family.as_ptr()),
+                    };
+                    layout.SetFontFamilyName(family, range)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn family_name(family: &IDWriteFontFamily) -> Option<String> {
@@ -183,6 +246,9 @@ impl DWriteText {
                 .CreateTextFormat(self.family(style.family), &self.collection, Self::weight(style.family, style.bold), Self::slant(style.italic), DWRITE_FONT_STRETCH_NORMAL, style.px().max(1.0), w!("en-us"))
                 .ok()?;
             let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            if let Some(fallback) = self.fallback.as_ref().filter(|_| style.family == FontFamily::Mono) {
+                f.cast::<IDWriteTextFormat1>().ok()?.SetFontFallback(&fallback.mapping).ok()?;
+            }
             f
         };
         self.formats.insert(style, f.clone());
@@ -232,6 +298,7 @@ impl TextBackend for DWriteText {
         let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
         let found = !name.is_empty() && !name.contains('\0') && self.has_family(PCWSTR(wide.as_ptr()));
         self.mono_family = if found { wide } else { unsafe { self.default_mono.as_wide() }.iter().copied().chain([0]).collect() };
+        self.mono_symbol = self.symbol_font(self.family(FontFamily::Mono));
         self.formats.retain(|style, _| style.family != FontFamily::Mono);
         self.primary.retain(|(family, _, _), _| *family != FontFamily::Mono);
         found || name.is_empty()
@@ -243,6 +310,12 @@ impl TextBackend for DWriteText {
         out.sort_by_key(|s| s.to_lowercase());
         out.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         out
+    }
+
+    fn set_fallback_family(&mut self, name: &str) -> bool {
+        self.fallback = self.fallback(name);
+        self.formats.retain(|style, _| style.family != FontFamily::Mono);
+        name.is_empty() || self.fallback.is_some()
     }
 
     fn shape(&mut self, text: &str, style: FontStyle, out: &mut ShapedText) {
@@ -264,6 +337,12 @@ impl TextBackend for DWriteText {
         self.byte_of.push(text.len() as u32);
         let runs = unsafe {
             let Ok(layout) = self.factory.CreateTextLayout(&self.wide, &format, 1.0e6, 1.0e6) else { return };
+            if style.family == FontFamily::Mono {
+                let range = DWRITE_TEXT_RANGE { startPosition: 0, length: self.wide.len() as u32 };
+                if layout.SetTypography(&self.typography[style.ligatures as usize], range).is_err() || self.apply_symbol_fallback(&layout, text).is_err() {
+                    return;
+                }
+            }
             self.collector.runs.borrow_mut().clear();
             if layout.Draw(None, &self.renderer, 0.0, 0.0).is_err() {
                 return;
@@ -284,17 +363,26 @@ impl TextBackend for DWriteText {
                 }
             }
             let mut cluster = 0u32;
+            let mut cluster_x = r.x;
             let mut pen = 0.0;
             for (i, &first) in first_char.iter().enumerate() {
                 if first != u32::MAX {
                     cluster = first;
+                }
+                if i == 0 || first != u32::MAX {
+                    cluster_x = if r.rtl {
+                        let len = 1 + first_char[i + 1..].iter().take_while(|&&n| n == u32::MAX).count();
+                        r.x - pen - r.advances[i..i + len].iter().sum::<f32>()
+                    } else {
+                        r.x + pen
+                    };
                 }
                 let adv = r.advances[i];
                 let (ox, oy) = r.offsets[i];
                 let x = if r.rtl { r.x - pen - adv - ox } else { r.x + pen + ox };
                 let utf16 = (r.text_pos + cluster) as usize;
                 let byte = self.byte_of.get(utf16).copied().unwrap_or(text.len() as u32);
-                out.glyphs.push(ShapedGlyph { font, id: r.ids[i], x, y: r.y - base_y - oy, cluster: byte });
+                out.glyphs.push(ShapedGlyph { font, id: r.ids[i], x, y: r.y - base_y - oy, cluster: byte, cluster_x });
                 pen += adv;
             }
         }
@@ -358,3 +446,7 @@ impl TextBackend for DWriteText {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../test/dwrite.rs"]
+mod tests;

@@ -21,6 +21,56 @@ const G_MIN: &str = "\u{E921}";
 const G_MAX: &str = "\u{E922}";
 const G_RESTORE: &str = "\u{E923}";
 
+#[derive(Clone, Copy, PartialEq)]
+struct RunPaint {
+    font: FontStyle,
+    ink: Color,
+    background: Rgb,
+    flags: Flags,
+    selected: bool,
+    cursor: bool,
+}
+
+#[derive(Default)]
+struct CellRun {
+    text: String,
+    origins: Vec<(usize, f32)>,
+    paint: Option<RunPaint>,
+    next_x: f32,
+    baseline: f32,
+}
+
+impl CellRun {
+    fn append<B: TextBackend>(&mut self, g: &mut Gfx<B>, cell: &aster_vt::Cell, x: f32, baseline: f32, width: f32, paint: RunPaint) {
+        if !paint.font.ligatures && cell.zerowidth().is_none() {
+            g.cell(x, baseline, cell.c, paint.font, paint.ink);
+            return;
+        }
+        if self.paint != Some(paint) || self.baseline != baseline || self.next_x != x {
+            self.flush(g);
+        }
+        self.paint = Some(paint);
+        self.next_x = x + width;
+        self.baseline = baseline;
+        self.origins.push((self.text.len(), x));
+        self.text.push(cell.c);
+        if let Some(marks) = cell.zerowidth() {
+            self.text.extend(marks);
+        }
+        if !paint.font.ligatures {
+            self.flush(g);
+        }
+    }
+
+    fn flush<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        if let Some(paint) = self.paint.take() {
+            g.cell_run(&self.text, &self.origins, self.baseline, paint.font, paint.ink);
+            self.text.clear();
+            self.origins.clear();
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TabSlot {
     pub rect: Rect,
@@ -157,6 +207,7 @@ impl App {
 
     pub fn frame<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool) {
         g.set_mono_family(&self.config.terminal.font);
+        g.set_fallback_family(&self.config.terminal.fallback_font);
         g.set_ui_family(&self.config.appearance.ui_font);
         let m = self.metrics_for(g);
         self.metrics = Some(m);
@@ -416,13 +467,17 @@ impl App {
         let px = m.px;
         let cursor_text = palette.cursor_text.unwrap_or(default_bg);
         let selection_text = palette.selection_text;
+        let min_contrast = self.config.terminal.minimum_contrast_ratio;
         let under_y = (m.baseline + (m.h - m.baseline) * 0.35).round().min(m.h - thin);
+        let ligatures = self.config.terminal.ligatures;
+        let mut run = CellRun::default();
+        let mut decorations = Vec::new();
         t.visible(|v| {
             let flags = v.cell.flags;
             if flags.contains(Flags::WIDE_CHAR_SPACER) {
                 return;
             }
-            let (mut fg, _) = palette.cell(v.cell, &overrides);
+            let (mut fg, bg) = palette.cell(v.cell, &overrides);
             if v.selected {
                 if let Some(st) = selection_text {
                     fg = st;
@@ -435,39 +490,60 @@ impl App {
             let x = ox + v.col as f32 * m.w;
             let y = oy + v.line as f32 * m.h;
             let c = v.cell.c;
-            if c != ' ' && c != '\t' && !flags.contains(Flags::HIDDEN) && !g.cell_box(x, y, c, m.w as u32, m.h as u32, rgb(fg)) {
-                let style = FontStyle::new(FontFamily::Mono, px, flags.contains(Flags::BOLD)).italic(flags.contains(Flags::ITALIC));
-                g.cell(x, y + m.baseline, c, style, rgb(fg));
+            if (c != ' ' || v.cell.zerowidth().is_some()) && c != '\t' && !flags.contains(Flags::HIDDEN) {
+                let mut backdrop = if v.selected { selection_bg } else { bg };
+                if min_contrast > 1.0 && !matches.is_empty() {
+                    let i = matches.partition_point(|mt| (mt.line, mt.end) <= (v.line, v.col));
+                    if let Some(mt) = matches.get(i).filter(|mt| mt.line == v.line && mt.start <= v.col) {
+                        backdrop = if mt.current { selection_bg } else { crate::theme::mix(backdrop, Rgb { r: 0xe5, g: 0xc0, b: 0x7b }, 0x58 as f32 / 255.0) };
+                    }
+                }
+                let backdrop = if at_cursor { cursor_color } else { backdrop };
+                let ink = rgb(crate::theme::ensure_contrast(fg, backdrop, min_contrast));
+                if ligatures && aster_gfx::boxdraw::is_procedural(c) {
+                    run.flush(g);
+                }
+                if !g.cell_box(x, y, c, m.w as u32, m.h as u32, ink) {
+                    let mut font = FontStyle::new(FontFamily::Mono, px, flags.contains(Flags::BOLD)).italic(flags.contains(Flags::ITALIC));
+                    font.ligatures = ligatures;
+                    let paint = RunPaint { font, ink, background: backdrop, flags: flags - (Flags::WIDE_CHAR | Flags::WRAPLINE), selected: v.selected, cursor: at_cursor };
+                    let width = if flags.contains(Flags::WIDE_CHAR) { 2.0 * m.w } else { m.w };
+                    run.append(g, v.cell, x, y + m.baseline, width, paint);
+                }
             }
             if flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT) {
                 let span = if flags.contains(Flags::WIDE_CHAR) { 2.0 } else { 1.0 };
                 let w = m.w * span;
                 let ucolor = v.cell.underline_color().map(|c| palette.resolve(c, &overrides)).unwrap_or(fg);
-                let uy = y + under_y;
-                if flags.contains(Flags::UNDERCURL) {
-                    let band = (3.0 * s).round().max(3.0);
-                    g.dl.undercurl(Rect::new(x, uy - band / 2.0, w, band), rgb(ucolor), thin);
-                } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
-                    g.dl.rect(Rect::new(x, uy - thin, w, thin), rgb(ucolor));
-                    g.dl.rect(Rect::new(x, uy + thin, w, thin), rgb(ucolor));
-                } else if flags.contains(Flags::DOTTED_UNDERLINE) || flags.contains(Flags::DASHED_UNDERLINE) {
-                    let dash = if flags.contains(Flags::DOTTED_UNDERLINE) { thin } else { (3.0 * s).round() };
-                    let mut dx = 0.0;
-                    while dx < w {
-                        g.dl.rect(Rect::new(x + dx, uy, dash.min(w - dx), thin), rgb(ucolor));
-                        dx += dash * 2.0;
-                    }
-                } else if flags.contains(Flags::UNDERLINE) {
-                    g.dl.rect(Rect::new(x, uy, w, thin), rgb(ucolor));
-                }
-                if flags.contains(Flags::STRIKEOUT) {
-                    g.dl.rect(Rect::new(x, y + (m.baseline * 0.62).round(), w, thin), rgb(fg));
-                }
+                decorations.push((x, y, w, flags, ucolor, fg));
             }
         });
+        run.flush(g);
         let offset = t.display_offset();
         let history = t.history();
         drop(t);
+        for (x, y, w, flags, ucolor, fg) in decorations {
+            let uy = y + under_y;
+            if flags.contains(Flags::UNDERCURL) {
+                let band = (3.0 * s).round().max(3.0);
+                g.dl.undercurl(Rect::new(x, uy - band / 2.0, w, band), rgb(ucolor), thin);
+            } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+                g.dl.rect(Rect::new(x, uy - thin, w, thin), rgb(ucolor));
+                g.dl.rect(Rect::new(x, uy + thin, w, thin), rgb(ucolor));
+            } else if flags.contains(Flags::DOTTED_UNDERLINE) || flags.contains(Flags::DASHED_UNDERLINE) {
+                let dash = if flags.contains(Flags::DOTTED_UNDERLINE) { thin } else { (3.0 * s).round() };
+                let mut dx = 0.0;
+                while dx < w {
+                    g.dl.rect(Rect::new(x + dx, uy, dash.min(w - dx), thin), rgb(ucolor));
+                    dx += dash * 2.0;
+                }
+            } else if flags.contains(Flags::UNDERLINE) {
+                g.dl.rect(Rect::new(x, uy, w, thin), rgb(ucolor));
+            }
+            if flags.contains(Flags::STRIKEOUT) {
+                g.dl.rect(Rect::new(x, y + (m.baseline * 0.62).round(), w, thin), rgb(fg));
+            }
+        }
         if let Some(link) = self.hover_link.as_ref().filter(|l| l.pane == id) {
             let x = ox + link.start as f32 * m.w;
             let w = (link.end.saturating_sub(link.start)) as f32 * m.w;

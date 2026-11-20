@@ -11,7 +11,7 @@ impl TextBackend for Mono {
     fn shape(&mut self, text: &str, _: FontStyle, out: &mut ShapedText) {
         out.glyphs.clear();
         for (i, (b, c)) in text.char_indices().enumerate() {
-            out.glyphs.push(ShapedGlyph { font: 0, id: c as u16, x: i as f32 * 8.0, y: 0.0, cluster: b as u32 });
+            out.glyphs.push(ShapedGlyph { font: 0, id: c as u16, x: i as f32 * 8.0, y: 0.0, cluster: b as u32, cluster_x: i as f32 * 8.0 });
         }
         out.width = out.glyphs.len() as f32 * 8.0;
     }

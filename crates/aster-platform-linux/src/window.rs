@@ -157,6 +157,10 @@ impl Window for LinuxWindow {
         }
     }
 
+    fn set_clipboard_html(&self, text: &str, _: &str) {
+        self.set_clipboard_text(text);
+    }
+
     fn set_ime_area(&self, area: Rect) {
         let data = ImeRequestData::default().with_cursor_area(PhysicalPosition::new(area.x as i32, area.y as i32).into(), PhysicalSize::new(area.w as u32, area.h as u32).into());
         let _ = self.raw.request_ime_update(ImeRequest::Update(data));

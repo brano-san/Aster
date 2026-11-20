@@ -7,7 +7,7 @@ use aster_core::panes::PaneId;
 use aster_core::profile::Profile;
 use aster_core::settings::{VaultIssue, VaultView};
 use aster_core::session::{SessionState, WindowState};
-use aster_gfx::text::Gfx;
+use aster_gfx::text::{Gfx, TextBackend};
 use aster_core::config::{Dock, SshClient};
 use aster_core::keymap::Chord;
 use aster_platform::{DockSpec, Edge, Platform, RenderError, Renderer, SpawnRequest, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
@@ -369,6 +369,14 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::SetClipboard(text) => window.set_clipboard_text(&text),
+            Effect::SetClipboardHtml { text, html } => window.set_clipboard_html(&text, &html),
+            Effect::ExportBuffer { pane, text } => {
+                if let Some(state) = self.windows.get(&id) {
+                    if let Some(terminal) = state.app.terminal(pane) {
+                        crate::session::OutputFile::Buffer(text).save(pane, P::downloads_dir, terminal.clone(), state.flow.wake.clone());
+                    }
+                }
+            }
             Effect::SaveOutput { pane } => {
                 if let Some(state) = self.windows.get(&id) {
                     if let Some(terminal) = state.app.terminal(pane) {
@@ -644,7 +652,7 @@ impl<P: Platform> Handler<P> {
 
 impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     fn created(&mut self, window: &Win<P>) {
-        let text = match P::text() {
+        let mut text = match P::text() {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("text backend: {e}");
@@ -655,6 +663,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let waker = self.waker.clone();
         let home = P::home_dir().map(|p| p.to_string_lossy().into_owned());
         let flow = crate::session::OutputFlow::new(move || waker.wake());
+        text.set_font_waker(flow.wake.clone());
         let mut app = App::new(self.config.clone(), self.profiles.clone(), window.is_dark_mode(), home, flow.wake.clone());
         let (w, h) = window.size();
         app.set_viewport(w, h, window.scale());
@@ -755,12 +764,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let (w, h) = window.size();
         s.app.set_viewport(w, h, window.scale());
         let maximized = window.is_maximized();
-        for _ in 0..3 {
-            s.app.frame(&mut s.gfx, maximized);
-            if !s.gfx.atlas_reset {
-                break;
-            }
-        }
+        s.app.frame(&mut s.gfx, maximized);
         let renderer = s.renderer.as_mut().expect("renderer");
         renderer.resize(w, h);
         for (slot, offset) in &s.gfx.uploads.rects {

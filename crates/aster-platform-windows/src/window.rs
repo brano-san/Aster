@@ -11,7 +11,7 @@ use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, ScreenToClient, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
@@ -54,6 +54,29 @@ pub struct Win32Window {
 }
 
 impl Win32Window {
+    fn copy_to_clipboard(&self, text: &str, html: Option<&str>) {
+        if text.is_empty() {
+            return;
+        }
+        let unicode: Vec<u8> = text.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
+        let html = html.map(clipboard_html);
+        unsafe {
+            if !open_clipboard(self.hwnd()) {
+                return;
+            }
+            if EmptyClipboard().is_ok() {
+                if let Some(html) = html {
+                    let format = RegisterClipboardFormatW(w!("HTML Format"));
+                    if format != 0 {
+                        offer_clipboard(format, html.as_bytes());
+                    }
+                }
+                offer_clipboard(CF_UNICODETEXT.0 as u32, &unicode);
+            }
+            let _ = CloseClipboard();
+        }
+    }
+
     fn new(id: WindowId, hub: HWND) -> Self {
         Self {
             id,
@@ -133,6 +156,34 @@ impl Waker for Win32Waker {
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn clipboard_html(fragment: &str) -> String {
+    let prefix = "<html><body><!--StartFragment-->";
+    let suffix = "<!--EndFragment--></body></html>";
+    let header = |start, end, first, last| format!("Version:1.0\r\nStartHTML:{start:010}\r\nEndHTML:{end:010}\r\nStartFragment:{first:010}\r\nEndFragment:{last:010}\r\n");
+    let start = header(0, 0, 0, 0).len();
+    let first = start + prefix.len();
+    let last = first + fragment.len();
+    let mut data = header(start, last + suffix.len(), first, last);
+    data.push_str(prefix);
+    data.push_str(fragment);
+    data.push_str(suffix);
+    data.push('\0');
+    data
+}
+
+unsafe fn offer_clipboard(format: u32, bytes: &[u8]) {
+    let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) else { return };
+    let destination = GlobalLock(memory).cast::<u8>();
+    if !destination.is_null() {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len());
+        let _ = GlobalUnlock(memory);
+        if SetClipboardData(format, Some(HANDLE(memory.0))).is_ok() {
+            return;
+        }
+    }
+    let _ = GlobalFree(Some(memory));
 }
 
 unsafe fn open_clipboard(hwnd: HWND) -> bool {
@@ -287,28 +338,11 @@ impl Window for Win32Window {
     }
 
     fn set_clipboard_text(&self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        let w = wide(text);
-        unsafe {
-            if !open_clipboard(self.hwnd()) {
-                return;
-            }
-            let _ = EmptyClipboard();
-            if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, w.len() * 2) {
-                let p = GlobalLock(h) as *mut u16;
-                let owned_by_clipboard = !p.is_null() && {
-                    std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
-                    let _ = GlobalUnlock(h);
-                    SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(h.0))).is_ok()
-                };
-                if !owned_by_clipboard {
-                    let _ = GlobalFree(Some(h));
-                }
-            }
-            let _ = CloseClipboard();
-        }
+        self.copy_to_clipboard(text, None);
+    }
+
+    fn set_clipboard_html(&self, text: &str, html: &str) {
+        self.copy_to_clipboard(text, Some(html));
     }
 
     fn set_ime_area(&self, area: Rect) {
@@ -1298,3 +1332,7 @@ thread_local! {
 fn taskbar() -> Option<windows::Win32::UI::Shell::ITaskbarList3> {
     TASKBAR.with(Clone::clone)
 }
+
+#[cfg(test)]
+#[path = "../test/window.rs"]
+mod tests;

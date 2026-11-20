@@ -4,7 +4,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 pub const SANS: &[u8] = include_bytes!("../assets/AsterSans.ttf");
 pub const ICONS: &[u8] = include_bytes!("../assets/AsterIcons.ttf");
@@ -20,6 +20,24 @@ pub struct FontFile {
 }
 
 pub type Pair = [FontFile; 2];
+
+pub type MappedPair = [(&'static [u8], u32); 2];
+
+pub fn request_fallback(name: String, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Option<mpsc::Receiver<Option<MappedPair>>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new().name("aster-font-fallback".into()).spawn(move || {
+        let mapped = (|| {
+            let [regular, bold] = fonts().wait().fc.as_ref()?.family(&name)?;
+            Some([(map_file(&regular.path)?, regular.index), (map_file(&bold.path)?, bold.index)])
+        })();
+        if tx.send(mapped).is_ok() {
+            if let Some(wake) = wake {
+                wake();
+            }
+        }
+    }).ok()?;
+    Some(rx)
+}
 
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Resolved {
@@ -109,8 +127,7 @@ pub fn save_cache(path: &Path, r: &Resolved) {
 
 pub fn map_file(path: &Path) -> Option<&'static [u8]> {
     static MAPS: Mutex<Vec<(PathBuf, &'static [u8])>> = Mutex::new(Vec::new());
-    let mut maps = MAPS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, data)) = maps.iter().find(|(p, _)| p == path) {
+    if let Some((_, data)) = MAPS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == path) {
         return Some(data);
     }
     let file = File::open(path).ok()?;
@@ -118,6 +135,11 @@ pub fn map_file(path: &Path) -> Option<&'static [u8]> {
     let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, file.as_raw_fd(), 0) };
     if ptr == libc::MAP_FAILED {
         return None;
+    }
+    let mut maps = MAPS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, data)) = maps.iter().find(|(p, _)| p == path) {
+        unsafe { libc::munmap(ptr, len) };
+        return Some(data);
     }
     let data: &'static [u8] = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
     maps.push((path.to_owned(), data));

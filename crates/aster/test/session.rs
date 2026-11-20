@@ -55,3 +55,17 @@ fn saving_writes_the_requested_snapshot_and_reports_the_path() {
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(dir).unwrap();
 }
+
+#[test]
+fn buffer_export_writes_utf8_and_leaves_previous_exports_intact() {
+    let dir = std::env::temp_dir().join(format!("aster-0903-export-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    let first = OutputFile::Buffer("one\n界".into()).write(&dir, 7).unwrap();
+    let second = OutputFile::Buffer("two".into()).write(&dir, 7).unwrap();
+    assert!(first.file_stem().unwrap().to_str().unwrap().strip_prefix("aster-buffer-7-").unwrap().parse::<u128>().is_ok());
+    assert_eq!(first.extension().unwrap(), "txt");
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "one\n界");
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), "two");
+    std::fs::remove_file(first).unwrap();
+    std::fs::remove_file(second).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+}

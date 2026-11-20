@@ -17,6 +17,7 @@ pub use search::{SearchStatus, VisibleMatch};
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::selection::Selection;
+use alacritty_terminal::term::cell::LineLength;
 use alacritty_terminal::term::{Config, Osc52, Term};
 use alacritty_terminal::vte::ansi::{CursorStyle, Processor, StdSyncHandler};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -353,6 +354,45 @@ impl Terminal {
 
     pub fn selection_text(&self) -> Option<String> {
         self.term.selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    pub fn buffer_text(&self) -> String {
+        self.term.bounds_to_string(Point::new(self.term.topmost_line(), Column(0)), Point::new(self.term.bottommost_line(), self.term.last_column()))
+    }
+
+    pub fn selected_cells(&self, mut visit: impl FnMut(Option<&Cell>)) {
+        let Some(selection) = &self.term.selection else { return };
+        let Some(range) = selection.to_range(&self.term) else { return };
+        let last = self.term.last_column();
+        for line in (range.start.line.0..=range.end.line.0).map(Line) {
+            let row = &self.term.grid()[line];
+            let mut start = if range.is_block || line == range.start.line { range.start.column.0 } else { 0 };
+            let end = if range.is_block || line == range.end.line { range.end.column } else { last };
+            if row[Column(start)].flags.contains(Flags::WIDE_CHAR_SPACER) {
+                start = start.saturating_sub(1);
+            }
+            let occupied = row.line_length().0.min(end.0 + 1);
+            let mut cells = &row[..][start.min(occupied)..occupied];
+            if range.is_block {
+                let used = cells.iter().rposition(|c| !c.c.is_whitespace() || c.zerowidth().is_some()).map_or(0, |i| i + 1);
+                cells = &cells[..used];
+            }
+            for cell in cells {
+                if !cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    visit(Some(cell));
+                }
+            }
+            if end == last && row[last].flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) && line < self.term.bottommost_line()
+                && (line == range.end.line || range.is_block && range.start.column.0 != 0) {
+                visit(Some(&self.term.grid()[line + 1i32][Column(0)]));
+            }
+            if line != range.end.line && (range.is_block || !row[last].flags.contains(Flags::WRAPLINE)) {
+                visit(None);
+            }
+        }
+        if selection.ty == SelectionType::Lines {
+            visit(None);
+        }
     }
 
     pub fn clear_history(&mut self) {

@@ -1,4 +1,5 @@
 pub mod app;
+mod clipboard;
 pub mod close;
 pub mod config;
 pub mod files;
