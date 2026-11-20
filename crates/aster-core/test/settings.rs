@@ -31,12 +31,13 @@ fn saved(a: &mut App) -> Option<Config> {
 #[test]
 fn every_setting_points_at_a_config_value_of_the_matching_type() {
     let config = Config::default();
-    for s in SETTINGS {
+    for s in SETTINGS.iter().filter(|s| !matches!(s.control, Control::Run(_))) {
         let value = get(&config, s.key).unwrap_or_else(|| panic!("{} is missing", s.key));
         let fits = match s.control {
             Control::Toggle => value.is_bool(),
             Control::Number { .. } => value.is_integer() || value.is_float(),
             Control::Choice(_) | Control::Schemes | Control::Profiles | Control::Text => value.is_str(),
+            Control::Run(_) => true,
         };
         assert!(fits, "{} holds {value:?}", s.key);
         if let Control::Choice(options) = s.control {
@@ -72,8 +73,16 @@ fn numbers_print_without_float_noise() {
 #[test]
 fn the_query_filters_by_every_word_across_label_hint_and_section() {
     let mut page = SettingsPage::new();
-    assert_eq!(page.shown.iter().filter(|&&i| i < SETTINGS.len()).count(), SETTINGS.len());
-    assert!(page.shown.iter().any(|&i| shortcut(i).is_some()), "shortcuts are listed too");
+    let mut listed = 0;
+    for (k, name) in PAGES.iter().enumerate() {
+        page.show_page(k);
+        assert!(page.shown.iter().all(|&i| page.section(i) == *name), "{name} shows only its own items");
+        listed += page.shown.iter().filter(|&&i| i < SETTINGS.len()).count();
+        if *name == SHORTCUTS {
+            assert!(page.shown.iter().any(|&i| shortcut(i).is_some()), "shortcuts have their page");
+        }
+    }
+    assert_eq!(listed, SETTINGS.len(), "every setting is on some page");
     page.query = "dock top".into();
     page.refilter();
     let keys: Vec<_> = page.shown.iter().map(|&i| SETTINGS[i].key).collect();
@@ -262,6 +271,7 @@ fn the_settings_shortcut_itself_can_be_captured() {
 
 fn select_profile(a: &mut App, name: &str) {
     a.run(Action::Settings);
+    a.settings.as_mut().unwrap().show_page(PAGES.iter().position(|p| *p == PROFILES).unwrap());
     let page = a.settings.as_ref().unwrap();
     let at = page.shown.iter().position(|&i| match page.profile_at(i) {
         Some(p) => p.name == name,

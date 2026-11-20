@@ -263,3 +263,28 @@ fn the_tab_bar_hides_by_setting_or_shortcut_and_tab_switches_show_their_name() {
     let c = crate::view::bare_chrome(800.0, 600.0);
     assert_eq!((c.content.y, c.content.h, c.tabs.len()), (0.0, 600.0, 0));
 }
+
+#[test]
+fn settings_live_in_their_own_tab_and_come_back_where_they_were() {
+    let mut a = app(1);
+    key(&mut a, Key::Char(','), Mods { ctrl: true, ..Mods::NONE });
+    assert_eq!(a.tabs.len(), 2);
+    assert_eq!(a.tab_title(1), "Settings");
+    assert!(a.settings.is_some());
+    key(&mut a, Key::PageDown, Mods { ctrl: true, ..Mods::NONE });
+    typed(&mut a, "x");
+    key(&mut a, Key::Char('1'), Mods { alt: true, ..Mods::NONE });
+    assert_eq!(a.active, 0, "tab shortcuts work beside the settings");
+    assert!(a.settings.is_none(), "the terminal tab gets the keys again");
+    key(&mut a, Key::Char('2'), Mods { alt: true, ..Mods::NONE });
+    let page = a.settings.as_ref().expect("settings come back");
+    assert_eq!((page.page, page.query.as_str()), (1, "x"));
+    key(&mut a, Key::Char(','), Mods { ctrl: true, ..Mods::NONE });
+    assert_eq!(a.tabs.len(), 1, "the shortcut closes the settings tab");
+    assert!(a.settings.is_none());
+    a.run(Action::Settings);
+    a.run(Action::SplitRight);
+    a.run(Action::CombineTabs);
+    assert_eq!(a.tabs.len(), 2, "the settings tab is never split or combined");
+    assert_eq!(a.snapshot().tabs.len(), 1, "the settings tab is not saved in the session");
+}

@@ -14,6 +14,7 @@ pub enum Control {
     Profiles,
     Number { min: f64, max: f64, step: f64 },
     Text,
+    Run(Action),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,7 +36,7 @@ const SEARCH: &str = "Search";
 const APPEARANCE: &str = "Appearance";
 const DOCK: &str = "Docked window";
 const SSH: &str = "SSH";
-const SYSTEM: &str = "System";
+const SYSTEM: &str = "Application";
 
 const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("underline", "Underline")];
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
@@ -73,7 +74,6 @@ pub const SETTINGS: &[Setting] = &[
     item(SEARCH, "terminal.search-options.case-sensitive", "Match case", "Search tells upper and lower case apart", Control::Toggle),
     item(SEARCH, "terminal.search-options.regex", "Regular expressions", "Search queries are regular expressions", Control::Toggle),
     item(SEARCH, "terminal.search-options.whole-word", "Whole words", "Search matches whole words only", Control::Toggle),
-    item(APPEARANCE, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
     item(APPEARANCE, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Choice(SCHEME_MODES)),
     item(APPEARANCE, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
     item(APPEARANCE, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
@@ -93,7 +93,11 @@ pub const SETTINGS: &[Setting] = &[
     item(SSH, "ssh.remember-passwords", "Offer to save passwords", "After a typed password or key passphrase works, offer to keep it in the system credential store", Control::Toggle),
     item(SSH, "ssh.forward-agent", "Forward the SSH agent", "Let servers use your local SSH agent; ForwardAgent in ~/.ssh/config decides per host", Control::Toggle),
     item(SSH, "ssh.share-connections", "Share connections", "New tabs to a host that is already open reuse its login", Control::Toggle),
+    item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
     item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add \"Open in Aster\" to the folder menu of Windows Explorer", Control::Toggle),
+    item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run(Action::OpenLog)),
+    item(SYSTEM, "action.open-config-file", "Config file", "Open the config file in the system editor", Control::Run(Action::OpenConfigFile)),
+    item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run(Action::ReportProblem)),
 ];
 
 pub fn get(config: &Config, key: &str) -> Option<Value> {
@@ -131,6 +135,7 @@ fn found(hay: &str, query: &str) -> bool {
 
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
 pub const PROFILES: &str = "Profiles";
+pub const PAGES: [&str; 9] = [SYSTEM, APPEARANCE, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, SSH];
 pub const FIELDS: [&str; 7] = ["Name", "Command", "Arguments", "Start folder", "SSH destination", "Serial port", "Telnet or TCP address"];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -233,6 +238,7 @@ pub struct SettingsPage {
     pub profiles: Vec<ProfileRow>,
     pub editor: Option<ProfileEditor>,
     pub deleting: Option<String>,
+    pub page: usize,
 }
 
 impl SettingsPage {
@@ -252,9 +258,27 @@ impl SettingsPage {
         });
         let new_row = found(&format!("{PROFILES} {} new profile add create {}", t(PROFILES), t("New profile")), &self.query).then_some(base + self.profiles.len());
         let shortcuts = (SETTINGS.len()..base).filter(|&i| item_matches(i, &self.query));
-        self.shown = settings.chain(profiles.map(|k| base + k)).chain(new_row).chain(shortcuts).collect();
+        let shown: Vec<usize> = settings.chain(profiles.map(|k| base + k)).chain(new_row).chain(shortcuts).collect();
+        self.shown = if self.query.trim().is_empty() {
+            let page = PAGES[self.page.min(PAGES.len() - 1)];
+            shown.into_iter().filter(|&i| self.section(i) == page).collect()
+        } else {
+            shown
+        };
         self.selected = 0;
         self.scroll = 0.0;
+    }
+
+    pub fn searching(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
+
+    pub(crate) fn show_page(&mut self, page: usize) {
+        self.page = page.min(PAGES.len() - 1);
+        self.query.clear();
+        self.editing = None;
+        self.notice = None;
+        self.refilter();
     }
 
     pub fn current(&self) -> Option<&'static Setting> {
@@ -319,6 +343,7 @@ pub struct SettingsGeometry {
     pub close: Rect,
     pub list: Rect,
     pub rows: Vec<Row>,
+    pub pages: Vec<Rect>,
     pub height: f32,
 }
 
@@ -335,21 +360,28 @@ pub fn control_width(control: Control) -> f32 {
         Control::Number { .. } => 132.0,
         Control::Choice(_) | Control::Schemes | Control::Profiles => 220.0,
         Control::Text => 260.0,
+        Control::Run(_) => 120.0,
     }
 }
 
 pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry {
-    let width = (860.0 * s).min(content.w - 48.0 * s).max(240.0 * s).round();
-    let x = (content.x + (content.w - width) / 2.0).round();
+    let total = (1080.0 * s).min(content.w - 32.0 * s).max(240.0 * s).round();
+    let x0 = (content.x + (content.w - total) / 2.0).round();
+    let side_w = if total >= 640.0 * s { (200.0 * s).round() } else { 0.0 };
+    let gap = if side_w > 0.0 { (24.0 * s).round() } else { 0.0 };
+    let x = x0 + side_w + gap;
+    let width = total - side_w - gap;
     let top = content.y + (18.0 * s).round();
     let header_h = (36.0 * s).round();
     let close_w = header_h;
-    let close = Rect::new(x + width - close_w, top, close_w, header_h);
+    let close = Rect::new(x0 + total - close_w, top, close_w, header_h);
     let field_w = (300.0 * s).min(width * 0.5).round();
     let field = Rect::new(close.x - field_w - (8.0 * s).round(), top, field_w, header_h);
-    let title = Rect::new(x, top, (field.x - x - 8.0 * s).max(0.0), header_h);
+    let title = Rect::new(x0, top, (field.x - x0 - 8.0 * s).max(0.0), header_h);
     let list_top = top + header_h + (14.0 * s).round();
     let list = Rect::new(x, list_top, width, (content.bottom() - list_top - 12.0 * s).max(0.0));
+    let page_h = (34.0 * s).round();
+    let pages = if side_w > 0.0 { (0..PAGES.len()).map(|k| Rect::new(x0, list_top + k as f32 * page_h, side_w, page_h - (2.0 * s).round())).collect() } else { Vec::new() };
     let section_h = (38.0 * s).round();
     let item_h = (58.0 * s).round();
     let control_h = (30.0 * s).round();
@@ -373,7 +405,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
         y += item_h;
     }
     let height = y + page.scroll - list.y;
-    SettingsGeometry { page: content, title, field, close, list, rows, height }
+    SettingsGeometry { page: content, title, field, close, list, rows, pages, height }
 }
 
 pub fn part_at(control: Control, r: Rect, s: f32, x: f32) -> Part {
@@ -391,10 +423,9 @@ impl App {
     }
 
     pub(crate) fn open_profile_settings(&mut self) {
-        if self.settings.is_none() {
-            self.open_settings();
-        }
+        self.open_settings();
         if let Some(page) = self.settings.as_mut() {
+            page.show_page(PAGES.iter().position(|p| *p == PROFILES).unwrap_or(0));
             if let Some(at) = page.shown.iter().position(|&i| page.profile_at(i).is_some() || page.is_new_profile(i)) {
                 page.selected = at;
             }
@@ -403,11 +434,27 @@ impl App {
         self.dirty = true;
     }
 
-    pub(crate) fn open_settings(&mut self) {
-        self.overlay = None;
+    pub(crate) fn fresh_settings_page(&self) -> SettingsPage {
         let mut page = SettingsPage { profiles: self.profile_rows(), ..SettingsPage::default() };
         page.refilter();
-        self.settings = Some(page);
+        page
+    }
+
+    pub(crate) fn open_settings(&mut self) {
+        use crate::app::{Tab, SETTINGS_PANE};
+        self.overlay = None;
+        match self.tabs.iter().position(|t| t.focus == SETTINGS_PANE) {
+            Some(i) => self.active = i,
+            None => {
+                let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
+                self.tabs.insert(at, Tab { root: crate::panes::Node::Leaf(SETTINGS_PANE), focus: SETTINGS_PANE, zoomed: None, title: None, color: None });
+                self.active = at;
+            }
+        }
+        if self.settings.is_none() {
+            let page = self.settings_stash.take().unwrap_or_else(|| self.fresh_settings_page());
+            self.settings = Some(page);
+        }
         self.dirty = true;
     }
 
@@ -591,6 +638,10 @@ impl App {
     pub(crate) fn close_settings(&mut self) {
         self.commit_edit();
         self.settings = None;
+        self.settings_stash = None;
+        if let Some(i) = self.tabs.iter().position(|t| t.focus == crate::app::SETTINGS_PANE) {
+            self.remove_tab(i);
+        }
         self.dirty = true;
     }
 
@@ -730,6 +781,7 @@ impl App {
                 self.set_number(setting, now + step * delta as f64);
             }
             Control::Text => self.begin_edit(),
+            Control::Run(action) => self.run(action),
         }
     }
 
@@ -861,6 +913,14 @@ impl App {
             Key::Escape => return self.close_settings(),
             Key::Up => page.step(-1),
             Key::Down | Key::Tab => page.step(1),
+            Key::PageUp if mods.ctrl => {
+                let k = (page.page + PAGES.len() - 1) % PAGES.len();
+                page.show_page(k);
+            }
+            Key::PageDown if mods.ctrl => {
+                let k = (page.page + 1) % PAGES.len();
+                page.show_page(k);
+            }
             Key::PageUp => page.step(-6),
             Key::PageDown => page.step(6),
             Key::Home if mods.ctrl => page.step(isize::MIN / 2),
@@ -918,6 +978,13 @@ impl App {
         }
         if geo.field.contains(x, y) {
             return self.commit_edit();
+        }
+        if let Some(k) = geo.pages.iter().position(|r| r.contains(x, y)) {
+            self.commit_edit();
+            if let Some(page) = self.settings.as_mut() {
+                page.show_page(k);
+            }
+            return;
         }
         if !geo.list.contains(x, y) {
             return self.commit_edit();
