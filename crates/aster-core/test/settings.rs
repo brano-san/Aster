@@ -471,3 +471,118 @@ fn the_profile_editor_validates_and_canonicalizes_the_color_scheme() {
     a.on_event(ctrl(Key::Enter));
     assert_eq!(saved(&mut a).unwrap().profiles[0].scheme, None);
 }
+
+#[test]
+fn color_scheme_page_lists_settings_then_custom_and_builtin_palettes() {
+    let mut a = app();
+    let mut config = a.config().clone();
+    let colors = std::array::from_fn(|i| 0x204060 + i as u32);
+    config.color_schemes.push(crate::config::CustomScheme {
+        name: "Sample".into(), foreground: "#123456".into(), background: "#abcdef".into(),
+        colors: colors.iter().map(|c| format!("#{c:06x}")).collect(), ..Default::default()
+    });
+    a.set_config(config);
+    a.run(Action::Settings);
+    a.on_event(ctrl(Key::PageDown));
+    a.on_event(ctrl(Key::PageDown));
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!(PAGES[page.page], COLORS);
+    assert!(page.shown.iter().all(|&i| page.section(i) == COLORS));
+    let controls: Vec<_> = page.shown[..3].iter().map(|&i| SETTINGS[i].key).collect();
+    assert_eq!(controls, ["appearance.color-scheme-mode", "appearance.color-scheme", "appearance.light-color-scheme"]);
+    let rows: Vec<_> = page.shown[3..].iter().map(|&i| page.scheme_at(i).unwrap()).collect();
+    assert_eq!(rows.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), a.scheme_names());
+    assert_eq!(*rows[0], SchemeRow { name: "Sample".into(), custom: true, foreground: 0x123456, background: 0xabcdef, colors });
+    assert!(rows[1..].iter().all(|s| !s.custom));
+}
+
+#[test]
+fn enter_applies_and_saves_the_selected_color_scheme() {
+    let mut a = app();
+    a.run(Action::Settings);
+    typed(&mut a, "Aster Light");
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!(page.scheme_at(page.current_item().unwrap()).unwrap().name, "Aster Light");
+    assert!(page.current().is_none() && page.current_shortcut().is_none());
+    for k in [Key::Left, Key::Right, Key::Delete] {
+        key(&mut a, k);
+    }
+    assert_eq!(a.config().appearance.color_scheme, "Aster Dark");
+    assert!(saved(&mut a).is_none());
+    key(&mut a, Key::Enter);
+    assert_eq!(a.config().appearance.color_scheme, "Aster Light");
+    assert_eq!(saved(&mut a).unwrap().appearance.color_scheme, "Aster Light");
+}
+
+#[test]
+fn partial_scheme_name_is_searchable_from_another_page() {
+    let mut a = app();
+    a.run(Action::Settings);
+    typed(&mut a, "sTeR Li");
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!(PAGES[page.page], SYSTEM);
+    assert!(page.shown.iter().any(|&i| page.scheme_at(i).is_some_and(|s| s.name == "Aster Light")));
+}
+
+#[test]
+fn opening_color_scheme_page_selects_and_reveals_current_scheme() {
+    let mut a = app();
+    a.chrome = crate::view::chrome(1000.0, 360.0, 1.0, 1);
+    let name = a.scheme_names().pop().unwrap();
+    let mut config = a.config().clone();
+    config.appearance.color_scheme = name.to_lowercase();
+    a.set_config(config);
+    a.run(Action::Settings);
+    let k = PAGES.iter().position(|&p| p == COLORS).unwrap();
+    let r = a.settings_geometry().unwrap().pages[k];
+    a.settings_click(r.x + 1.0, r.y + 1.0);
+    let assert_current_visible = |a: &App| {
+        let page = a.settings.as_ref().unwrap();
+        assert_eq!(page.scheme_at(page.current_item().unwrap()).unwrap().name, name);
+        let geo = a.settings_geometry().unwrap();
+        let row = geo.rows.iter().find(|r| r.kind == RowKind::Item(page.selected)).unwrap();
+        assert!(row.rect.y >= geo.list.y && row.rect.bottom() <= geo.list.bottom());
+    };
+    assert_current_visible(&a);
+    a.on_event(ctrl(Key::PageDown));
+    a.on_event(ctrl(Key::PageUp));
+    assert_current_visible(&a);
+}
+
+#[test]
+fn clicking_a_scheme_updates_only_the_active_light_mode() {
+    let mut a = app();
+    a.chrome = crate::view::chrome(1000.0, 700.0, 1.0, 1);
+    let mut config = a.config().clone();
+    config.appearance.color_scheme_mode = crate::config::SchemeMode::Light;
+    let name = a.scheme_names().pop().unwrap();
+    a.set_config(config);
+    a.run(Action::Settings);
+    typed(&mut a, &name);
+    let page = a.settings.as_ref().unwrap();
+    let n = page.shown.iter().position(|&i| page.scheme_at(i).is_some_and(|s| s.name == name)).unwrap();
+    let row = a.settings_geometry().unwrap().rows.into_iter().find(|r| r.kind == RowKind::Item(n)).unwrap();
+    a.settings_click(row.control.x + 1.0, row.control.y + 1.0);
+    let config = saved(&mut a).unwrap();
+    assert_eq!(config.appearance.light_color_scheme, name);
+    assert_eq!(config.appearance.color_scheme, "Aster Dark");
+}
+
+#[test]
+fn scheme_search_matches_settings_and_only_matching_palette_names() {
+    let mut a = app();
+    a.run(Action::Settings);
+    typed(&mut a, "scheme");
+    let page = a.settings.as_ref().unwrap();
+    let settings: Vec<_> = page.shown.iter().filter_map(|&i| SETTINGS.get(i)).filter(|s| s.section == COLORS).map(|s| s.key).collect();
+    assert_eq!(settings, ["appearance.color-scheme-mode", "appearance.color-scheme", "appearance.light-color-scheme"]);
+    let rows: Vec<_> = page.shown.iter().filter_map(|&i| page.scheme_at(i)).collect();
+    let expected = a.scheme_names().iter().filter(|name| name.to_lowercase().contains("scheme")).count();
+    assert_eq!(rows.len(), expected);
+    assert!(rows.iter().all(|s| s.name.to_lowercase().contains("scheme")));
+
+    key(&mut a, Key::Escape);
+    typed(&mut a, "Aster Dark");
+    let page = a.settings.as_ref().unwrap();
+    assert!(page.shown.iter().filter_map(|&i| page.scheme_at(i)).any(|s| s.name == "Aster Dark"));
+}

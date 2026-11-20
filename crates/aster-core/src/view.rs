@@ -898,7 +898,7 @@ impl App {
         g.text(geo.hint.x, hy, hint, small, theme.text_dim, geo.hint.w);
     }
 
-    fn draw_profile_editor<B: TextBackend>(&mut self, g: &mut Gfx<B>, area: Rect, editor: &crate::settings::ProfileEditor) {
+    fn draw_profile_editor<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, editor: &crate::settings::ProfileEditor) {
         use crate::settings::FIELDS;
         let s = self.scale;
         let theme = self.theme;
@@ -955,10 +955,10 @@ impl App {
         };
     }
 
-    fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+    fn draw_settings<B: TextBackend>(&self, g: &mut Gfx<B>) {
         use crate::settings::{part_at, Control, Part, RowKind, SETTINGS};
         let Some(geo) = self.settings_geometry() else { return };
-        let Some(page) = self.settings.clone() else { return };
+        let Some(page) = self.settings.as_ref() else { return };
         let s = self.scale;
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
@@ -1009,6 +1009,7 @@ impl App {
             return;
         }
         g.dl.set_clip(Some(geo.list));
+        let current_scheme = page.scheme_item(self.current_scheme());
         for row in &geo.rows {
             if row.rect.bottom() < geo.list.y || row.rect.y > geo.list.bottom() {
                 continue;
@@ -1048,6 +1049,34 @@ impl App {
                         continue;
                     }
                     let item = page.shown[n];
+                    if let Some(scheme) = page.scheme_at(item) {
+                        let c = row.control;
+                        let tx = row.rect.x + (14.0 * s).round();
+                        let tw = (c.x - tx - 16.0 * s).max(0.0);
+                        let mut detail = if scheme.custom { t("Custom") } else { t("Built-in") }.to_owned();
+                        if current_scheme == Some(item) {
+                            detail.push_str(" · ");
+                            detail.push_str(t("Current"));
+                        }
+                        g.text(tx, row.rect.y + (25.0 * s).round(), &scheme.name, ui, theme.text, tw);
+                        g.text(tx, row.rect.y + (43.0 * s).round(), &detail, small, theme.text_dim, tw);
+                        g.dl.round_rect(c, Color::rgb(scheme.background), radius);
+                        g.dl.outline(c, theme.overlay_border, radius, line);
+                        let pad = (6.0 * s).round();
+                        let inner = c.inset(pad, pad);
+                        let sample_y = baseline(g, inner, small);
+                        let sample_w = g.text(inner.x, sample_y, t("Aa"), small, Color::rgb(scheme.foreground), inner.w * 0.25);
+                        let grid_x = inner.x + sample_w.ceil() + pad;
+                        let gap = 3.0 * s;
+                        let cell_w = (inner.right() - grid_x - 7.0 * gap) / 8.0;
+                        let cell_h = (inner.h - gap) / 2.0;
+                        for (i, &color) in scheme.colors.iter().enumerate() {
+                            let x = grid_x + (i % 8) as f32 * (cell_w + gap);
+                            let y = inner.y + (i / 8) as f32 * (cell_h + gap);
+                            g.dl.round_rect(Rect::new(x, y, cell_w, cell_h).snap(), Color::rgb(color), 2.0 * s);
+                        }
+                        continue;
+                    }
                     if page.profile_at(item).is_some() || page.is_new_profile(item) {
                         let tx = row.rect.x + (14.0 * s).round();
                         let tw = (row.control.x - tx - 16.0 * s).max(0.0);

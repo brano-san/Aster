@@ -34,6 +34,7 @@ const TERMINAL: &str = "Terminal";
 const INPUT: &str = "Clipboard and mouse";
 const SEARCH: &str = "Search";
 const APPEARANCE: &str = "Appearance";
+const COLORS: &str = "Color scheme";
 const DOCK: &str = "Docked window";
 const SSH: &str = "SSH";
 const SYSTEM: &str = "Application";
@@ -75,15 +76,15 @@ pub const SETTINGS: &[Setting] = &[
     item(SEARCH, "terminal.search-options.case-sensitive", "Match case", "Search tells upper and lower case apart", Control::Toggle),
     item(SEARCH, "terminal.search-options.regex", "Regular expressions", "Search queries are regular expressions", Control::Toggle),
     item(SEARCH, "terminal.search-options.whole-word", "Whole words", "Search matches whole words only", Control::Toggle),
-    item(APPEARANCE, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Choice(SCHEME_MODES)),
-    item(APPEARANCE, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
-    item(APPEARANCE, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
     item(APPEARANCE, "appearance.opacity", "Opacity", "Background opacity of the terminal", Control::Number { min: 0.2, max: 1.0, step: 0.05 }),
     item(APPEARANCE, "appearance.backdrop", "Backdrop", "System material behind the window on Windows 11", Control::Choice(BACKDROPS)),
     item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Text),
     item(APPEARANCE, "appearance.tab-bar", "Tab bar", "Hide the tab bar and window buttons to leave only the terminal; Ctrl+Shift+B toggles it", Control::Choice(TAB_BARS)),
     item(APPEARANCE, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
     item(APPEARANCE, "appearance.last-tab-closes-window", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),
+    item(COLORS, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Choice(SCHEME_MODES)),
+    item(COLORS, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
+    item(COLORS, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
     item(DOCK, "appearance.dock", "Dock to edge", "Pin the window to a screen edge", Control::Choice(EDGES)),
     item(DOCK, "appearance.dock-fill", "Size", "Share of the screen across the edge", SHARE),
     item(DOCK, "appearance.dock-space", "Length", "Share of the screen along the edge", SHARE),
@@ -136,7 +137,7 @@ fn found(hay: &str, query: &str) -> bool {
 
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
 pub const PROFILES: &str = "Profiles";
-pub const PAGES: [&str; 9] = [SYSTEM, APPEARANCE, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, SSH];
+pub const PAGES: [&str; 10] = [SYSTEM, APPEARANCE, COLORS, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, SSH];
 pub const FIELDS: [&str; 9] = ["Name", "Command", "Arguments", "Start folder", "SSH destination", "Serial port", "Telnet or TCP address", "Group", "Color scheme"];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -146,6 +147,15 @@ pub struct ProfileRow {
     pub detail: String,
     pub custom: bool,
     pub default: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SchemeRow {
+    pub name: String,
+    pub custom: bool,
+    pub foreground: u32,
+    pub background: u32,
+    pub colors: [u32; 16],
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -237,6 +247,7 @@ pub struct SettingsPage {
     pub capture: Option<Action>,
     pub notice: Option<String>,
     pub profiles: Vec<ProfileRow>,
+    pub schemes: Vec<SchemeRow>,
     pub editor: Option<ProfileEditor>,
     pub deleting: Option<String>,
     pub page: usize,
@@ -250,16 +261,21 @@ impl SettingsPage {
     }
 
     pub(crate) fn refilter(&mut self) {
-        let actions = Action::all().count();
-        let base = SETTINGS.len() + actions;
-        let settings = (0..SETTINGS.len()).filter(|&i| item_matches(i, &self.query));
+        let base = self.profile_base();
+        let mut shown: Vec<_> = (0..SETTINGS.len()).filter(|&i| item_matches(i, &self.query)).collect();
         let profiles = (0..self.profiles.len()).filter(|&k| {
             let p = &self.profiles[k];
             found(&format!("{PROFILES} {} profile shell {} {} {}", t(PROFILES), p.name, p.detail, p.id), &self.query)
         });
         let new_row = found(&format!("{PROFILES} {} new profile add create {}", t(PROFILES), t("New profile")), &self.query).then_some(base + self.profiles.len());
         let shortcuts = (SETTINGS.len()..base).filter(|&i| item_matches(i, &self.query));
-        let shown: Vec<usize> = settings.chain(profiles.map(|k| base + k)).chain(new_row).chain(shortcuts).collect();
+        let scheme_base = self.scheme_base();
+        let schemes = self.schemes.iter().enumerate().filter(|(_, row)| {
+            self.query.is_empty() || found(&row.name, &self.query)
+        }).map(|(k, _)| scheme_base + k);
+        let after_colors = shown.iter().rposition(|&i| SETTINGS[i].section == COLORS).map_or(shown.len(), |n| n + 1);
+        shown.splice(after_colors..after_colors, schemes);
+        shown.extend(profiles.map(|k| base + k).chain(new_row).chain(shortcuts));
         self.shown = if self.query.trim().is_empty() {
             let page = PAGES[self.page.min(PAGES.len() - 1)];
             shown.into_iter().filter(|&i| self.section(i) == page).collect()
@@ -302,8 +318,22 @@ impl SettingsPage {
         item == self.profile_base() + self.profiles.len()
     }
 
+    fn scheme_base(&self) -> usize {
+        self.profile_base() + self.profiles.len() + 1
+    }
+
+    pub fn scheme_at(&self, item: usize) -> Option<&SchemeRow> {
+        item.checked_sub(self.scheme_base()).and_then(|k| self.schemes.get(k))
+    }
+
+    pub(crate) fn scheme_item(&self, name: &str) -> Option<usize> {
+        self.schemes.iter().position(|s| s.name.eq_ignore_ascii_case(name)).map(|k| self.scheme_base() + k)
+    }
+
     pub fn section(&self, item: usize) -> &'static str {
-        if self.profile_at(item).is_some() || self.is_new_profile(item) {
+        if self.scheme_at(item).is_some() {
+            COLORS
+        } else if self.profile_at(item).is_some() || self.is_new_profile(item) {
             PROFILES
         } else {
             section_of(item)
@@ -399,6 +429,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
         let (cw, ch) = match SETTINGS.get(i).map(|s| s.control) {
             Some(Control::Toggle) => ((control_width(Control::Toggle) * s).round(), (22.0 * s).round()),
             Some(c) => ((control_width(c) * s).min(width * 0.45).round(), control_h),
+            None if page.scheme_at(i).is_some() => ((300.0 * s).min(width * 0.45).round(), (36.0 * s).round()),
             None => ((240.0 * s).min(width * 0.45).round(), control_h),
         };
         let control = Rect::new(rect.right() - cw - (14.0 * s).round(), rect.y + ((item_h - ch) / 2.0).round(), cw, ch);
@@ -436,9 +467,29 @@ impl App {
     }
 
     pub(crate) fn fresh_settings_page(&self) -> SettingsPage {
-        let mut page = SettingsPage { profiles: self.profile_rows(), ..SettingsPage::default() };
+        let rgb = |c: aster_vt::Rgb| u32::from_be_bytes([0, c.r, c.g, c.b]);
+        let schemes = self.available_schemes().map(|(scheme, custom)| SchemeRow {
+            name: scheme.name,
+            custom,
+            foreground: rgb(scheme.palette.foreground),
+            background: rgb(scheme.palette.background),
+            colors: scheme.palette.ansi.map(rgb),
+        }).collect();
+        let mut page = SettingsPage { profiles: self.profile_rows(), schemes, ..SettingsPage::default() };
         page.refilter();
         page
+    }
+
+    fn show_settings_page(&mut self, k: usize) {
+        let current = self.current_scheme().to_owned();
+        let Some(page) = self.settings.as_mut() else { return };
+        page.show_page(k);
+        if PAGES[page.page] == COLORS {
+            if let Some(at) = page.scheme_item(&current).and_then(|item| page.shown.iter().position(|&i| i == item)) {
+                page.selected = at;
+            }
+        }
+        self.reveal_selected();
     }
 
     pub(crate) fn open_settings(&mut self) {
@@ -925,11 +976,11 @@ impl App {
             Key::Down | Key::Tab => page.step(1),
             Key::PageUp if mods.ctrl => {
                 let k = (page.page + PAGES.len() - 1) % PAGES.len();
-                page.show_page(k);
+                return self.show_settings_page(k);
             }
             Key::PageDown if mods.ctrl => {
                 let k = (page.page + 1) % PAGES.len();
-                page.show_page(k);
+                return self.show_settings_page(k);
             }
             Key::PageUp => page.step(-6),
             Key::PageDown => page.step(6),
@@ -946,6 +997,9 @@ impl App {
             Key::Enter => {
                 if let Some(s) = current {
                     self.adjust_setting(s, 0);
+                } else if let Some(scheme) = page.current_item().and_then(|i| page.scheme_at(i)) {
+                    let name = scheme.name.clone();
+                    self.apply_scheme(name);
                 }
             }
             Key::Left | Key::Right => {
@@ -991,10 +1045,7 @@ impl App {
         }
         if let Some(k) = geo.pages.iter().position(|r| r.contains(x, y)) {
             self.commit_edit();
-            if let Some(page) = self.settings.as_mut() {
-                page.show_page(k);
-            }
-            return;
+            return self.show_settings_page(k);
         }
         if !geo.list.contains(x, y) {
             return self.commit_edit();
@@ -1011,6 +1062,10 @@ impl App {
         page.selected = n;
         page.notice = None;
         let item = page.shown[n];
+        if let Some(scheme) = page.scheme_at(item) {
+            let name = scheme.name.clone();
+            return self.apply_scheme(name);
+        }
         if page.profile_at(item).is_some() || page.is_new_profile(item) {
             return self.open_editor(item);
         }

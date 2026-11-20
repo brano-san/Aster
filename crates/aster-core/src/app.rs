@@ -483,12 +483,16 @@ impl App {
             .collect()
     }
 
+    pub(crate) fn available_schemes(&self) -> impl Iterator<Item = (Scheme, bool)> + '_ {
+        self.custom_schemes().into_iter().map(|s| (s, true)).chain(self.schemes.iter().cloned().map(|s| (s, false)))
+    }
+
     pub fn scheme_names(&self) -> Vec<String> {
-        self.custom_schemes().into_iter().chain(self.schemes.iter().cloned()).map(|s| s.name).collect()
+        self.available_schemes().map(|(s, _)| s.name).collect()
     }
 
     fn scheme(&self, name: &str) -> Option<Palette> {
-        self.custom_schemes().into_iter().chain(self.schemes.iter().cloned()).find(|s| s.name.eq_ignore_ascii_case(name)).map(|s| s.palette)
+        self.available_schemes().find(|(s, _)| s.name.eq_ignore_ascii_case(name)).map(|(s, _)| s.palette)
     }
 
     pub(crate) fn pane_palette(&self, id: PaneId) -> Palette {
@@ -510,11 +514,11 @@ impl App {
         }
     }
 
-    fn current_scheme(&self) -> String {
+    pub(crate) fn current_scheme(&self) -> &str {
         if self.scheme_is_dark() {
-            self.config.appearance.color_scheme.clone()
+            &self.config.appearance.color_scheme
         } else {
-            self.config.appearance.light_color_scheme.clone()
+            &self.config.appearance.light_color_scheme
         }
     }
 
@@ -525,6 +529,11 @@ impl App {
             self.config.appearance.light_color_scheme = name;
         }
         self.restyle();
+    }
+
+    pub(crate) fn apply_scheme(&mut self, name: String) {
+        self.set_scheme_name(name);
+        self.push_save_config();
     }
 
     pub fn config(&self) -> &Config {
@@ -1127,10 +1136,10 @@ impl App {
         }
         if kind == OverlayKind::Schemes {
             let current = self.current_scheme();
-            if let Some(at) = overlay.shown.iter().position(|(i, _)| overlay.items[*i].value.eq_ignore_ascii_case(&current)) {
+            if let Some(at) = overlay.shown.iter().position(|(i, _)| overlay.items[*i].value.eq_ignore_ascii_case(current)) {
                 overlay.select(at);
             }
-            self.scheme_before = Some(current);
+            self.scheme_before = Some(current.to_owned());
         }
         self.overlay = Some(overlay);
         self.dirty = true;
@@ -1169,8 +1178,7 @@ impl App {
             }
             OverlayKind::Schemes => {
                 self.scheme_before = None;
-                self.set_scheme_name(value);
-                self.effects.push(Effect::SaveConfig(self.config.to_text()));
+                self.apply_scheme(value);
             }
         }
     }
@@ -1178,7 +1186,7 @@ impl App {
     fn preview_scheme(&mut self) {
         let Some(o) = self.overlay.as_ref().filter(|o| o.kind == OverlayKind::Schemes) else { return };
         if let Some(v) = o.selected_value() {
-            if !v.eq_ignore_ascii_case(&self.current_scheme()) {
+            if !v.eq_ignore_ascii_case(self.current_scheme()) {
                 self.set_scheme_name(v);
             }
         }
