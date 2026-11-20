@@ -36,6 +36,7 @@ const SEARCH: &str = "Search";
 const APPEARANCE: &str = "Appearance";
 const COLORS: &str = "Color scheme";
 const DOCK: &str = "Docked window";
+const VAULT: &str = "Vault";
 const SSH: &str = "SSH";
 const SYSTEM: &str = "Application";
 
@@ -93,8 +94,9 @@ pub const SETTINGS: &[Setting] = &[
     item(DOCK, "appearance.dock-always-on-top", "Always on top", "The docked window stays above other windows", Control::Toggle),
     item(DOCK, "appearance.dock-hide-on-blur", "Hide on focus loss", "The docked window hides when another window is activated", Control::Toggle),
     item(DOCK, "appearance.global-hotkey", "Global hotkey", "Shows and hides the window from anywhere, for example Ctrl-`", Control::Text),
+    item(VAULT, "vault.remember-minutes", "Stay unlocked for (minutes)", "Zero keeps the vault unlocked until Aster exits", Control::Number { min: 0.0, max: 1440.0, step: 5.0 }),
     item(SSH, "ssh.client", "SSH client", "Built-in client, or the ssh program installed in the system", Control::Choice(SSH_CLIENTS)),
-    item(SSH, "ssh.remember-passwords", "Offer to save passwords", "After a typed password or key passphrase works, offer to keep it in the system credential store", Control::Toggle),
+    item(SSH, "ssh.remember-passwords", "Offer to save passwords", "After a typed password or key passphrase works, offer to save it", Control::Toggle),
     item(SSH, "ssh.forward-agent", "Forward the SSH agent", "Let servers use your local SSH agent; ForwardAgent in ~/.ssh/config decides per host", Control::Toggle),
     item(SSH, "ssh.share-connections", "Share connections", "New tabs to a host that is already open reuse its login", Control::Toggle),
     item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
@@ -139,7 +141,7 @@ fn found(hay: &str, query: &str) -> bool {
 
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
 pub const PROFILES: &str = "Profiles";
-pub const PAGES: [&str; 10] = [SYSTEM, APPEARANCE, COLORS, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, SSH];
+pub const PAGES: [&str; 11] = [SYSTEM, APPEARANCE, COLORS, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, VAULT, SSH];
 pub const FIELDS: [&str; 9] = ["Name", "Command", "Arguments", "Start folder", "SSH destination", "Serial port", "Telnet or TCP address", "Group", "Color scheme"];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -158,6 +160,123 @@ pub struct SchemeRow {
     pub foreground: u32,
     pub background: u32,
     pub colors: [u32; 16],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultIssue {
+    Locked, WrongPassphrase, Corrupted, Unsupported, SaveFailed, EmptyPassphrase, AlreadyConfigured, NotConfigured, Unavailable,
+}
+
+impl VaultIssue {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Locked => t("The vault is locked"),
+            Self::WrongPassphrase => t("Wrong master passphrase"),
+            Self::Corrupted => t("The vault is corrupted"),
+            Self::Unsupported => t("Unsupported vault format"),
+            Self::SaveFailed => t("Could not save the vault"),
+            Self::EmptyPassphrase => t("Enter a master passphrase"),
+            Self::AlreadyConfigured => t("The vault is already configured"),
+            Self::NotConfigured => t("The vault is not configured"),
+            Self::Unavailable => t("The vault is unavailable"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VaultView {
+    pub configured: bool,
+    pub unlocked: bool,
+    pub entries: Vec<(String, String)>,
+    pub error: Option<VaultIssue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VaultRow {
+    Create, Unlock, Entry(usize), Lock, Change, Erase,
+}
+
+impl VaultRow {
+    fn edit(self) -> Option<InlineEdit> {
+        let step = match self {
+            Self::Create => PassphraseStep::Create,
+            Self::Unlock => PassphraseStep::Unlock,
+            Self::Change => PassphraseStep::Current,
+            _ => return None,
+        };
+        Some(InlineEdit::Passphrase { step, value: String::new() })
+    }
+
+    fn text(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Create => ("Set a master passphrase", "Encrypt new passwords in the config instead of using the system credential store"),
+            Self::Unlock => ("Unlock the vault", "The vault is locked"),
+            Self::Lock => ("Lock now", "Require the master passphrase to access saved passwords"),
+            Self::Change => ("Change the master passphrase", "Enter the current passphrase, then the new one"),
+            Self::Erase => ("Erase the vault", "Delete all vault entries and use the system credential store again"),
+            Self::Entry(_) => ("", ""),
+        }
+    }
+
+    pub(crate) fn labels(self, view: &VaultView) -> (&str, &str) {
+        if let Self::Entry(i) = self {
+            let (kind, key) = &view.entries[i];
+            return (key, if kind == "password" { t("password") } else { kind });
+        }
+        let (label, hint) = self.text();
+        (t(label), t(hint))
+    }
+}
+
+impl VaultView {
+    fn row(&self, index: usize) -> Option<VaultRow> {
+        if !self.configured {
+            return (index == 0).then_some(VaultRow::Create);
+        }
+        if !self.unlocked {
+            return (index == 0).then_some(VaultRow::Unlock);
+        }
+        match index.checked_sub(self.entries.len()) {
+            None => Some(VaultRow::Entry(index)),
+            Some(k) => [VaultRow::Lock, VaultRow::Change, VaultRow::Erase].get(k).copied(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+enum PassphraseStep {
+    Create, Unlock, Current, New { old: String },
+}
+
+#[derive(Clone, PartialEq)]
+enum InlineEdit {
+    Setting(String),
+    Passphrase { step: PassphraseStep, value: String },
+    Waiting,
+    Interrupted,
+}
+
+impl InlineEdit {
+    fn buffer(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Setting(value) | Self::Passphrase { value, .. } => Some(value),
+            Self::Waiting | Self::Interrupted => None,
+        }
+    }
+
+    fn visible(&self) -> String {
+        match self {
+            Self::Setting(value) => value.clone(),
+            Self::Passphrase { value, .. } => "•".repeat(value.chars().count()),
+            Self::Waiting | Self::Interrupted => String::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for InlineEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.visible())
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -245,10 +364,12 @@ pub struct SettingsPage {
     pub shown: Vec<usize>,
     pub selected: usize,
     pub scroll: f32,
-    pub editing: Option<String>,
+    editing: Option<InlineEdit>,
     pub capture: Option<Action>,
     pub notice: Option<String>,
     pub profiles: Vec<ProfileRow>,
+    pub(crate) vault: VaultView,
+    confirming_vault: Option<VaultRow>,
     pub schemes: Vec<SchemeRow>,
     pub editor: Option<ProfileEditor>,
     pub deleting: Option<String>,
@@ -265,6 +386,13 @@ impl SettingsPage {
     pub(crate) fn refilter(&mut self) {
         let base = self.profile_base();
         let mut shown: Vec<_> = (0..SETTINGS.len()).filter(|&i| item_matches(i, &self.query)).collect();
+        let vault_rows = (0..).map_while(|k| self.vault.row(k).map(|row| (k, row))).filter_map(|(k, row)| {
+            let (source, hint) = row.text();
+            let (label, detail) = row.labels(&self.vault);
+            found(&format!("{VAULT} {} {source} {hint} {label} {detail}", t(VAULT)), &self.query).then_some(self.vault_base() + k)
+        });
+        let before_vault = shown.iter().position(|&i| SETTINGS[i].section == VAULT).unwrap_or(shown.len());
+        shown.splice(before_vault..before_vault, vault_rows);
         let profiles = (0..self.profiles.len()).filter(|&k| {
             let p = &self.profiles[k];
             found(&format!("{PROFILES} {} profile shell {} {} {}", t(PROFILES), p.name, p.detail, p.id), &self.query)
@@ -275,7 +403,7 @@ impl SettingsPage {
         let schemes = self.schemes.iter().enumerate().filter(|(_, row)| {
             self.query.is_empty() || found(&row.name, &self.query)
         }).map(|(k, _)| scheme_base + k);
-        let after_colors = shown.iter().rposition(|&i| SETTINGS[i].section == COLORS).map_or(shown.len(), |n| n + 1);
+        let after_colors = shown.iter().rposition(|&i| SETTINGS.get(i).is_some_and(|s| s.section == COLORS)).map_or(shown.len(), |n| n + 1);
         shown.splice(after_colors..after_colors, schemes);
         shown.extend(profiles.map(|k| base + k).chain(new_row).chain(shortcuts));
         self.shown = if self.query.trim().is_empty() {
@@ -284,6 +412,7 @@ impl SettingsPage {
         } else {
             shown
         };
+        self.confirming_vault = None;
         self.selected = 0;
         self.scroll = 0.0;
     }
@@ -332,8 +461,55 @@ impl SettingsPage {
         self.schemes.iter().position(|s| s.name.eq_ignore_ascii_case(name)).map(|k| self.scheme_base() + k)
     }
 
+    fn vault_base(&self) -> usize {
+        self.scheme_base() + self.schemes.len()
+    }
+
+    pub(crate) fn vault_at(&self, item: usize) -> Option<VaultRow> {
+        self.vault.row(item.checked_sub(self.vault_base())?)
+    }
+
+    pub(crate) fn editing(&self) -> bool {
+        self.editing.is_some()
+    }
+
+    pub(crate) fn editing_passphrase(&self) -> bool {
+        matches!(self.editing, Some(InlineEdit::Passphrase { .. } | InlineEdit::Waiting | InlineEdit::Interrupted))
+    }
+
+    pub(crate) fn edit_text(&self) -> String {
+        self.editing.as_ref().map(InlineEdit::visible).unwrap_or_default()
+    }
+
+    pub(crate) fn vault_placeholder(&self) -> &'static str {
+        match &self.editing {
+            Some(InlineEdit::Waiting) => t("Please wait…"),
+            Some(InlineEdit::Passphrase { step: PassphraseStep::Current, .. }) => t("Current passphrase"),
+            Some(InlineEdit::Passphrase { step: PassphraseStep::New { .. }, .. }) => t("New passphrase"),
+            _ => t("Master passphrase"),
+        }
+    }
+
+    pub(crate) fn cancel_vault_input(&mut self) {
+        if self.editing_passphrase() {
+            self.editing = None;
+        }
+        if self.confirming_vault.take().is_some() {
+            self.notice = None;
+        }
+    }
+
+    pub(crate) fn vault_notice(&self) -> Option<&str> {
+        if matches!(self.editing, Some(InlineEdit::Interrupted)) {
+            return Some(t("Vault state changed. Press Esc to leave this field."));
+        }
+        self.notice.as_deref().or_else(|| self.vault.error.map(VaultIssue::message))
+    }
+
     pub fn section(&self, item: usize) -> &'static str {
-        if self.scheme_at(item).is_some() {
+        if self.vault_at(item).is_some() {
+            VAULT
+        } else if self.scheme_at(item).is_some() {
             COLORS
         } else if self.profile_at(item).is_some() || self.is_new_profile(item) {
             PROFILES
@@ -452,6 +628,48 @@ pub fn part_at(control: Control, r: Rect, s: f32, x: f32) -> Part {
 }
 
 impl App {
+    pub fn vault_state(&mut self, view: VaultView) {
+        let waiting = self.settings.as_ref().is_some_and(|page| matches!(page.editing, Some(InlineEdit::Waiting)));
+        if self.vault == view && !waiting {
+            return;
+        }
+        self.refresh_prompt_secrets(&view);
+        for page in self.settings.iter_mut().chain(&mut self.settings_stash) {
+            let current = page.current_item();
+            let old_row = current.and_then(|item| page.vault_at(item));
+            let old_entry = match old_row {
+                Some(VaultRow::Entry(i)) => Some(page.vault.entries[i].clone()),
+                _ => None,
+            };
+            let scroll = page.scroll;
+            let state_changed = page.vault.configured != view.configured || page.vault.unlocked != view.unlocked;
+            if matches!(page.editing, Some(InlineEdit::Waiting)) {
+                if state_changed || view.error.is_some() || old_row == Some(VaultRow::Change) {
+                    page.editing = if !state_changed && view.error.is_some() { old_row.and_then(VaultRow::edit) } else { None };
+                }
+            } else if state_changed && page.editing_passphrase() {
+                page.editing = Some(InlineEdit::Interrupted);
+            }
+            if old_row.is_some() {
+                page.notice = None;
+            }
+            page.vault = view.clone();
+            page.refilter();
+            let at = page.shown.iter().position(|&item| match old_row {
+                Some(VaultRow::Entry(_)) => matches!(page.vault_at(item), Some(VaultRow::Entry(k)) if page.vault.entries.get(k) == old_entry.as_ref()),
+                Some(row) => page.vault_at(item) == Some(row),
+                None => Some(item) == current,
+            });
+            if let Some(n) = at {
+                page.selected = n;
+                page.scroll = scroll;
+            }
+        }
+        self.vault = view;
+        self.reveal_selected();
+        self.dirty = true;
+    }
+
     pub fn settings_open(&self) -> bool {
         self.settings.is_some()
     }
@@ -477,7 +695,7 @@ impl App {
             background: rgb(scheme.palette.background),
             colors: scheme.palette.ansi.map(rgb),
         }).collect();
-        let mut page = SettingsPage { profiles: self.profile_rows(), schemes, ..SettingsPage::default() };
+        let mut page = SettingsPage { profiles: self.profile_rows(), schemes, vault: self.vault.clone(), ..SettingsPage::default() };
         page.refilter();
         page
     }
@@ -865,14 +1083,14 @@ impl App {
             _ => return,
         };
         if let Some(p) = self.settings.as_mut() {
-            p.editing = Some(text);
+            p.editing = Some(InlineEdit::Setting(text));
         }
         self.dirty = true;
     }
 
     fn commit_edit(&mut self) {
         let Some(page) = self.settings.as_mut() else { return };
-        let Some(text) = page.editing.take() else { return };
+        let Some(InlineEdit::Setting(text)) = page.editing.take() else { return };
         let Some(setting) = page.current() else { return };
         match setting.control {
             Control::Text => self.apply_setting(setting.key, Value::String(text.trim().to_owned())),
@@ -884,6 +1102,69 @@ impl App {
             _ => {}
         }
         self.dirty = true;
+    }
+
+    fn activate_vault_row(&mut self, row: VaultRow) {
+        let Some(page) = self.settings.as_mut() else { return };
+        match row {
+            VaultRow::Lock => self.push(Effect::VaultLock),
+            VaultRow::Erase => self.confirm_vault_delete(row),
+            _ => {
+                page.confirming_vault = None;
+                page.notice = None;
+                page.editing = row.edit();
+                self.vault_input_id = self.vault_input_id.wrapping_add(1);
+            }
+        }
+    }
+
+    fn submit_passphrase(&mut self) {
+        let Some(page) = self.settings.as_mut() else { return };
+        let Some(InlineEdit::Passphrase { step, value }) = page.editing.take() else { return };
+        if value.is_empty() {
+            page.notice = Some(VaultIssue::EmptyPassphrase.message().to_owned());
+            page.editing = Some(InlineEdit::Passphrase { step, value });
+            return;
+        }
+        self.vault_input_id = self.vault_input_id.wrapping_add(1);
+        let effect = match step {
+            PassphraseStep::Create => Effect::VaultCreate { passphrase: value },
+            PassphraseStep::Unlock => Effect::VaultUnlock { passphrase: value },
+            PassphraseStep::Current => {
+                page.editing = Some(InlineEdit::Passphrase { step: PassphraseStep::New { old: value }, value: String::new() });
+                return;
+            }
+            PassphraseStep::New { old } => Effect::VaultChange { old, new: value },
+        };
+        page.editing = Some(InlineEdit::Waiting);
+        self.push(effect);
+    }
+
+    fn confirm_vault_delete(&mut self, row: VaultRow) {
+        let Some(page) = self.settings.as_mut() else { return };
+        let confirmed = page.confirming_vault == Some(row);
+        let effect = match row {
+            VaultRow::Entry(i) => {
+                let (kind, key) = &page.vault.entries[i];
+                if confirmed {
+                    Some(Effect::VaultRemove { kind: kind.clone(), key: key.clone() })
+                } else {
+                    page.notice = Some(tf("Press Del again to delete {name}", &[("name", key)]));
+                    None
+                }
+            }
+            VaultRow::Erase if confirmed => Some(Effect::VaultErase),
+            VaultRow::Erase => {
+                page.notice = Some(t("Confirm again to permanently erase the vault").to_owned());
+                None
+            }
+            _ => return,
+        };
+        page.confirming_vault = (!confirmed).then_some(row);
+        if let Some(effect) = effect {
+            page.notice = None;
+            self.push(effect);
+        }
     }
 
     fn reveal_selected(&mut self) {
@@ -908,6 +1189,22 @@ impl App {
         }
         if page.editor.is_some() {
             return self.editor_key(key, mods);
+        }
+        if matches!(page.editing, Some(InlineEdit::Interrupted | InlineEdit::Waiting)) {
+            if matches!(key, Key::Escape | Key::Tab) || key == Key::Enter && matches!(page.editing, Some(InlineEdit::Interrupted)) {
+                page.editing = None;
+            }
+            return;
+        }
+        if !page.editing() {
+            if let Some(row) = page.current_item().and_then(|item| page.vault_at(item)) {
+                match key {
+                    Key::Delete if matches!(row, VaultRow::Entry(_) | VaultRow::Erase) => return self.confirm_vault_delete(row),
+                    Key::Enter => return self.activate_vault_row(row),
+                    _ => {}
+                }
+            }
+            page.confirming_vault = None;
         }
         if let Some(item) = page.current_item() {
             let row = page.profile_at(item).cloned();
@@ -941,9 +1238,10 @@ impl App {
         if page.editing.is_some() {
             match key {
                 Key::Escape => page.editing = None,
+                Key::Enter if matches!(page.editing, Some(InlineEdit::Passphrase { .. })) => self.submit_passphrase(),
                 Key::Enter | Key::Tab => self.commit_edit(),
                 Key::Backspace => {
-                    if let Some(t) = page.editing.as_mut() {
+                    if let Some(t) = page.editing.as_mut().and_then(InlineEdit::buffer) {
                         if mods.ctrl {
                             t.clear();
                         } else {
@@ -951,7 +1249,10 @@ impl App {
                         }
                     }
                 }
-                Key::Char('V') if mods.ctrl => self.push(Effect::RequestPaste),
+                Key::Char('V') if mods.ctrl => {
+                    let effect = if page.editing_passphrase() { Effect::RequestVaultPaste(self.vault_input_id) } else { Effect::RequestPaste };
+                    self.push(effect);
+                }
                 _ => {}
             }
             return;
@@ -1027,7 +1328,11 @@ impl App {
             return;
         }
         match page.editing.as_mut() {
-            Some(t) => t.push_str(&clean),
+            Some(edit) => {
+                if let Some(buffer) = edit.buffer() {
+                    buffer.push_str(&clean);
+                }
+            }
             None => {
                 page.query.push_str(&clean);
                 page.refilter();
@@ -1039,6 +1344,11 @@ impl App {
     pub(crate) fn settings_click(&mut self, x: f32, y: f32) {
         let Some(geo) = self.settings_geometry() else { return };
         self.dirty = true;
+        if let Some(page) = self.settings.as_mut() {
+            if page.confirming_vault.is_some() && !geo.rows.iter().any(|row| row.kind == RowKind::Item(page.selected) && row.rect.contains(x, y)) {
+                page.cancel_vault_input();
+            }
+        }
         if geo.close.contains(x, y) {
             return self.close_settings();
         }
@@ -1055,15 +1365,24 @@ impl App {
         let Some(row) = geo.rows.iter().find(|r| r.rect.contains(x, y)).copied() else { return self.commit_edit() };
         let RowKind::Item(n) = row.kind else { return self.commit_edit() };
         let editing_same = self.settings.as_ref().is_some_and(|p| p.selected == n && p.editing.is_some());
+        if editing_same && self.settings.as_ref().is_some_and(|p| matches!(p.editing, Some(InlineEdit::Passphrase { .. } | InlineEdit::Waiting))) {
+            return;
+        }
         let control = self.settings.as_ref().and_then(|p| SETTINGS.get(p.shown[n])).map(|s| s.control);
         if editing_same && row.control.contains(x, y) && control.is_some_and(|c| part_at(c, row.control, self.scale, x) == Part::Whole) {
             return;
         }
         self.commit_edit();
         let Some(page) = self.settings.as_mut() else { return };
+        if page.selected != n {
+            page.confirming_vault = None;
+        }
         page.selected = n;
         page.notice = None;
         let item = page.shown[n];
+        if let Some(row) = page.vault_at(item) {
+            return self.activate_vault_row(row);
+        }
         if let Some(scheme) = page.scheme_at(item) {
             let name = scheme.name.clone();
             return self.apply_scheme(name);

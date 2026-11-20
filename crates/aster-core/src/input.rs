@@ -81,6 +81,7 @@ pub enum Event {
     Char(char),
     AltChar(char),
     Pasted(String),
+    VaultPasted { input: u64, text: String },
     Preedit(Preedit),
     Focus(bool),
     ThemeChanged { dark: bool },

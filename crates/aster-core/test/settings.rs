@@ -586,3 +586,174 @@ fn scheme_search_matches_settings_and_only_matching_palette_names() {
     let page = a.settings.as_ref().unwrap();
     assert!(page.shown.iter().filter_map(|&i| page.scheme_at(i)).any(|s| s.name == "Aster Dark"));
 }
+
+fn select_vault(a: &mut App) {
+    a.run(Action::Settings);
+    a.show_settings_page(PAGES.iter().position(|&p| p == VAULT).unwrap());
+}
+
+fn request_vault_paste(a: &mut App) -> u64 {
+    a.on_event(ctrl(Key::Char('V')));
+    a.take_effects().into_iter().find_map(|effect| match effect {
+        Effect::RequestVaultPaste(input) => Some(input),
+        _ => None,
+    }).expect("paste for this passphrase input")
+}
+
+fn unlocked_vault() -> VaultView {
+    VaultView {
+        configured: true, unlocked: true, entries: vec![("password".into(), "sudo:host".into())], error: None,
+    }
+}
+
+fn vault_labels(a: &App) -> Vec<&str> {
+    let page = a.settings.as_ref().unwrap();
+    page.shown.iter().map(|&item| match page.vault_at(item) {
+        Some(row) => row.labels(&page.vault).0,
+        None => SETTINGS[item].label,
+    }).collect()
+}
+
+#[test]
+fn vault_page_lists_controls_for_each_state_and_shows_errors() {
+    let mut a = app();
+    select_vault(&mut a);
+    assert_eq!(vault_labels(&a), ["Set a master passphrase", "Stay unlocked for (minutes)"]);
+    a.vault_state(VaultView { configured: true, error: Some(VaultIssue::WrongPassphrase), ..Default::default() });
+    assert_eq!(vault_labels(&a), ["Unlock the vault", "Stay unlocked for (minutes)"]);
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!(VaultRow::Unlock.labels(&page.vault).1, t("The vault is locked"));
+    assert_eq!(page.vault_notice(), Some(t("Wrong master passphrase")));
+    a.vault_state(unlocked_vault());
+    assert_eq!(vault_labels(&a), ["sudo:host", "Lock now", "Change the master passphrase", "Erase the vault", "Stay unlocked for (minutes)"]);
+    assert!(a.settings.as_ref().unwrap().vault_notice().is_none());
+    typed(&mut a, "sudo:host");
+    assert_eq!(vault_labels(&a), ["sudo:host"]);
+    a.vault_state(VaultView { configured: true, ..Default::default() });
+    assert!(vault_labels(&a).is_empty());
+}
+
+#[test]
+fn masked_vault_input_emits_create_and_unlock_without_exposing_text() {
+    let mut a = app();
+    select_vault(&mut a);
+    for configured in [false, true] {
+        a.vault_state(VaultView { configured, ..Default::default() });
+        key(&mut a, Key::Enter);
+        typed(&mut a, "Aя🔐");
+        let page = a.settings.as_ref().unwrap();
+        assert_eq!(page.edit_text(), "•••");
+        assert!(!format!("{page:?}").contains("Aя"));
+        assert!(page.query.is_empty() && page.notice.is_none());
+        key(&mut a, Key::Backspace);
+        let input = request_vault_paste(&mut a);
+        a.on_event(Event::VaultPasted { input, text: " ё ".into() });
+        assert_eq!(a.settings.as_ref().unwrap().edit_text(), "•••••");
+        key(&mut a, Key::Enter);
+        let effects = a.take_effects();
+        assert!(effects.iter().any(|e| match e {
+            Effect::VaultCreate { passphrase } => !configured && passphrase == "Aя ё ",
+            Effect::VaultUnlock { passphrase } => configured && passphrase == "Aя ё ",
+            _ => false,
+        }));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::SaveConfig(_) | Effect::Write { .. })));
+        assert_eq!(a.settings.as_ref().unwrap().edit_text(), "");
+        assert!(!format!("{:?}", a.settings).contains("Aя"));
+    }
+}
+
+#[test]
+fn vault_entry_deletion_requires_two_consecutive_presses_on_the_same_entry() {
+    let mut a = app();
+    a.vault_state(unlocked_vault());
+    select_vault(&mut a);
+    key(&mut a, Key::Delete);
+    assert!(a.settings.as_ref().unwrap().notice.as_deref().unwrap().contains("sudo:host"));
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Up);
+    key(&mut a, Key::Delete);
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::VaultRemove { .. })));
+    key(&mut a, Key::Delete);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultRemove { kind, key } if kind == "password" && key == "sudo:host")));
+}
+
+#[test]
+fn vault_change_masks_both_steps_and_erase_requires_confirmation() {
+    let mut a = app();
+    select_vault(&mut a);
+    a.vault_state(unlocked_vault());
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Enter);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultLock)));
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Enter);
+    typed(&mut a, "first");
+    key(&mut a, Key::Enter);
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!(page.vault_placeholder(), t("New passphrase"));
+    assert_eq!(page.edit_text(), "");
+    assert!(!format!("{page:?}").contains("first"));
+    typed(&mut a, "second");
+    assert_eq!(a.settings.as_ref().unwrap().edit_text(), "••••••");
+    key(&mut a, Key::Enter);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultChange { old, new } if old == "first" && new == "second")));
+    a.vault_state(unlocked_vault());
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Delete);
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::VaultErase)));
+    key(&mut a, Key::Delete);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultErase)));
+}
+
+#[test]
+fn auto_lock_during_passphrase_entry_discards_remaining_input_and_pending_pastes() {
+    let mut a = app();
+    select_vault(&mut a);
+    a.vault_state(unlocked_vault());
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Enter);
+    typed(&mut a, "partial");
+    let input = request_vault_paste(&mut a);
+    a.vault_state(VaultView { configured: true, ..Default::default() });
+    typed(&mut a, "remainder");
+    key(&mut a, Key::Escape);
+    a.on_event(Event::VaultPasted { input, text: "clipboard passphrase".into() });
+    let page = a.settings.as_ref().unwrap();
+    assert!(page.query.is_empty() && !page.editing());
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::VaultChange { .. } | Effect::Write { .. } | Effect::SaveConfig(_))));
+}
+
+#[test]
+fn leaving_a_masked_row_discards_the_passphrase_and_its_clipboard_request() {
+    let mut a = app();
+    a.open_default_tab();
+    select_vault(&mut a);
+    key(&mut a, Key::Enter);
+    typed(&mut a, "discarded");
+    let input = request_vault_paste(&mut a);
+    a.close_settings();
+    a.on_event(Event::VaultPasted { input, text: "clipboard passphrase".into() });
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::VaultCreate { .. } | Effect::Write { .. } | Effect::SaveConfig(_))));
+}
+
+#[test]
+fn a_failed_unlock_keeps_focus_on_the_masked_retry_field() {
+    let mut a = app();
+    a.vault_state(VaultView { configured: true, ..Default::default() });
+    select_vault(&mut a);
+    key(&mut a, Key::Enter);
+    for attempt in ["first", "retry"] {
+        typed(&mut a, attempt);
+        let page = a.settings.as_ref().unwrap();
+        assert_eq!(page.edit_text(), "•••••");
+        assert!(page.query.is_empty());
+        key(&mut a, Key::Enter);
+        assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultUnlock { passphrase } if passphrase == attempt)));
+        typed(&mut a, "while waiting");
+        a.vault_state(VaultView { configured: true, error: Some(VaultIssue::WrongPassphrase), ..Default::default() });
+        assert!(a.settings.as_ref().unwrap().edit_text().is_empty());
+    }
+    a.vault_state(unlocked_vault());
+    assert!(a.settings.as_ref().unwrap().query.is_empty());
+}

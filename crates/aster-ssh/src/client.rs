@@ -665,7 +665,7 @@ async fn load_key(path: &std::path::Path, console: &Shared, req: &Request) -> Op
 async fn offer_to_save(req: &Request, console: &Shared, key: &str, value: &str, what: &str) {
     let Some(secrets) = req.secrets.as_ref().filter(|_| req.remember) else { return };
     let mut c = console.lock().await;
-    let prompt = format!("Save {what} in the system credential store (yes/no)? ");
+    let prompt = format!("Save {what} for future connections (yes/no)? ");
     loop {
         match c.ask(&prompt, true).await.map(|a| a.trim().to_ascii_lowercase()) {
             Some(a) if a == "yes" || a == "y" => {

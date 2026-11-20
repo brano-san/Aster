@@ -2,6 +2,7 @@ use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Pree
 use aster_gfx::render::Rect;
 use aster_platform::{Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -12,7 +13,7 @@ use winit::data_transfer::{DataTransferSendBuilder, TypeHint};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton as WinitButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle};
+use winit::event_loop::{ActiveEventLoop, AsyncRequestSerial, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle};
 use winit::keyboard::{Key as WinitKey, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::monitor::Fullscreen;
 use winit::platform::x11::WindowAttributesX11;
@@ -34,7 +35,7 @@ pub(crate) fn display() -> Option<OwnedDisplayHandle> {
 enum Command {
     Open(WindowOptions),
     Close(WindowId),
-    Paste,
+    Paste(WindowId, Option<u64>),
     Copy(String),
 }
 
@@ -145,8 +146,8 @@ impl Window for LinuxWindow {
         Placement { x: at.x, y: at.y, width: w as i32, height: h as i32, maximized: self.raw.is_maximized() }
     }
 
-    fn clipboard_text(&self) -> Option<String> {
-        self.commands.borrow_mut().push(Command::Paste);
+    fn clipboard_text(&self, vault_input: Option<u64>) -> Option<String> {
+        self.commands.borrow_mut().push(Command::Paste(self.id, vault_input));
         None
     }
 
@@ -400,7 +401,7 @@ impl WindowSystem for LinuxWindows {
 
     fn run<H: WindowHandler<Self>>(mut self, first: WindowOptions, handler: H) -> Result<(), PlatformError> {
         let commands: Commands = Rc::new(RefCell::new(vec![Command::Open(first)]));
-        let mut app = Loop { handler, nodes: Vec::new(), commands, pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None };
+        let mut app = Loop { handler, nodes: Vec::new(), commands, pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None };
         self.event_loop.run_app_on_demand(&mut app).map_err(|e| PlatformError::new(-1, format!("event loop: {e}")))?;
         app.error.map_or(Ok(()), Err)
     }
@@ -416,6 +417,7 @@ struct Loop<H> {
     handler: H,
     nodes: Vec<Node>,
     commands: Commands,
+    pastes: HashMap<AsyncRequestSerial, (WindowId, Option<u64>)>,
     pending: Arc<AtomicBool>,
     next_id: WindowId,
     mods: ModifiersState,
@@ -437,10 +439,11 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
                 match command {
                     Command::Open(opts) => self.open(el, opts),
                     Command::Close(id) => self.close(id),
-                    Command::Paste => {
+                    Command::Paste(window, input) => {
                         if let Ok(Some(id)) = el.clipboard() {
-                            if let Err(e) = el.fetch_data_transfer(id, &TypeHint::Plaintext) {
-                                tracing::debug!("clipboard has no text: {e}");
+                            match el.fetch_data_transfer(id, &TypeHint::Plaintext) {
+                                Ok(serial) => { self.pastes.insert(serial, (window, input)); }
+                                Err(e) => tracing::debug!("clipboard has no text: {e}"),
                             }
                         }
                     }
@@ -512,6 +515,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
     fn close(&mut self, id: WindowId) {
         let Some(i) = self.nodes.iter().position(|n| n.window.id == id) else { return };
         let node = self.nodes.remove(i);
+        self.pastes.retain(|_, (window, _)| *window != id);
         self.handler.destroyed(&node.window);
     }
 
@@ -623,10 +627,6 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
                 handler.event(w, Event::Wheel { dx, dy });
             }
             WindowEvent::ThemeChanged(theme) => handler.event(w, Event::ThemeChanged { dark: theme == Theme::Dark }),
-            WindowEvent::DataTransferReceived { value, .. } => match value.try_as_string() {
-                Ok(text) => handler.event(w, Event::Pasted(text)),
-                Err(e) => tracing::debug!("clipboard text is unreadable: {e}"),
-            },
             _ => {}
         }
     }
@@ -647,7 +647,19 @@ impl<H: WindowHandler<LinuxWindows>> ApplicationHandler for Loop<H> {
     }
 
     fn window_event(&mut self, el: &dyn ActiveEventLoop, id: winit::window::WindowId, event: WindowEvent) {
-        if let Some(i) = self.nodes.iter().position(|n| n.window.raw.id() == id) {
+        if let WindowEvent::DataTransferReceived { serial, value, .. } = event {
+            if let Some((window, input)) = self.pastes.remove(&serial) {
+                if let Some(node) = self.nodes.iter().find(|n| n.window.id == window) {
+                    match value.try_as_string() {
+                        Ok(text) => self.handler.event(&node.window, match input {
+                            Some(input) => Event::VaultPasted { input, text },
+                            None => Event::Pasted(text),
+                        }),
+                        Err(e) => tracing::debug!("clipboard text is unreadable: {e}"),
+                    }
+                }
+            }
+        } else if let Some(i) = self.nodes.iter().position(|n| n.window.raw.id() == id) {
             self.dispatch(i, event);
         }
         self.settle(el);

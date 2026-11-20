@@ -150,6 +150,7 @@ dependencies = [
  "aster-proto",
  "aster-serial",
  "aster-ssh",
+ "aster-vault",
  "aster-vt",
  "aster-zmodem",
  "crossbeam-channel",

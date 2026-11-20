@@ -197,7 +197,7 @@ impl App {
             if let Some(prompt) = self.password_prompt(*id).cloned() {
                 let text = if prompt.offer {
                     Some(t("Save this password for the next prompt here? Ctrl+Shift+Enter saves it; any other key dismisses"))
-                } else if prompt.saved == Some(true) && !prompt.submitted {
+                } else if prompt.can_fill() {
                     Some(t("A saved password matches this prompt. Ctrl+Shift+Enter types it"))
                 } else {
                     None
@@ -956,7 +956,7 @@ impl App {
     }
 
     fn draw_settings<B: TextBackend>(&self, g: &mut Gfx<B>) {
-        use crate::settings::{part_at, Control, Part, RowKind, SETTINGS};
+        use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
         let Some(geo) = self.settings_geometry() else { return };
         let Some(page) = self.settings.as_ref() else { return };
         let s = self.scale;
@@ -972,7 +972,7 @@ impl App {
         g.text(geo.title.x, ty, t("Settings"), title, theme.text, geo.title.w);
         let radius = (6.0 * s).round();
         g.dl.round_rect(geo.field, theme.overlay, radius);
-        g.dl.outline(geo.field, if page.editing.is_none() { theme.accent } else { theme.overlay_border }, radius, line);
+        g.dl.outline(geo.field, if page.editing() { theme.overlay_border } else { theme.accent }, radius, line);
         let field_text = geo.field.inset((10.0 * s).round(), 0.0);
         let fy = baseline(g, field_text, ui);
         if page.query.is_empty() {
@@ -980,7 +980,7 @@ impl App {
         }
         let qw = g.text(field_text.x, fy, &page.query, ui, theme.text, field_text.w);
         let caret_h = (16.0 * s).round();
-        if page.editing.is_none() {
+        if !page.editing() {
             g.dl.rect(Rect::new(field_text.x + qw + 1.0, geo.field.y + ((geo.field.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
         }
         if geo.close.contains(mx, my) {
@@ -1049,6 +1049,46 @@ impl App {
                         continue;
                     }
                     let item = page.shown[n];
+                    if let Some(vault_row) = page.vault_at(item) {
+                        let (label, hint) = vault_row.labels(&page.vault);
+                        let tx = row.rect.x + (14.0 * s).round();
+                        let c = row.control;
+                        let tw = (c.x - tx - 16.0 * s).max(0.0);
+                        let notice = selected.then(|| page.vault_notice()).flatten();
+                        g.text(tx, row.rect.y + (25.0 * s).round(), label, ui, theme.text, tw);
+                        g.text(tx, row.rect.y + (43.0 * s).round(), notice.unwrap_or(hint), small, if notice.is_some() { theme.accent } else { theme.text_dim }, tw);
+                        let editing = selected && page.editing();
+                        if matches!(vault_row, VaultRow::Entry(_)) {
+                            if selected {
+                                centered(g, c, t("Del to delete"), small, theme.text_dim);
+                            }
+                        } else {
+                            g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
+                            g.dl.outline(c, if selected { theme.accent } else { theme.overlay_border }, radius, line);
+                            if editing || matches!(vault_row, VaultRow::Create | VaultRow::Unlock) {
+                                let inner = c.inset((10.0 * s).round(), 0.0);
+                                let y = baseline(g, inner, ui);
+                                let text = if editing { page.edit_text() } else { String::new() };
+                                let w = if text.is_empty() {
+                                    g.text(inner.x, y, page.vault_placeholder(), ui, theme.text_dim, inner.w);
+                                    0.0
+                                } else {
+                                    g.text(inner.x, y, &text, ui, theme.text, inner.w)
+                                };
+                                if editing {
+                                    g.dl.rect(Rect::new(inner.x + w.min(inner.w) + 1.0, c.y + ((c.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
+                                }
+                            } else {
+                                let button = match vault_row {
+                                    VaultRow::Lock => t("Lock"),
+                                    VaultRow::Change => t("Change"),
+                                    _ => t("Erase"),
+                                };
+                                centered(g, c, button, ui, theme.text);
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(scheme) = page.scheme_at(item) {
                         let c = row.control;
                         let tx = row.rect.x + (14.0 * s).round();
@@ -1105,7 +1145,8 @@ impl App {
                     let tx = row.rect.x + (14.0 * s).round();
                     let tw = (row.control.x - tx - 16.0 * s).max(0.0);
                     g.text(tx, row.rect.y + (25.0 * s).round(), t(setting.label), ui, theme.text, tw);
-                    g.text(tx, row.rect.y + (43.0 * s).round(), t(setting.hint), small, theme.text_dim, tw);
+                    let notice = (selected && setting.key == "vault.remember-minutes").then(|| page.vault_notice()).flatten();
+                    g.text(tx, row.rect.y + (43.0 * s).round(), notice.unwrap_or_else(|| t(setting.hint)), small, if notice.is_some() { theme.accent } else { theme.text_dim }, tw);
                     let c = row.control;
                     match setting.control {
                         Control::Toggle => {
@@ -1121,7 +1162,7 @@ impl App {
                             centered(g, c, t("Open"), ui, theme.text);
                         }
                         control => {
-                            let editing = selected && page.editing.is_some() && matches!(control, Control::Text | Control::Number { .. });
+                            let editing = selected && page.editing() && matches!(control, Control::Text | Control::Number { .. });
                             g.dl.round_rect(c, theme.overlay, radius);
                             g.dl.outline(c, if editing { theme.accent } else { theme.overlay_border }, radius, line);
                             let stepper = !matches!(control, Control::Text);
@@ -1150,7 +1191,7 @@ impl App {
                                     }
                                 }
                             }
-                            let text = if editing { page.editing.clone().unwrap_or_default() } else { self.setting_text(setting) };
+                            let text = if editing { page.edit_text() } else { self.setting_text(setting) };
                             let y = baseline(g, inner, ui);
                             if editing {
                                 let w = g.text(inner.x, y, &text, ui, theme.text, inner.w);

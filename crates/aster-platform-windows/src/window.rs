@@ -263,7 +263,7 @@ impl Window for Win32Window {
         Placement { x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top, maximized: wp.showCmd == SW_SHOWMAXIMIZED.0 as u32 }
     }
 
-    fn clipboard_text(&self) -> Option<String> {
+    fn clipboard_text(&self, _vault_input: Option<u64>) -> Option<String> {
         unsafe {
             if !open_clipboard(self.hwnd()) {
                 return None;
