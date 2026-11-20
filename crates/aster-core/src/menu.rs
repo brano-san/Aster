@@ -134,7 +134,7 @@ impl App {
 
     pub(crate) fn open_terminal_menu(&mut self, x: f32, y: f32) {
         let selection = self.focused_terminal().is_some_and(|t| t.lock().has_selection());
-        let entries = vec![
+        let mut entries = vec![
             item("Copy", Action::Copy, selection),
             item("Paste", Action::Paste, true),
             item("Select all", Action::SelectAll, true),
@@ -148,6 +148,13 @@ impl App {
             item("Remote files", Action::OpenFiles, self.focused_pane().is_some_and(|p| self.can_browse(p))),
             item("Settings", Action::Settings, true),
         ];
+        if self.serial_pane().is_some() {
+            entries.extend([
+                Entry::Separator,
+                item("Change the serial port speed", Action::SerialSpeed, true),
+                item("Send a break on the serial line", Action::SerialBreak, true),
+            ]);
+        }
         self.open_menu(entries, x, y);
     }
 

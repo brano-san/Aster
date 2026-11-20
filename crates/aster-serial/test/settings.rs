@@ -40,6 +40,27 @@ fn a_port_with_a_baud_rate_keeps_the_default_frame() {
 }
 
 #[test]
+fn ask_baud_and_slow_round_trip_without_losing_port_options() {
+    let settings = parse(" dev:port : ? , 7e2 , HARDWARE , SlOw ").unwrap();
+    assert_eq!(settings, Settings {
+        ask_baud: true, slow: true, data_bits: 7, parity: Parity::Even,
+        stop_bits: 2, flow: Flow::Hardware, ..port("dev:port")
+    });
+    assert_eq!(format(&settings), "dev:port:?,7E2,rtscts,slow");
+    assert_eq!(parse(&format(&settings)), Ok(settings));
+    assert_eq!(format(&parse("COM3:?").unwrap()), "COM3:?,8N1");
+    assert_eq!(format(&parse("COM3,slow").unwrap()), "COM3:115200,8N1,slow");
+    assert_eq!(format(&parse("COM3:9600,xonxoff,slow").unwrap()), "COM3:9600,8N1,xonxoff,slow");
+}
+
+#[test]
+fn ask_baud_and_slow_still_reject_invalid_specs() {
+    for spec in [":?,slow", "COM3:?,7M2", "COM3:0,slow", "COM3:?,8N1,xany,slow", "COM3,slow,slow", "COM3,slow,unknown"] {
+        assert!(parse(spec).is_err(), "{spec}");
+    }
+}
+
+#[test]
 fn a_spec_with_parity_two_stop_bits_and_hardware_flow_is_parsed() {
     let expected = Settings {
         baud: 115_200,

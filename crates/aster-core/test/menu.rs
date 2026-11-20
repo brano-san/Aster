@@ -100,3 +100,19 @@ fn the_terminal_menu_appears_when_right_click_is_set_to_menu() {
     assert_eq!(labels(&a)[0], ("Copy", false));
     assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::RequestPaste)));
 }
+
+#[test]
+fn the_terminal_menu_offers_line_controls_only_for_serial_panes() {
+    let mut a = app(1);
+    a.open_terminal_menu(200.0, 150.0);
+    let actions = ["Change the serial port speed", "Send a break on the serial line"];
+    assert!(labels(&a).iter().all(|(label, _)| !actions.contains(label)));
+    let mut profile = Profile::new("serial:COM4", "COM4", "", &[]);
+    profile.serial = Some("COM4:9600".into());
+    a.open_tab(profile);
+    let pane = a.focused_pane().unwrap();
+    a.panes.get_mut(&pane).unwrap().pending = None;
+    a.open_terminal_menu(200.0, 150.0);
+    let items = labels(&a);
+    assert!(actions.iter().all(|label| items.contains(&(*label, true))));
+}

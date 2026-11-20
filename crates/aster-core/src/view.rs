@@ -206,6 +206,7 @@ impl App {
     }
 
     pub fn frame<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool) {
+        self.prompt_pending_serial();
         g.set_mono_family(&self.config.terminal.font);
         g.set_fallback_family(&self.config.terminal.fallback_font);
         g.set_ui_family(&self.config.appearance.ui_font);
@@ -381,7 +382,7 @@ impl App {
         let window_focused = self.terminal_has_focus();
         let palette = self.pane_palette(id);
         let Some(pane) = self.panes.get_mut(&id) else { return };
-        if let Some(mut launch) = pane.pending.take() {
+        if let Some(mut launch) = pane.pending.take_if(|launch| launch.baud_placeholder().is_none()) {
             launch.cols = size.cols as u16;
             launch.rows = size.rows as u16;
             {
@@ -401,7 +402,7 @@ impl App {
                 t.set_cell_pixels(m.w as u16, m.h as u16);
             }
             pane.size = size;
-            if pane.exited.is_none() {
+            if pane.exited.is_none() && pane.pending.is_none() {
                 effects.push(Effect::Resize { pane: id, cols: size.cols as u16, rows: size.rows as u16 });
             }
         }
@@ -1319,7 +1320,8 @@ impl App {
         g.dl.rect(Rect::new(geo.frame.x, geo.input.bottom(), geo.frame.w, (1.0 * s).round().max(1.0)), theme.overlay_border);
         if o.shown.is_empty() {
             let r = Rect::new(geo.frame.x, geo.input.bottom(), geo.frame.w, geo.frame.bottom() - geo.input.bottom());
-            centered(g, r, t("No matches"), ui, theme.text_dim);
+            let message = if matches!(o.kind, OverlayKind::SerialSpeed(_)) { t("Enter a speed from 50 to 4000000 baud") } else { t("No matches") };
+            centered(g, r, message, ui, theme.text_dim);
             return;
         }
         let (mx, my) = self.mouse;

@@ -1,5 +1,6 @@
 use crate::fuzzy::fuzzy;
 use crate::i18n::{t, tf};
+use crate::panes::PaneId;
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,6 +9,7 @@ pub enum OverlayKind {
     Profiles,
     Schemes,
     TabColors,
+    SerialSpeed(PaneId),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -39,6 +41,13 @@ pub const CLEAR_RECENT: &str = "clear-recent:";
 
 pub const VISIBLE: usize = 12;
 
+const SERIAL_SPEEDS: &[u32] = &[110, 300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600, 1500000];
+
+fn speed_pick(baud: u32) -> Pick {
+    let value = baud.to_string();
+    Pick { label: value.clone(), value, ..Pick::default() }
+}
+
 fn quick_pick(label: String, kind: &str, value: String) -> Pick {
     Pick { label, hint: kind.to_owned(), value, group: t("Connect").to_owned(), badge: "\u{2192}".into(), ..Pick::default() }
 }
@@ -57,17 +66,26 @@ impl Overlay {
         self
     }
 
+    pub fn serial_speed(pane: PaneId) -> Self {
+        Self::new(OverlayKind::SerialSpeed(pane), SERIAL_SPEEDS.iter().copied().map(speed_pick).collect())
+    }
+
     pub fn placeholder(&self) -> &'static str {
         match self.kind {
             OverlayKind::Commands => t("Type a command"),
             OverlayKind::Profiles => t("Select a profile or enter an address"),
             OverlayKind::Schemes => t("Select a color scheme"),
             OverlayKind::TabColors => t("Select a tab color"),
+            OverlayKind::SerialSpeed(_) => t("Select or enter the serial port speed"),
         }
     }
 
     fn refilter(&mut self) {
         self.items.truncate(self.base);
+        if matches!(self.kind, OverlayKind::SerialSpeed(_)) {
+            self.filter_serial_speeds();
+            return;
+        }
         let commands = matches!(self.kind, OverlayKind::Commands);
         let profiles = matches!(self.kind, OverlayKind::Profiles);
         let english = |p: &Pick| commands.then(|| crate::keymap::Action::from_id(&p.value)).flatten().map(|a| a.source_label()).filter(|e| *e != p.label);
@@ -103,6 +121,21 @@ impl Overlay {
         }
         self.selected = 0;
         self.scroll = 0;
+    }
+
+    fn filter_serial_speeds(&mut self) {
+        self.shown.clear();
+        self.selected = 0;
+        self.scroll = 0;
+        let query = self.query.trim();
+        if query.is_empty() {
+            self.shown.extend((0..self.items.len()).map(|i| (i, Vec::new())));
+            self.selected = self.items.iter().position(|p| p.value == "115200").unwrap_or(0);
+        } else if query.bytes().all(|b| b.is_ascii_digit()) {
+            let Ok(baud @ 50..=4_000_000) = query.parse::<u32>() else { return };
+            self.shown.push((self.items.len(), Vec::new()));
+            self.items.push(speed_pick(baud));
+        }
     }
 
     pub fn insert(&mut self, text: &str) {

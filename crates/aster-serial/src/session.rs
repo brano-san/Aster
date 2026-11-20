@@ -1,5 +1,6 @@
 use crate::settings::{Flow, Parity, Settings};
-use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{after, bounded, never, select, unbounded, Receiver, Sender, TryRecvError};
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use std::time::Duration;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 const BREAK_HOLD: Duration = Duration::from_millis(250);
+const SLOW_BYTE_DELAY: Duration = Duration::from_millis(2);
 const CHUNK: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,10 +20,18 @@ pub enum Input {
     Close,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DriverControl {
+    Baud(u32),
+    BaudFailed(u32, String),
+    BreakFailed(String),
+}
+
 pub struct Connection {
     pub output: Receiver<Vec<u8>>,
     pub input: Sender<Input>,
     pub exit: Receiver<u32>,
+    pub control: Receiver<DriverControl>,
 }
 
 pub trait Port: Read + Write + Send {
@@ -66,6 +76,9 @@ impl Port for SerialDevice {
 
 pub fn open(settings: &Settings) -> Result<Connection, String> {
     let name = &settings.port;
+    if settings.ask_baud {
+        return Err("Select a baud rate before opening the serial port.".to_owned());
+    }
     let data_bits = match settings.data_bits {
         5 => serialport::DataBits::Five,
         6 => serialport::DataBits::Six,
@@ -104,17 +117,23 @@ pub fn open(settings: &Settings) -> Result<Connection, String> {
         .timeout(READ_TIMEOUT)
         .open()
         .map_err(|error| format!("Cannot open {name}: {error}"))?;
-    Ok(start(Box::new(SerialDevice(port))))
+    Ok(start_with_mode(Box::new(SerialDevice(port)), settings.slow))
 }
 
-pub fn start(mut port: Box<dyn Port>) -> Connection {
+pub fn start(port: Box<dyn Port>) -> Connection {
+    start_with_mode(port, false)
+}
+
+fn start_with_mode(mut port: Box<dyn Port>, slow: bool) -> Connection {
     let (output_tx, output) = unbounded();
     let (input, input_rx) = unbounded();
+    let (control_tx, control) = unbounded();
     let (exit_tx, exit) = bounded(1);
     let connection = Connection {
         output,
         input,
         exit,
+        control,
     };
     let reader_port = match port.try_clone_port() {
         Ok(reader_port) => reader_port,
@@ -142,7 +161,7 @@ pub fn start(mut port: Box<dyn Port>) -> Connection {
     let writer = thread::Builder::new()
         .name("serial-writer".to_owned())
         .spawn(move || {
-            let code = write_loop(&mut *port, &input_rx, &alive_rx);
+            let code = write_loop(&mut *port, &input_rx, &alive_rx, control_tx, slow);
             stop.store(true, Ordering::SeqCst);
             let _ = reader.join();
             let _ = exit_tx.send(code);
@@ -176,24 +195,49 @@ fn read_loop(
     drop(alive);
 }
 
-fn write_loop(port: &mut dyn Port, input: &Receiver<Input>, alive: &Receiver<()>) -> u32 {
+fn write_loop(port: &mut dyn Port, input: &Receiver<Input>, alive: &Receiver<()>, control: Sender<DriverControl>, slow: bool) -> u32 {
+    let mut pending = VecDeque::new();
+    let idle = never();
+    let mut timer = idle.clone();
     loop {
         select! {
             recv(input) -> message => match message {
+                Ok(Input::Data(data)) if slow => {
+                    pending.extend(data);
+                    if !pending.is_empty() && timer.same_channel(&idle) {
+                        timer = after(Duration::ZERO);
+                    }
+                }
                 Ok(Input::Data(data)) => {
                     if write_data(port, &data, alive).is_err() {
                         return 1;
                     }
                 }
                 Ok(Input::Break) => {
-                    let _ = port.send_break();
+                    if let Err(error) = port.send_break() {
+                        let _ = control.send(DriverControl::BreakFailed(error.to_string()));
+                    }
                 }
                 Ok(Input::SetBaud(baud)) => {
-                    let _ = port.set_baud(baud);
+                    let event = match port.set_baud(baud) {
+                        Ok(()) => DriverControl::Baud(baud),
+                        Err(error) => DriverControl::BaudFailed(baud, error.to_string()),
+                    };
+                    let _ = control.send(event);
                 }
                 Ok(Input::Close) | Err(_) => return 0,
             },
             recv(alive) -> _ => return 1,
+            recv(timer) -> _ => {
+                if let Some(byte) = pending.pop_front() {
+                    if write_data(port, &[byte], alive).is_err() {
+                        return 1;
+                    }
+                    timer = after(SLOW_BYTE_DELAY);
+                } else {
+                    timer = idle.clone();
+                }
+            }
         }
     }
 }

@@ -104,6 +104,109 @@ fn the_first_frame_spawns_the_default_profile_sized_to_the_pane() {
     assert!(!g.dl.instances.is_empty());
 }
 
+fn serial_profile(spec: &str) -> Profile {
+    Profile { serial: Some(spec.into()), ..profile("serial:test") }
+}
+
+#[test]
+fn serial_profile_waits_for_a_valid_speed_before_spawning() {
+    let (mut a, mut gfx) = app();
+    a.open_tab(serial_profile("dev:port:?,7E2,rtscts,slow"));
+    let pane = a.focused_pane().unwrap();
+    a.frame(&mut gfx, false);
+    let picker = a.overlay.as_ref().unwrap();
+    assert_eq!(picker.kind, OverlayKind::SerialSpeed(pane));
+    assert_eq!(picker.selected_value().as_deref(), Some("115200"));
+    assert!(spawns(&a.take_effects()).is_empty());
+    a.on_event(Event::Char('1'));
+    key(&mut a, Key::Enter, Mods::NONE);
+    a.frame(&mut gfx, false);
+    assert!(spawns(&a.take_effects()).is_empty());
+    for c in "2345".chars() {
+        a.on_event(Event::Char(c));
+    }
+    key(&mut a, Key::Enter, Mods::NONE);
+    a.on_event(Event::Char('\r'));
+    a.frame(&mut gfx, false);
+    let effects = a.take_effects();
+    let launches = spawns(&effects);
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0].0, pane);
+    assert_eq!(launches[0].1.serial.as_deref(), Some("dev:port:12345,7E2,rtscts,slow"));
+    assert_eq!((launches[0].1.cols, launches[0].1.rows), (123, 40));
+    assert!(writes(&effects).is_empty());
+}
+
+#[test]
+fn cancelling_serial_speed_closes_only_an_unlaunched_pane() {
+    let (mut a, mut gfx) = app();
+    a.open_default_tab();
+    let original = a.focused_pane();
+    a.split_with(Side::Right, serial_profile("COM3 : ? "));
+    a.frame(&mut gfx, false);
+    let first = spawns(&a.take_effects());
+    assert_eq!(first.len(), 1);
+    assert_eq!(Some(first[0].0), original);
+    key(&mut a, Key::Escape, Mods::NONE);
+    assert_eq!(a.focused_pane(), original);
+    assert_eq!(a.panes.len(), 1);
+    a.open_tab(serial_profile("COM3:9600"));
+    a.frame(&mut gfx, false);
+    a.run(Action::SerialSpeed);
+    key(&mut a, Key::Escape, Mods::NONE);
+    assert_eq!(a.panes.len(), 2);
+    assert!(a.overlay.is_none());
+    assert!(a.take_effects().iter().all(|e| !matches!(e, Effect::SerialControl { .. })));
+}
+
+#[test]
+fn restored_serial_panes_wait_for_their_own_speed_selection() {
+    let (mut original, _) = app();
+    original.open_tab(serial_profile("COM1:?"));
+    original.split_with(Side::Right, serial_profile("COM2:?"));
+    let (mut restored, mut gfx) = app();
+    assert!(restored.restore(&original.snapshot()));
+    restored.frame(&mut gfx, false);
+    assert!(spawns(&restored.take_effects()).is_empty());
+    key(&mut restored, Key::Enter, Mods::NONE);
+    restored.frame(&mut gfx, false);
+    let launches = spawns(&restored.take_effects());
+    assert_eq!(launches.len(), 1);
+    assert_eq!(launches[0].1.serial.as_deref(), Some("COM2:115200"));
+    restored.run(Action::PaneNavPrevious);
+    restored.frame(&mut gfx, false);
+    assert!(spawns(&restored.take_effects()).is_empty());
+    assert_eq!(restored.overlay.as_ref().map(|o| o.kind), restored.focused_pane().map(OverlayKind::SerialSpeed));
+    key(&mut restored, Key::Escape, Mods::NONE);
+    assert_eq!(restored.focused_pane(), Some(launches[0].0));
+}
+
+#[test]
+fn serial_actions_target_only_the_focused_serial_session() {
+    let (mut a, mut gfx) = app();
+    a.open_tab(serial_profile("COM1:9600"));
+    a.frame(&mut gfx, false);
+    a.take_effects();
+    let pane = a.focused_pane().unwrap();
+    a.run(Action::SerialSpeed);
+    a.on_event(Event::Pasted("57600".into()));
+    key(&mut a, Key::Enter, Mods::NONE);
+    a.run(Action::SerialBreak);
+    let controls: Vec<_> = a.take_effects().into_iter().filter_map(|e| match e {
+        Effect::SerialControl { pane, control } => Some((pane, control)),
+        _ => None,
+    }).collect();
+    assert_eq!(controls, [(pane, SerialControl::Baud(57600)), (pane, SerialControl::Break)]);
+    a.open_default_tab();
+    a.frame(&mut gfx, false);
+    a.run(Action::SerialSpeed);
+    a.run(Action::SerialBreak);
+    assert!(a.overlay.is_none());
+    assert!(a.take_effects().iter().all(|e| !matches!(e, Effect::SerialControl { .. })));
+    a.run(Action::CommandSelector);
+    assert!(!a.overlay.unwrap().items.iter().any(|p| matches!(p.value.as_str(), "serial-speed" | "serial-break")));
+}
+
 #[test]
 fn terminal_identification_in_spawn_preserves_explicit_environment() {
     for mode in ["aster", "xterm"] {
