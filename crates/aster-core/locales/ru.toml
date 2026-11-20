@@ -12,6 +12,7 @@
 "SSH destination" = "Адрес SSH"
 "Serial port" = "Последовательный порт"
 "Telnet or TCP address" = "Адрес Telnet или TCP"
+"Group" = "Группа"
 "Block" = "Блок"
 "Beam" = "Черта"
 "Underline" = "Подчёркивание"
