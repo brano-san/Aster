@@ -63,12 +63,7 @@ fn a_frame_with_text_colors_and_box_lines_renders_offscreen() {
     let terminal = app.focused_terminal().expect("terminal");
     terminal.lock().feed("\x1b]0;aster linux\x07$ ls --color\r\n\x1b[1;34mdir\x1b[0m  \x1b[32mscript.sh\x1b[0m  \x1b[3mitalic\x1b[0m  \x1b[4munderline\x1b[0m  \x1b[4:3mcurl\x1b[0m\r\n┌──┬──┐ ╭──╮ █▓▒░ \u{E0B0}\r\n│ab│cd│ ╰──╯ Привет 日本\r\n└──┴──┘\r\n$ ".as_bytes());
     app.woken();
-    for _ in 0..3 {
-        app.frame(&mut gfx, false);
-        if !gfx.atlas_reset {
-            break;
-        }
-    }
+    app.frame(&mut gfx, false);
     for (slot, offset) in &gfx.uploads.rects {
         let len = (slot.w * slot.h * 4) as usize;
         renderer.upload(*slot, &gfx.uploads.data[*offset..*offset + len]);

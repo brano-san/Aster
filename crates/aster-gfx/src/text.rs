@@ -15,11 +15,12 @@ pub struct FontStyle {
     pub size_q: u16,
     pub bold: bool,
     pub italic: bool,
+    pub ligatures: bool,
 }
 
 impl FontStyle {
     pub fn new(family: FontFamily, px: f32, bold: bool) -> Self {
-        Self { family, size_q: (px * 4.0).round() as u16, bold, italic: false }
+        Self { family, size_q: (px * 4.0).round() as u16, bold, italic: false, ligatures: false }
     }
     pub fn italic(self, italic: bool) -> Self {
         Self { italic, ..self }
@@ -36,6 +37,7 @@ pub struct ShapedGlyph {
     pub x: f32,
     pub y: f32,
     pub cluster: u32,
+    pub cluster_x: f32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -81,6 +83,13 @@ pub trait TextBackend {
     fn set_mono_family(&mut self, name: &str) -> bool {
         name.is_empty()
     }
+    fn set_fallback_family(&mut self, name: &str) -> bool {
+        name.is_empty()
+    }
+    fn set_font_waker(&mut self, _wake: std::sync::Arc<dyn Fn() + Send + Sync>) {}
+    fn poll_font_change(&mut self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -99,6 +108,7 @@ impl Uploads {
 #[derive(Clone, Copy)]
 struct GlyphSlot {
     slot: Slot,
+    last_used: u64,
     left: i32,
     top: i32,
     color: bool,
@@ -126,10 +136,10 @@ pub struct Gfx<B: TextBackend> {
     images: FxHashMap<u64, Image>,
     metrics: FxHashMap<FontStyle, FontMetrics>,
     scratch: GlyphBitmap,
-    pub atlas_reset: bool,
     ui_family: String,
     ui_found: bool,
     mono_family: String,
+    fallback_family: String,
 }
 
 impl<B: TextBackend> Gfx<B> {
@@ -144,10 +154,10 @@ impl<B: TextBackend> Gfx<B> {
             images: Default::default(),
             metrics: Default::default(),
             scratch: GlyphBitmap::default(),
-            atlas_reset: false,
             ui_family: String::new(),
             ui_found: true,
             mono_family: String::new(),
+            fallback_family: String::new(),
         }
     }
 
@@ -170,21 +180,37 @@ impl<B: TextBackend> Gfx<B> {
         self.ui_found
     }
 
+    pub fn set_fallback_family(&mut self, name: &str) {
+        if self.fallback_family != name {
+            self.text.set_fallback_family(name);
+            name.clone_into(&mut self.fallback_family);
+            self.shapes.clear();
+        }
+        if self.text.poll_font_change() {
+            self.shapes.clear();
+        }
+    }
+
     pub fn begin(&mut self, clear: Color) {
         self.dl.reset(clear);
-        self.atlas_reset = false;
+        self.atlas.begin_frame();
         if self.shapes.len() > MAX_SHAPES {
             self.shapes.clear();
         }
     }
 
     pub fn reset_atlas(&mut self) {
-        self.split().1.reset();
+        self.atlas.clear();
+        self.glyphs.clear();
+        for image in self.images.values_mut() {
+            image.slot = None;
+        }
+        self.uploads.clear();
     }
 
     fn split(&mut self) -> (&mut Shapes, GlyphCtx<'_, B>) {
-        let Self { shapes, text, glyphs, images, atlas, uploads, dl, scratch, atlas_reset, .. } = self;
-        (shapes, GlyphCtx { text, glyphs, images, atlas, uploads, dl, scratch, atlas_reset })
+        let Self { shapes, text, glyphs, images, atlas, uploads, dl, scratch, .. } = self;
+        (shapes, GlyphCtx { text, glyphs, images, atlas, uploads, dl, scratch })
     }
 
     pub fn metrics(&mut self, style: FontStyle) -> FontMetrics {
@@ -257,20 +283,28 @@ impl<B: TextBackend> Gfx<B> {
         }
     }
 
+    pub fn cell_run(&mut self, s: &str, origins: &[(usize, f32)], baseline: f32, style: FontStyle, color: Color) {
+        let (shapes, mut ctx) = self.split();
+        let t = shape(shapes, ctx.text, s, style);
+        for g in &t.glyphs {
+            let end = origins.partition_point(|&(byte, _)| byte <= g.cluster as usize);
+            if let Some(&(_, x)) = origins[..end].last() {
+                ctx.draw(x + (g.x - g.cluster_x), baseline + g.y, g, style, color);
+            }
+        }
+    }
+
     pub fn cell_box(&mut self, x: f32, y: f32, c: char, w: u32, h: u32, color: Color) -> bool {
         if !crate::boxdraw::is_procedural(c) || w > u16::MAX as u32 || h > u8::MAX as u32 {
             return false;
         }
         let key = GlyphKey { font: u16::MAX, id: c as u16, size_q: w as u16, subpx: h as u8 };
         let (_, mut ctx) = self.split();
-        let gs = match ctx.glyphs.get(&key) {
-            Some(s) => *s,
-            None => {
-                let s = crate::boxdraw::rasterize(c, w, h).and_then(|mask| ctx.store(w, h, &mask));
-                ctx.glyphs.insert(key, s);
-                s
-            }
-        };
+        let gs = ctx.glyph(key, |_, _, bm| {
+            let Some(data) = crate::boxdraw::rasterize(c, w, h) else { return false };
+            *bm = GlyphBitmap { width: w, height: h, data, ..Default::default() };
+            true
+        });
         if let Some(gs) = gs {
             let size = ctx.atlas.size();
             ctx.dl.glyph(Rect::new(x, y, w as f32, h as f32), uv(gs.slot, size), color);
@@ -296,17 +330,16 @@ impl<B: TextBackend> Gfx<B> {
     }
 
     pub fn image_alpha(&mut self, key: u64, r: Rect, alpha: u8) -> bool {
-        let Some(img) = self.images.get_mut(&key) else { return false };
+        let Some(img) = self.images.get(&key) else { return false };
         let slot = match img.slot {
-            Some(s) => s,
+            Some(s) => {
+                self.atlas.touch(s);
+                s
+            }
             None => {
-                let s = match self.atlas.alloc(img.w, img.h) {
-                    Some(s) => s,
-                    None => {
-                        self.reset_atlas();
-                        return false;
-                    }
-                };
+                let (w, h) = (img.w, img.h);
+                let Some(s) = self.split().1.allocate(w, h) else { return false };
+                let img = self.images.get_mut(&key).expect("registered image");
                 self.uploads.rects.push((s, self.uploads.data.len()));
                 self.uploads.data.extend_from_slice(&img.rgba);
                 img.slot = Some(s);
@@ -352,7 +385,6 @@ struct GlyphCtx<'a, B> {
     uploads: &'a mut Uploads,
     dl: &'a mut DrawList,
     scratch: &'a mut GlyphBitmap,
-    atlas_reset: &'a mut bool,
 }
 
 impl<B: TextBackend> GlyphCtx<'_, B> {
@@ -360,14 +392,7 @@ impl<B: TextBackend> GlyphCtx<'_, B> {
         let ix = px.floor();
         let subpx = ((px - ix) * 4.0) as u8 & 3;
         let key = GlyphKey { font: g.font, id: g.id, size_q: style.size_q, subpx };
-        let gs = match self.glyphs.get(&key) {
-            Some(s) => *s,
-            None => {
-                let s = self.rasterize(key);
-                self.glyphs.insert(key, s);
-                s
-            }
-        };
+        let gs = self.glyph(key, B::rasterize);
         if let Some(gs) = gs {
             let r = Rect::new(ix + gs.left as f32, py.round() - gs.top as f32, gs.slot.w as f32, gs.slot.h as f32);
             if gs.color {
@@ -378,47 +403,46 @@ impl<B: TextBackend> GlyphCtx<'_, B> {
         }
     }
 
-    fn store(&mut self, w: u32, h: u32, mask: &[u8]) -> Option<GlyphSlot> {
-        let slot = match self.atlas.alloc(w, h) {
-            Some(s) => s,
-            None => {
-                self.reset();
-                self.atlas.alloc(w, h)?
-            }
-        };
-        self.uploads.rects.push((slot, self.uploads.data.len()));
-        self.uploads.data.extend(mask.iter().flat_map(|&a| [a, a, a, a]));
-        Some(GlyphSlot { slot, left: 0, top: 0, color: false })
-    }
-
-    fn reset(&mut self) {
-        self.atlas.clear();
-        self.glyphs.clear();
-        for img in self.images.values_mut() {
-            img.slot = None;
+    fn allocate(&mut self, w: u32, h: u32) -> Option<Slot> {
+        if let Some(slot) = self.atlas.alloc(w, h) {
+            return Some(slot);
         }
-        self.uploads.clear();
-        *self.atlas_reset = true;
+        let area = self.atlas.evict(w, h)?;
+        let rows = area.y..area.y + area.h;
+        self.glyphs.retain(|_, glyph| glyph.is_none_or(|g| !rows.contains(&g.slot.y)));
+        for image in self.images.values_mut() {
+            if image.slot.is_some_and(|s| rows.contains(&s.y)) {
+                image.slot = None;
+            }
+        }
+        self.uploads.rects.push((area, self.uploads.data.len()));
+        self.uploads.data.resize(self.uploads.data.len() + area.w as usize * area.h as usize * 4, 0);
+        self.atlas.alloc(w, h)
     }
 
-    fn rasterize(&mut self, key: GlyphKey) -> Option<GlyphSlot> {
+    fn glyph(&mut self, key: GlyphKey, rasterize: impl FnOnce(&mut B, GlyphKey, &mut GlyphBitmap) -> bool) -> Option<GlyphSlot> {
+        if let Some(cached) = self.glyphs.get_mut(&key) {
+            let glyph = cached.as_mut()?;
+            if glyph.last_used != self.atlas.frame() {
+                self.atlas.touch(glyph.slot);
+                glyph.last_used = self.atlas.frame();
+            }
+            return Some(*glyph);
+        }
         self.scratch.data.clear();
         self.scratch.color = false;
-        if !self.text.rasterize(key, self.scratch) || self.scratch.width == 0 || self.scratch.height == 0 {
+        if !rasterize(self.text, key, self.scratch) || self.scratch.width == 0 || self.scratch.height == 0 {
+            self.glyphs.insert(key, None);
             return None;
         }
         let (w, h) = (self.scratch.width, self.scratch.height);
         let per_pixel = if self.scratch.color { 4 } else { 1 };
-        if self.scratch.data.len() != (w * h) as usize * per_pixel {
+        let bytes = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(per_pixel));
+        if bytes != Some(self.scratch.data.len()) {
+            self.glyphs.insert(key, None);
             return None;
         }
-        let slot = match self.atlas.alloc(w, h) {
-            Some(s) => s,
-            None => {
-                self.reset();
-                self.atlas.alloc(w, h)?
-            }
-        };
+        let slot = self.allocate(w, h)?;
         let bm = &*self.scratch;
         self.uploads.rects.push((slot, self.uploads.data.len()));
         if bm.color {
@@ -426,10 +450,12 @@ impl<B: TextBackend> GlyphCtx<'_, B> {
         } else {
             self.uploads.data.extend(bm.data.iter().flat_map(|&a| [a, a, a, a]));
         }
-        Some(GlyphSlot { slot, left: bm.left, top: bm.top, color: bm.color })
+        let glyph = GlyphSlot { slot, last_used: self.atlas.frame(), left: bm.left, top: bm.top, color: bm.color };
+        self.glyphs.insert(key, Some(glyph));
+        Some(glyph)
     }
 }
 
 #[cfg(test)]
 #[path = "../test/text.rs"]
-pub(crate) mod tests;
+mod tests;

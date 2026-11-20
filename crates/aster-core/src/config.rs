@@ -102,6 +102,9 @@ pub struct SearchOptions {
 #[serde(default, rename_all = "kebab-case")]
 pub struct Terminal {
     pub font: String,
+    pub fallback_font: String,
+    pub ligatures: bool,
+    pub minimum_contrast_ratio: f32,
     pub font_size: f32,
     pub line_padding: f32,
     pub padding: f32,
@@ -109,6 +112,7 @@ pub struct Terminal {
     pub cursor: CursorStyle,
     pub cursor_blink: bool,
     pub copy_on_select: bool,
+    pub copy_as_html: bool,
     pub right_click: RightClick,
     pub paste_on_middle_click: bool,
     pub bracketed_paste: bool,
@@ -133,6 +137,9 @@ impl Default for Terminal {
     fn default() -> Self {
         Self {
             font: "Cascadia Mono".into(),
+            fallback_font: String::new(),
+            ligatures: false,
+            minimum_contrast_ratio: 1.0,
             font_size: 14.0,
             line_padding: 0.0,
             padding: 6.0,
@@ -140,6 +147,7 @@ impl Default for Terminal {
             cursor: CursorStyle::Block,
             cursor_blink: true,
             copy_on_select: true,
+            copy_as_html: false,
             right_click: RightClick::Clipboard,
             paste_on_middle_click: false,
             bracketed_paste: true,

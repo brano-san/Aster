@@ -67,12 +67,14 @@ pub enum Effect {
     Resize { pane: PaneId, cols: u16, rows: u16 },
     Kill { pane: PaneId },
     SetClipboard(String),
+    SetClipboardHtml { text: String, html: String },
     RequestPaste,
     RequestVaultPaste(u64),
     SaveConfig(String),
     Open(String),
     OpenLog,
     SaveOutput { pane: PaneId },
+    ExportBuffer { pane: PaneId, text: String },
     RecentProfiles(Vec<String>),
     OpenConfigFile,
     Title(String),
@@ -969,15 +971,17 @@ impl App {
     }
 
     fn copy(&mut self) -> bool {
-        let Some(p) = self.focused_pane().and_then(|p| self.panes.get(&p)) else { return false };
-        let text = p.terminal.lock().selection_text();
-        match text {
-            Some(t) => {
-                self.effects.push(Effect::SetClipboard(t));
-                true
-            }
-            None => false,
-        }
+        let Some(pane) = self.focused_pane() else { return false };
+        let Some(shared) = self.terminal(pane).cloned() else { return false };
+        let terminal = shared.lock();
+        let Some(text) = terminal.selection_text() else { return false };
+        let effect = if self.config.terminal.copy_as_html {
+            Effect::SetClipboardHtml { text, html: crate::clipboard::selection_html(&terminal, &self.pane_palette(pane)) }
+        } else {
+            Effect::SetClipboard(text)
+        };
+        self.effects.push(effect);
+        true
     }
 
     fn clear_selection(&mut self, pane: PaneId) {
@@ -1036,6 +1040,14 @@ impl App {
             DebugSaveOutput => {
                 if let Some(pane) = self.focused_pane().filter(|p| self.panes.contains_key(p)) {
                     self.effects.push(Effect::SaveOutput { pane });
+                }
+            }
+            ExportBuffer => {
+                if let Some(pane) = self.focused_pane() {
+                    if let Some(terminal) = self.terminal(pane) {
+                        let text = terminal.lock().buffer_text();
+                        self.effects.push(Effect::ExportBuffer { pane, text });
+                    }
                 }
             }
             OpenLog => self.effects.push(Effect::OpenLog),

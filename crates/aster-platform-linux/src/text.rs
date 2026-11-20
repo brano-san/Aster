@@ -2,7 +2,8 @@
 use crate::fonts::{self, FontFile, Pair};
 use aster_gfx::hash::FxHashMap;
 use aster_gfx::text::{FontFamily, FontMetrics, FontStyle, GlyphBitmap, GlyphKey, ShapedGlyph, ShapedText, TextBackend};
-use harfrust::{Buffer, Direction, Script, ShapeOptions, ShapePlan, ShapePlanKey, ShaperFont, Tag};
+use harfrust::{Buffer, Direction, Feature, Script, ShapeOptions, ShapePlan, ShapePlanKey, ShaperFont, Tag};
+use std::sync::{mpsc, Arc};
 use swash::scale::image::{Content, Image};
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Angle, Format, Transform, Vector};
@@ -75,11 +76,12 @@ impl Face {
         }
     }
 
-    fn plan(&mut self, direction: Direction, script: Option<Script>) -> usize {
-        if let Some(i) = self.plans.iter().position(|p| ShapePlanKey::new(&self.hr, script, direction).matches(p)) {
+    fn plan(&mut self, direction: Direction, script: Option<Script>, features: &[Feature]) -> usize {
+        let key = ShapePlanKey::new(&self.hr, script, direction).features(features);
+        if let Some(i) = self.plans.iter().position(|p| key.matches(p)) {
             return i;
         }
-        self.plans.push(ShapePlan::new(&self.hr, direction, script, None, &[]));
+        self.plans.push(ShapePlan::new(&self.hr, direction, script, None, features));
         self.plans.len() - 1
     }
 }
@@ -111,6 +113,9 @@ pub struct LinuxText {
     default_mono: [u16; 2],
     ui: [u16; 2],
     mono: [u16; 2],
+    preferred: Option<[u16; 2]>,
+    pending_fallback: Option<mpsc::Receiver<Option<fonts::MappedPair>>>,
+    font_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     icons: u16,
     fallback: Vec<FontFile>,
     fallback_faces: FxHashMap<(usize, bool), u16>,
@@ -139,6 +144,9 @@ impl LinuxText {
             default_mono: [0, 0],
             ui: [0, 0],
             mono: [0, 0],
+            preferred: None,
+            pending_fallback: None,
+            font_waker: None,
             icons: 0,
             fallback: Vec::new(),
             fallback_faces: FxHashMap::default(),
@@ -247,9 +255,12 @@ impl LinuxText {
         f
     }
 
-    fn face_for(&mut self, primary: u16, c: char, bold: bool) -> u16 {
+    fn face_for(&mut self, primary: u16, preferred: Option<u16>, c: char, bold: bool) -> u16 {
         if self.faces[primary as usize].covers(c) {
             return primary;
+        }
+        if let Some(f) = preferred.filter(|&f| self.faces[f as usize].covers(c)) {
+            return f;
         }
         if let Some(&f) = self.chars.get(&(c, bold)) {
             return if f == NONE { primary } else { f };
@@ -270,7 +281,7 @@ impl LinuxText {
         }
     }
 
-    fn itemize(&mut self, text: &str, primary: u16, bold: bool) {
+    fn itemize(&mut self, text: &str, primary: u16, preferred: Option<u16>, bold: bool) {
         self.runs.clear();
         let run = |start, end, face, level, script| Run { start, end, face, level, script, x: 0.0, width: 0.0, first: 0 };
         let face = &self.faces[primary as usize];
@@ -288,7 +299,7 @@ impl LinuxText {
             };
             let face = match prev {
                 Some(p) if joins(p, &self.faces) => p,
-                _ => self.face_for(primary, c, bold),
+                _ => self.face_for(primary, preferred, c, bold),
             };
             let script = match harfrust::unicode::script(c as u32) {
                 Script::COMMON | Script::INHERITED | Script::UNKNOWN => None,
@@ -306,7 +317,10 @@ impl LinuxText {
         }
     }
 
-    fn shape_runs(&mut self, text: &str, px: f32) {
+    fn shape_runs(&mut self, text: &str, style: FontStyle) {
+        let px = style.px().max(1.0);
+        let ligatures = [b"liga", b"calt"].map(|tag| Feature::new(Tag::new(tag), u32::from(style.ligatures), ..));
+        let features = if style.family == FontFamily::Mono { &ligatures[..] } else { &[] };
         self.placed.clear();
         let mut buffer = self.buffer.take().unwrap_or_default();
         for run in &mut self.runs {
@@ -319,10 +333,10 @@ impl LinuxText {
                 Some(s) => buffer.set_script(Some(s)),
                 None => buffer.guess_segment_properties(),
             }
-            let plan = face.plan(direction, buffer.script());
+            let plan = face.plan(direction, buffer.script(), features);
             let k = px / face.upem;
             run.first = self.placed.len();
-            if harfrust::shape(&ShaperFont::new(&face.hr), &mut buffer, ShapeOptions::new().plan(Some(&face.plans[plan]))).is_err() {
+            if harfrust::shape(&ShaperFont::new(&face.hr), &mut buffer, ShapeOptions::new().plan(Some(&face.plans[plan])).features(features)).is_err() {
                 continue;
             }
             for (info, pos) in buffer.glyph_infos().iter().zip(buffer.glyph_positions()) {
@@ -361,8 +375,14 @@ impl LinuxText {
             let glyphs = &self.placed[r.first..end];
             let start = out.glyphs.len();
             let mut pen = r.x;
+            let mut cluster = None;
+            let mut cluster_x = pen;
             for g in glyphs {
-                out.glyphs.push(ShapedGlyph { font: r.face, id: g.id, x: pen + g.dx, y: g.dy, cluster: g.cluster });
+                if cluster != Some(g.cluster) {
+                    cluster = Some(g.cluster);
+                    cluster_x = pen;
+                }
+                out.glyphs.push(ShapedGlyph { font: r.face, id: g.id, x: pen + g.dx, y: g.dy, cluster: g.cluster, cluster_x });
                 pen += g.advance;
             }
             if r.level.is_rtl() {
@@ -382,8 +402,12 @@ impl TextBackend for LinuxText {
         self.adopt();
         let primary = self.primary(style);
         let primary = if style.italic { self.oblique(primary) } else { primary };
-        self.itemize(text, primary, style.bold && style.family != FontFamily::Icons);
-        self.shape_runs(text, style.px().max(1.0));
+        let preferred = self.preferred.filter(|_| style.family == FontFamily::Mono).map(|p| {
+            let f = p[style.bold as usize];
+            if style.italic { self.oblique(f) } else { f }
+        });
+        self.itemize(text, primary, preferred, style.bold && style.family != FontFamily::Icons);
+        self.shape_runs(text, style);
         self.place(out);
     }
 
@@ -458,4 +482,33 @@ impl TextBackend for LinuxText {
     fn families(&mut self) -> Vec<String> {
         fonts::fonts().wait().fc.as_ref().map(|fc| fc.families()).unwrap_or_default()
     }
+
+    fn set_font_waker(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.font_waker = Some(wake);
+    }
+
+    fn set_fallback_family(&mut self, name: &str) -> bool {
+        self.preferred = None;
+        self.pending_fallback = if name.is_empty() { None } else { fonts::request_fallback(name.to_owned(), self.font_waker.clone()) };
+        name.is_empty() || self.pending_fallback.is_some()
+    }
+
+    fn poll_font_change(&mut self) -> bool {
+        let Some(pending) = &self.pending_fallback else { return false };
+        let result = match pending.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+            Ok(mapped) => mapped,
+        };
+        self.pending_fallback = None;
+        self.preferred = result.and_then(|[(normal, i), (bold, j)]| {
+            let synthetic = i == j && std::ptr::eq(normal, bold);
+            Some([self.load(normal, i, false)?, self.load(bold, j, synthetic)?])
+        });
+        self.preferred.is_some()
+    }
 }
+
+#[cfg(test)]
+#[path = "../test/text.rs"]
+mod tests;

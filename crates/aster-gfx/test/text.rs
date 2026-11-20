@@ -6,7 +6,7 @@ impl TextBackend for Mono {
     fn shape(&mut self, text: &str, _: FontStyle, out: &mut ShapedText) {
         out.glyphs.clear();
         for (i, (b, c)) in text.char_indices().enumerate() {
-            out.glyphs.push(ShapedGlyph { font: 0, id: c as u16, x: i as f32 * 10.0, y: 0.0, cluster: b as u32 });
+            out.glyphs.push(ShapedGlyph { font: 0, id: c as u16, x: i as f32 * 10.0, y: 0.0, cluster: b as u32, cluster_x: i as f32 * 10.0 });
         }
         out.width = out.glyphs.len() as f32 * 10.0;
     }
@@ -51,24 +51,86 @@ fn caret_math() {
 }
 
 #[test]
-fn atlas_overflow_resets() {
-    let mut g = Gfx::new(Mono, 16);
-    g.begin(Color::default());
-    g.text(0.0, 10.0, "abcdefg", style(), Color::default(), 1e9);
-    assert!(g.atlas_reset);
+fn cell_run_anchors_ligatures_and_combining_marks_to_grid_columns() {
+    struct Clusters;
+    impl TextBackend for Clusters {
+        fn shape(&mut self, text: &str, _: FontStyle, out: &mut ShapedText) {
+            assert_eq!(text, "界=>e\u{301}");
+            out.glyphs = [(0, 0.0, 0.0), (3, 16.4, 16.4), (5, 34.1, 34.1), (5, 36.1, 34.1)].map(|(cluster, x, cluster_x)| {
+                ShapedGlyph { font: 0, id: 1, x, y: 0.0, cluster, cluster_x }
+            }).to_vec();
+            out.width = 42.4;
+        }
+        fn rasterize(&mut self, key: GlyphKey, out: &mut GlyphBitmap) -> bool {
+            Mono.rasterize(key, out)
+        }
+        fn metrics(&mut self, style: FontStyle) -> FontMetrics {
+            Mono.metrics(style)
+        }
+    }
+    let mut g = Gfx::new(Clusters, 128);
+    g.cell_run("界=>e\u{301}", &[(0, 10.0), (3, 30.0), (4, 40.0), (5, 50.0)], 20.0, style(), Color::default());
+    assert_eq!(g.dl.instances.iter().map(|i| i.rect[0]).collect::<Vec<_>>(), [11.0, 31.0, 51.0, 53.0]);
 }
 
 #[test]
-fn glyph_overflow_forgets_image_slots() {
-    let mut g = Gfx::new(Mono, 16);
-    g.add_image(7, 4, 4, vec![9; 64]);
+fn glyph_pressure_evicts_the_least_recently_used_shelf() {
+    let mut g = Gfx::new(Mono, 21);
     g.begin(Color::default());
-    assert!(g.image(7, Rect::new(0.0, 0.0, 4.0, 4.0)));
-    g.text(0.0, 10.0, "abcdefg", style(), Color::default(), 1e9);
-    assert!(g.atlas_reset);
+    g.text(0.0, 10.0, "abcdef", style(), Color::default(), 1e9);
+    let cold = g.dl.instances[3].uv;
     g.uploads.clear();
-    assert!(g.image(7, Rect::new(0.0, 0.0, 4.0, 4.0)));
-    assert_eq!(g.uploads.rects.len(), 1, "image re-uploaded after the glyph overflow");
+    g.begin(Color::default());
+    g.text(0.0, 10.0, "a", style(), Color::default(), 1e9);
+    g.begin(Color::default());
+    g.text(0.0, 10.0, "gbca", style(), Color::default(), 1e9);
+    assert_eq!(g.dl.instances.len(), 4);
+    assert_eq!(g.dl.instances[0].uv, cold);
+    assert_eq!(g.uploads.rects.iter().filter(|(s, _)| s.w == 6 && s.h == 8).count(), 1);
+}
+
+#[test]
+fn all_pinned_glyphs_keep_their_pixels_and_a_deferred_glyph_is_retried() {
+    let mut g = Gfx::new(Mono, 16);
+    g.begin(Color::default());
+    g.text(0.0, 10.0, "abcba", style(), Color::default(), 1e9);
+    assert_eq!(g.uploads.rects.len(), 2);
+    assert_eq!(g.dl.instances.len(), 4);
+    assert_eq!(g.dl.instances[0].uv, g.dl.instances[3].uv);
+    assert_eq!(g.dl.instances[1].uv, g.dl.instances[2].uv);
+    g.begin(Color::default());
+    g.text(0.0, 10.0, "c", style(), Color::default(), 1e9);
+    assert_eq!(g.dl.instances.len(), 1);
+}
+
+#[test]
+fn images_and_procedural_glyphs_share_the_frame_pin_and_reupload_after_eviction() {
+    let mut g = Gfx::new(Mono, 16);
+    let image = Rect::new(0.0, 0.0, 6.0, 8.0);
+    g.add_image(7, 6, 8, vec![9; 6 * 8 * 4]);
+    g.begin(Color::default());
+    assert!(g.image(7, image));
+    assert!(g.cell_box(0.0, 0.0, '─', 6, 8, Color::default()));
+    for _ in 0..2 {
+        g.begin(Color::default());
+        g.uploads.clear();
+        assert!(g.cell_box(0.0, 0.0, '─', 6, 8, Color::default()));
+        assert!(g.image(7, image));
+        g.text(0.0, 10.0, "x", style(), Color::default(), 1e9);
+        assert_eq!(g.dl.instances.len(), 2);
+        assert!(g.uploads.rects.is_empty());
+    }
+    g.begin(Color::default());
+    g.text(0.0, 10.0, "xy", style(), Color::default(), 1e9);
+    assert_eq!(g.dl.instances.len(), 2);
+    assert!(!g.image(7, image));
+    g.begin(Color::default());
+    g.uploads.clear();
+    assert!(g.image(7, image));
+    assert!(g.cell_box(0.0, 0.0, '─', 6, 8, Color::default()));
+    let bitmaps: Vec<_> = g.uploads.rects.iter().filter(|(s, _)| s.w == 6 && s.h == 8).collect();
+    assert_eq!(bitmaps.len(), 2);
+    assert_eq!(&g.uploads.data[bitmaps[0].1..bitmaps[0].1 + 6 * 8 * 4], &[9; 6 * 8 * 4]);
 }
 
 struct Emoji;

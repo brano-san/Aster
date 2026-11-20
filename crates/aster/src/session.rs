@@ -32,7 +32,17 @@ impl RawOutput {
     }
 
     pub fn save(&self, pane: PaneId, downloads: impl FnOnce() -> Option<PathBuf> + Send + 'static, terminal: Shared, wake: Wake) {
-        let bytes = self.snapshot();
+        OutputFile::Raw(self.snapshot()).save(pane, downloads, terminal, wake);
+    }
+}
+
+pub enum OutputFile {
+    Raw(Vec<u8>),
+    Buffer(String),
+}
+
+impl OutputFile {
+    pub fn save(self, pane: PaneId, downloads: impl FnOnce() -> Option<PathBuf> + Send + 'static, terminal: Shared, wake: Wake) {
         let report = move |message: String| {
             let clean: String = message.chars().filter(|c| !c.is_control()).collect();
             terminal.lock().feed(format!("\r\n\x1b[2m[{clean}]\x1b[0m\r\n").as_bytes());
@@ -41,9 +51,9 @@ impl RawOutput {
         let notify = report.clone();
         let worker = std::thread::Builder::new().name(format!("aster-save-output-{pane}")).spawn(move || {
             let result = downloads().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Downloads folder unavailable"))
-                .and_then(|dir| write_output(&dir, pane, &bytes));
+                .and_then(|dir| self.write(&dir, pane));
             notify(match result {
-                Ok(path) => format!("saved to {}", path.display()),
+                Ok(path) => aster_core::i18n::tf("saved to {path}", &[("path", &path.display().to_string())]),
                 Err(e) => format!("cannot save output: {e}"),
             });
         });
@@ -51,26 +61,30 @@ impl RawOutput {
             report(format!("cannot save output: {e}"));
         }
     }
-}
 
-fn write_output(dir: &Path, pane: PaneId, bytes: &[u8]) -> io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let mut time = SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_nanos();
-    loop {
-        let path = dir.join(format!("aster-output-{pane}-{time}.bin"));
-        let mut file = match std::fs::File::create_new(&path) {
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                time += 1;
-                continue;
-            }
-            result => result?,
+    fn write(&self, dir: &Path, pane: PaneId) -> io::Result<PathBuf> {
+        let (name, extension, bytes) = match self {
+            Self::Raw(bytes) => ("output", "bin", bytes.as_slice()),
+            Self::Buffer(text) => ("buffer", "txt", text.as_bytes()),
         };
-        if let Err(e) = file.write_all(bytes) {
-            drop(file);
-            let _ = std::fs::remove_file(&path);
-            return Err(e);
+        std::fs::create_dir_all(dir)?;
+        let mut time = SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_nanos();
+        loop {
+            let path = dir.join(format!("aster-{name}-{pane}-{time}.{extension}"));
+            let mut file = match std::fs::File::create_new(&path) {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    time += 1;
+                    continue;
+                }
+                result => result?,
+            };
+            if let Err(e) = file.write_all(bytes) {
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                return Err(e);
+            }
+            return Ok(path);
         }
-        return Ok(path);
     }
 }
 
