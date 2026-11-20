@@ -105,3 +105,18 @@ fn backspace_on_an_empty_query_puts_the_address_up_for_editing() {
     a.on_event(crate::input::Event::Key { key: crate::input::Key::Backspace, mods: crate::input::Mods::NONE, pressed: true });
     assert_eq!(a.overlay.as_ref().unwrap().query_text(), "d");
 }
+
+#[test]
+fn ctrl_enter_opens_the_chosen_profile_in_a_split() {
+    let mut a = app(Vec::new());
+    a.open_default_tab();
+    a.run(crate::keymap::Action::ProfileSelector);
+    a.overlay.as_mut().unwrap().insert("serial");
+    a.on_event(crate::input::Event::Key { key: crate::input::Key::Enter, mods: crate::input::Mods { ctrl: true, ..crate::input::Mods::NONE }, pressed: true });
+    assert!(a.overlay.is_none());
+    assert_eq!(a.tabs.len(), 1);
+    let panes = a.tabs[0].root.panes();
+    assert_eq!(panes.len(), 2);
+    assert_eq!(a.panes[&a.tabs[0].focus].profile.id, "serial:COM3");
+    assert_eq!(a.recent.first().map(String::as_str), Some("serial:COM3"));
+}
