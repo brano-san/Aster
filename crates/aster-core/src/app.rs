@@ -1543,7 +1543,7 @@ impl App {
 
     fn cell_at(&self, pane: PaneId, rect: Rect, x: f32, y: f32) -> (usize, usize, aster_vt::Side) {
         let Some(m) = self.metrics else { return (0, 0, aster_vt::Side::Left) };
-        let inner = view::pane_inner(rect, self.scale);
+        let inner = view::pane_inner_with(rect, self.scale, self.config.terminal.padding);
         let size = self.panes.get(&pane).map(|p| p.size).unwrap_or(Size::new(1, 1));
         let fx = ((x - inner.x) / m.w).max(0.0);
         let col = (fx as usize).min(size.cols - 1);

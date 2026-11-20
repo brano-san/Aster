@@ -66,9 +66,13 @@ pub fn bare_chrome(w: f32, h: f32) -> Chrome {
     Chrome { tab_bar: Rect::new(0.0, 0.0, w, 0.0), content: Rect::new(0.0, 0.0, w, h), ..Chrome::default() }
 }
 
-pub fn pane_inner(r: Rect, s: f32) -> Rect {
-    let p = (PAD * s).round();
+pub fn pane_inner_with(r: Rect, s: f32, padding: f32) -> Rect {
+    let p = (padding.clamp(0.0, 64.0) * s).round();
     r.inset(p, p)
+}
+
+pub fn pane_inner(r: Rect, s: f32) -> Rect {
+    pane_inner_with(r, s, PAD)
 }
 
 fn rgb(c: Rgb) -> Color {
@@ -320,7 +324,7 @@ impl App {
 
     fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, m: Metrics) {
         let s = self.scale;
-        let inner = pane_inner(rect, s);
+        let inner = pane_inner_with(rect, s, self.config.terminal.padding);
         let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
         let mut effects = Vec::new();
         let window_focused = self.terminal_has_focus();

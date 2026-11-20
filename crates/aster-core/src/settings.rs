@@ -53,6 +53,7 @@ pub const SETTINGS: &[Setting] = &[
     item(TERMINAL, "terminal.font", "Font", "Monospace font family for the terminal", Control::Text),
     item(TERMINAL, "terminal.font-size", "Font size", "Size in points before zoom", Control::Number { min: 6.0, max: 48.0, step: 1.0 }),
     item(TERMINAL, "terminal.line-padding", "Line padding", "Extra pixels between lines", Control::Number { min: 0.0, max: 20.0, step: 1.0 }),
+    item(TERMINAL, "terminal.padding", "Text padding", "Space between the text and the edges of a pane", Control::Number { min: 0.0, max: 64.0, step: 1.0 }),
     item(TERMINAL, "terminal.cursor", "Cursor shape", "Shape of the text cursor", Control::Choice(CURSORS)),
     item(TERMINAL, "terminal.cursor-blink", "Blinking cursor", "The cursor blinks while the window has focus", Control::Toggle),
     item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
