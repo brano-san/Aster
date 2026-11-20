@@ -491,6 +491,17 @@ impl App {
         self.custom_schemes().into_iter().chain(self.schemes.iter().cloned()).find(|s| s.name.eq_ignore_ascii_case(name)).map(|s| s.palette)
     }
 
+    pub(crate) fn pane_palette(&self, id: PaneId) -> Palette {
+        let own = self.panes.get(&id).and_then(|p| p.profile.scheme.as_deref()).filter(|n| !n.is_empty()).and_then(|n| self.scheme(n));
+        match own {
+            Some(mut palette) => {
+                palette.bold_is_bright = self.palette.bold_is_bright;
+                palette
+            }
+            None => self.palette,
+        }
+    }
+
     fn scheme_is_dark(&self) -> bool {
         match self.config.appearance.color_scheme_mode {
             SchemeMode::Dark => true,

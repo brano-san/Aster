@@ -415,7 +415,7 @@ fn a_network_profile_stores_a_normalized_address() {
     typed(&mut a, "switch.lan");
     key(&mut a, Key::Tab);
     typed(&mut a, "Network");
-    key(&mut a, Key::Enter);
+    a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
     let p = config.profiles.iter().find(|p| p.name == "Switch").unwrap();
     assert_eq!(p.socket.as_deref(), Some("telnet://switch.lan:23"));
@@ -438,4 +438,36 @@ fn the_first_letter_typed_after_opening_settings_by_shortcut_is_kept() {
     b.on_event(Event::Char('\u{1b}'));
     b.on_event(Event::Char('x'));
     assert_eq!(b.settings.as_ref().unwrap().query, "x", "the chord's own character is still swallowed");
+}
+
+#[test]
+fn the_profile_editor_validates_and_canonicalizes_the_color_scheme() {
+    let mut a = app();
+    let scheme = a.scheme_names().into_iter().find(|name| *name != name.to_ascii_lowercase()).unwrap();
+    select_profile(&mut a, "");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "Work");
+    key(&mut a, Key::Tab);
+    typed(&mut a, "shell");
+    for _ in 1..8 {
+        key(&mut a, Key::Tab);
+    }
+    typed(&mut a, &scheme.to_ascii_lowercase());
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(saved(&mut a).unwrap().profiles[0].scheme.as_deref(), Some(scheme.as_str()));
+
+    key(&mut a, Key::Enter);
+    assert_eq!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().fields[8], scheme);
+    for _ in 0..8 {
+        key(&mut a, Key::Tab);
+    }
+    a.on_event(ctrl(Key::Backspace));
+    typed(&mut a, "unknown scheme");
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.as_deref(), Some(t("There is no color scheme with this name")));
+    assert!(saved(&mut a).is_none());
+
+    a.on_event(ctrl(Key::Backspace));
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(saved(&mut a).unwrap().profiles[0].scheme, None);
 }
