@@ -20,10 +20,12 @@ pub enum Flow {
 pub struct Settings {
     pub port: String,
     pub baud: u32,
+    pub ask_baud: bool,
     pub data_bits: u8,
     pub parity: Parity,
     pub stop_bits: u8,
     pub flow: Flow,
+    pub slow: bool,
 }
 
 impl Default for Settings {
@@ -31,10 +33,12 @@ impl Default for Settings {
         Settings {
             port: String::new(),
             baud: 115_200,
+            ask_baud: false,
             data_bits: 8,
             parity: Parity::None,
             stop_bits: 1,
             flow: Flow::None,
+            slow: false,
         }
     }
 }
@@ -56,12 +60,21 @@ pub fn parse(spec: &str) -> Result<Settings, String> {
         return Err("The serial port name is empty.".to_owned());
     }
     settings.port = port.to_owned();
-    if let Some(baud) = baud {
+    if baud == Some("?") {
+        settings.ask_baud = true;
+    } else if let Some(baud) = baud {
         settings.baud = parse_baud(baud)?;
     }
     let mut frame_seen = false;
     let mut flow_seen = false;
     for part in parts {
+        if settings.slow {
+            return Err("The slow flag must appear once at the end of the serial port specification.".to_owned());
+        }
+        if part.eq_ignore_ascii_case("slow") {
+            settings.slow = true;
+            continue;
+        }
         if flow_seen {
             return Err(format!(
                 "Unexpected extra part \"{part}\" after the flow control."
@@ -99,16 +112,15 @@ pub fn format(settings: &Settings) -> String {
         Flow::Software => ",xonxoff",
         Flow::Hardware => ",rtscts",
     };
-    format!(
-        "{}:{},{}{}{}{}",
-        settings.port, settings.baud, settings.data_bits, parity, settings.stop_bits, flow
-    )
+    let baud = if settings.ask_baud { "?".to_owned() } else { settings.baud.to_string() };
+    let slow = if settings.slow { ",slow" } else { "" };
+    format!("{}:{baud},{}{parity}{}{flow}{slow}", settings.port, settings.data_bits, settings.stop_bits)
 }
 
 fn split_port(head: &str) -> (&str, Option<&str>) {
     if let Some((port, baud)) = head.rsplit_once(':') {
         let baud = baud.trim();
-        if !baud.is_empty() && baud.bytes().all(|b| b.is_ascii_digit()) {
+        if baud == "?" || (!baud.is_empty() && baud.bytes().all(|b| b.is_ascii_digit())) {
             return (port.trim(), Some(baud));
         }
     }

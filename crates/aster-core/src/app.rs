@@ -53,6 +53,20 @@ pub struct Launch {
     pub rows: u16,
 }
 
+impl Launch {
+    pub(crate) fn baud_placeholder(&self) -> Option<usize> {
+        let head = self.serial.as_deref()?.split(',').next()?.trim_end();
+        let (_, baud) = head.rsplit_once(':')?;
+        (baud.trim_start() == "?").then(|| head.len() - 1)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SerialControl {
+    Baud(u32),
+    Break,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PaneTransfer {
     #[default]
@@ -64,6 +78,7 @@ pub enum PaneTransfer {
 
 pub enum Effect {
     Spawn { pane: PaneId, launch: Launch, terminal: Shared },
+    SerialControl { pane: PaneId, control: SerialControl },
     Write { pane: PaneId, bytes: Vec<u8> },
     Resize { pane: PaneId, cols: u16, rows: u16 },
     Kill { pane: PaneId },
@@ -598,15 +613,13 @@ impl App {
         Options { scrollback: self.config.terminal.scrollback_lines, cursor, blink: self.config.terminal.cursor_blink, word_separators: self.config.terminal.word_separator.clone() }
     }
 
-    fn new_pane(&mut self, profile: Profile) -> PaneId {
-        let inherited = self.focused_pane().and_then(|id| {
-            let source = &self.panes.get(&id)?.profile;
-            if profile.ssh.is_some() && (source.ssh != profile.ssh || source.ssh_options != profile.ssh_options) {
-                return None;
-            }
-            self.pane_cwd(id)
-        });
-        self.new_pane_in(profile, inherited)
+    fn inherited_cwd(&self, profile: &Profile) -> Option<String> {
+        let id = self.focused_pane()?;
+        let source = &self.panes.get(&id)?.profile;
+        if profile.ssh.is_some() && (source.ssh != profile.ssh || source.ssh_options != profile.ssh_options) {
+            return None;
+        }
+        self.pane_cwd(id)
     }
 
     pub(crate) fn new_pane_in(&mut self, profile: Profile, inherited: Option<String>) -> PaneId {
@@ -645,16 +658,33 @@ impl App {
     }
 
     pub fn open_tab(&mut self, profile: Profile) {
-        let id = self.new_pane(profile);
-        let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
-        self.tabs.insert(at, Tab { root: Node::Leaf(id), focus: id, zoomed: None, title: None, color: None });
-        self.active = at;
-        self.overlay = None;
-        self.dirty = true;
+        let inherited = self.inherited_cwd(&profile);
+        self.open_tab_at(profile, inherited);
     }
 
     pub(crate) fn focused_pane(&self) -> Option<PaneId> {
         self.tabs.get(self.active).map(|t| t.focus)
+    }
+
+    pub(crate) fn serial_pane(&self) -> Option<PaneId> {
+        self.focused_pane().filter(|id| self.panes.get(id).is_some_and(|p| p.profile.serial.is_some() && p.pending.is_none() && p.exited.is_none()))
+    }
+
+    pub(crate) fn prompt_pending_serial(&mut self) {
+        let focus = self.focused_pane();
+        if let Some(OverlayKind::SerialSpeed(pane)) = self.overlay.as_ref().map(|o| o.kind) {
+            if focus != Some(pane) || self.panes.get(&pane).is_none_or(|p| p.exited.is_some()) {
+                self.overlay = None;
+            }
+        }
+        if self.overlay.is_some() || self.close_confirm.is_some() {
+            return;
+        }
+        if let Some(id) = focus {
+            if self.panes.get(&id).and_then(|p| p.pending.as_ref()).and_then(Launch::baud_placeholder).is_some() {
+                self.open_overlay(OverlayKind::SerialSpeed(id));
+            }
+        }
     }
 
     pub fn focused_terminal(&self) -> Option<Shared> {
@@ -675,11 +705,13 @@ impl App {
 
     fn split_with(&mut self, side: Side, profile: Profile) {
         let Some(focus) = self.focused_pane().filter(|p| *p != SETTINGS_PANE) else { return self.open_tab(profile) };
-        let id = self.new_pane(profile);
+        let cwd = self.inherited_cwd(&profile);
+        let id = self.new_pane_in(profile, cwd);
         let tab = &mut self.tabs[self.active];
         tab.zoomed = None;
         tab.root.split(focus, side, id);
         tab.focus = id;
+        self.prompt_pending_serial();
         self.dirty = true;
     }
 
@@ -1044,6 +1076,16 @@ impl App {
             Search => self.open_search(),
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             SetTabColor => self.open_overlay(OverlayKind::TabColors),
+            SerialSpeed => {
+                if let Some(pane) = self.serial_pane() {
+                    self.open_overlay(OverlayKind::SerialSpeed(pane));
+                }
+            }
+            SerialBreak => {
+                if let Some(pane) = self.serial_pane() {
+                    self.effects.push(Effect::SerialControl { pane, control: SerialControl::Break });
+                }
+            }
             ReportProblem => self.effects.push(Effect::Open(report_url())),
             DebugCopyState => {
                 if let Some(terminal) = self.focused_terminal() {
@@ -1185,11 +1227,17 @@ impl App {
     fn open_overlay(&mut self, kind: OverlayKind) {
         let items = match kind {
             OverlayKind::Commands => Action::all()
+                .filter(|a| !matches!(a, Action::SerialSpeed | Action::SerialBreak) || self.serial_pane().is_some())
                 .map(|a| Pick { label: a.label(), hint: self.keymap.bindings_of(a).next().map(crate::keymap::format_binding).unwrap_or_default(), value: a.id(), ..Pick::default() })
                 .collect(),
             OverlayKind::Profiles => self.profile_picks(),
             OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), value: n, ..Pick::default() }).collect(),
             OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string(), ..Pick::default() }).collect(),
+            OverlayKind::SerialSpeed(pane) => {
+                self.overlay = Some(Overlay::serial_speed(pane));
+                self.dirty = true;
+                return;
+            }
         };
         let mut overlay = Overlay::new(kind, items);
         if kind == OverlayKind::Profiles && self.ssh.is_some() {
@@ -1210,6 +1258,16 @@ impl App {
         self.overlay = None;
         self.dirty = true;
         match kind {
+            OverlayKind::SerialSpeed(pane) => {
+                let Ok(baud) = value.parse() else { return };
+                if let Some(launch) = self.panes.get_mut(&pane).and_then(|p| p.pending.as_mut()) {
+                    if let (Some(at), Some(spec)) = (launch.baud_placeholder(), launch.serial.as_mut()) {
+                        spec.replace_range(at..at + 1, &value);
+                    }
+                } else if self.serial_pane() == Some(pane) {
+                    self.effects.push(Effect::SerialControl { pane, control: SerialControl::Baud(baud) });
+                }
+            }
             OverlayKind::Commands => {
                 if let Some(a) = Action::from_id(&value) {
                     self.run(a);
@@ -1254,7 +1312,11 @@ impl App {
     }
 
     fn close_overlay(&mut self) {
-        self.overlay = None;
+        if let Some(OverlayKind::SerialSpeed(pane)) = self.overlay.take().map(|o| o.kind) {
+            if self.panes.get(&pane).is_some_and(|p| p.pending.is_some()) {
+                self.close_pane(pane);
+            }
+        }
         if let Some(name) = self.scheme_before.take() {
             self.set_scheme_name(name);
         }
@@ -1366,7 +1428,10 @@ impl App {
                 self.last_tab = Some(before);
             }
         }
-        self.current_tab = current;
+        if current != self.current_tab {
+            self.prompt_pending_serial();
+            self.current_tab = current;
+        }
     }
 
     fn nudge_divider(&mut self, axis: Axis, delta: f32) {

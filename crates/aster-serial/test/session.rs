@@ -10,12 +10,14 @@ const WAIT: Duration = Duration::from_secs(5);
 struct State {
     to_host: VecDeque<u8>,
     from_host: Vec<u8>,
+    write_sizes: Vec<usize>,
     bauds: Vec<u32>,
     breaks: usize,
     timeouts: usize,
     read_failure: bool,
     write_failure: bool,
     clone_failure: bool,
+    control_failure: bool,
 }
 
 #[derive(Default)]
@@ -94,8 +96,10 @@ impl Write for TestPort {
         if self.0.lock().write_failure {
             return Err(io::Error::new(ErrorKind::BrokenPipe, "device removed"));
         }
-        self.0
-            .update(|state| state.from_host.extend_from_slice(buf));
+        self.0.update(|state| {
+            state.from_host.extend_from_slice(buf);
+            state.write_sizes.push(buf.len());
+        });
         Ok(buf.len())
     }
 
@@ -106,11 +110,17 @@ impl Write for TestPort {
 
 impl Port for TestPort {
     fn set_baud(&mut self, baud: u32) -> io::Result<()> {
+        if self.0.lock().control_failure {
+            return Err(io::Error::other("unsupported baud"));
+        }
         self.0.update(|state| state.bauds.push(baud));
         Ok(())
     }
 
     fn send_break(&mut self) -> io::Result<()> {
+        if self.0.lock().control_failure {
+            return Err(io::Error::other("break unavailable"));
+        }
         self.0.update(|state| state.breaks += 1);
         Ok(())
     }
@@ -176,6 +186,34 @@ fn data_input_reaches_the_device() {
 }
 
 #[test]
+fn slow_send_writes_one_byte_per_call_in_order() {
+    let device = Device::default();
+    let connection = start_with_mode(device.port(), true);
+    for bytes in [b"AT".as_slice(), b"", b"\r\n"] {
+        connection.input.send(Input::Data(bytes.to_vec())).unwrap();
+    }
+    let sizes = device.wait_for(|s| (s.from_host == b"AT\r\n").then(|| s.write_sizes.clone()));
+    assert_eq!(sizes, [1, 1, 1, 1]);
+}
+
+#[test]
+fn close_interrupts_a_slow_send() {
+    let device = Device::default();
+    let connection = start_with_mode(device.port(), true);
+    connection.input.send(Input::Data(vec![42; 16_384])).unwrap();
+    device.wait_for(|s| (!s.from_host.is_empty()).then_some(()));
+    connection.input.send(Input::Close).unwrap();
+    assert_ended(&connection, 0);
+    assert!(device.lock().from_host.len() < 16_384);
+}
+
+#[test]
+fn opening_requires_the_requested_baud_to_be_resolved() {
+    let settings = crate::settings::parse("COM3:?").unwrap();
+    assert!(open(&settings).err().unwrap().contains("baud rate"));
+}
+
+#[test]
 fn baud_changes_and_breaks_are_applied_to_the_port() {
     let device = Device::default();
     let connection = start(device.port());
@@ -186,6 +224,24 @@ fn baud_changes_and_breaks_are_applied_to_the_port() {
         device.wait_for(|s| (s.bauds.len() == 2).then(|| (s.bauds.clone(), s.breaks)));
     assert_eq!(bauds, [9600, 57600]);
     assert_eq!(breaks, 1);
+    assert_eq!(connection.control.recv_timeout(WAIT), Ok(DriverControl::Baud(9600)));
+    assert_eq!(connection.control.recv_timeout(WAIT), Ok(DriverControl::Baud(57600)));
+}
+
+#[test]
+fn rejected_controls_report_the_driver_error_and_keep_the_port_open() {
+    let device = Device::default();
+    let connection = start(device.port());
+    device.update(|s| s.control_failure = true);
+    connection.input.send(Input::SetBaud(12345)).unwrap();
+    connection.input.send(Input::Break).unwrap();
+    assert_eq!(connection.control.recv_timeout(WAIT), Ok(DriverControl::BaudFailed(12345, "unsupported baud".into())));
+    assert_eq!(connection.control.recv_timeout(WAIT), Ok(DriverControl::BreakFailed("break unavailable".into())));
+    connection.input.send(Input::Data(b"AT".to_vec())).unwrap();
+    device.wait_for(|s| (s.from_host == b"AT").then_some(()));
+    connection.input.send(Input::Close).unwrap();
+    assert_ended(&connection, 0);
+    assert_eq!(connection.control.recv_timeout(WAIT), Err(RecvTimeoutError::Disconnected));
 }
 
 #[test]
@@ -205,6 +261,7 @@ fn dropping_every_input_sender_ends_the_session_like_close() {
         output,
         input,
         exit,
+        ..
     } = start(device.port());
     drop(input);
     assert_eq!(exit.recv_timeout(WAIT), Ok(0));
@@ -253,6 +310,7 @@ fn a_port_that_cannot_be_shared_between_threads_ends_at_once_with_code_one() {
     device.update(|state| state.clone_failure = true);
     let connection = start(device.port());
     assert_ended(&connection, 1);
+    assert_eq!(connection.control.recv_timeout(WAIT), Err(RecvTimeoutError::Disconnected));
 }
 
 #[test]

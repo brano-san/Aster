@@ -30,6 +30,36 @@ fn stepping_wraps_by_one_and_clamps_by_pages() {
 }
 
 #[test]
+fn serial_speed_opens_at_115200_and_navigates_the_presets() {
+    let mut o = Overlay::serial_speed(4);
+    assert_eq!(o.kind, OverlayKind::SerialSpeed(4));
+    assert_eq!(o.selected_value().as_deref(), Some("115200"));
+    let speeds: Vec<_> = o.shown.iter().map(|(i, _)| o.items[*i].value.as_str()).collect();
+    assert_eq!(speeds, ["110", "300", "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600", "1500000"]);
+    o.step(1);
+    assert_eq!(o.selected_value().as_deref(), Some("230400"));
+    o.step(10);
+    assert_eq!(o.selected_value().as_deref(), Some("1500000"));
+    assert!(o.selected < o.scroll + VISIBLE);
+}
+
+#[test]
+fn serial_speed_accepts_exact_custom_values_and_rejects_invalid_input() {
+    let mut o = Overlay::serial_speed(1);
+    for (text, value) in [("50", "50"), ("31250", "31250"), ("009600", "9600"), ("4000000", "4000000")] {
+        o.set_query(text);
+        assert_eq!(o.selected_value().as_deref(), Some(value));
+        assert_eq!(o.shown.len(), 1);
+    }
+    for text in ["0", "49", "4000001", "4294967296", "+9600", "9k6"] {
+        o.set_query(text);
+        assert_eq!(o.selected_value(), None);
+    }
+    o.backspace(true);
+    assert_eq!(o.selected_value().as_deref(), Some("115200"));
+}
+
+#[test]
 fn quick_connect_offers_an_ssh_target_typed_into_the_selector() {
     let mut o = Overlay::new(OverlayKind::Profiles, items()).with_quick_connect();
     o.insert("root@db1:2222");

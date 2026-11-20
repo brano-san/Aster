@@ -23,7 +23,9 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn source_texts() -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
-    sources(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    sources(&manifest.join("src"), &mut files);
+    sources(&manifest.join("../aster-serial/src"), &mut files);
     files.into_iter().map(|p| {
         let text = std::fs::read_to_string(&p).expect("readable source");
         (p, text)

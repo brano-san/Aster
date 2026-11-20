@@ -88,6 +88,10 @@ fn send_reply(line: &Line, reply: &[u8]) -> bool {
 }
 
 pub fn wrap(spawned: Spawned, stream: Option<&Stream>) -> Spawned {
+    wrap_with_drain(spawned, stream, Some(DRAIN))
+}
+
+pub fn wrap_with_drain(spawned: Spawned, stream: Option<&Stream>, timeout: Option<std::time::Duration>) -> Spawned {
     let options = match stream.map(Stream::options) {
         Some(options) if !options.is_plain() => options,
         _ => return spawned,
@@ -132,7 +136,11 @@ pub fn wrap(spawned: Spawned, stream: Option<&Stream>) -> Spawned {
         raw: Some(Box::new(Locked(raw))),
         wait: Box::new(move || {
             let code = wait();
-            let _ = finished.recv_timeout(DRAIN);
+            if let Some(timeout) = timeout {
+                let _ = finished.recv_timeout(timeout);
+            } else {
+                let _ = finished.recv();
+            }
             code
         }),
     }

@@ -60,6 +60,7 @@ pub struct Handler<P: Platform> {
     device: Option<Device<P>>,
     windows: HashMap<WindowId, State<P>>,
     sessions: HashMap<(WindowId, PaneId), Session>,
+    serials: HashMap<(WindowId, PaneId), crate::serial::Serial>,
     exits: Receiver<Exit>,
     remotes: HashMap<(WindowId, PaneId), tokio::sync::mpsc::UnboundedSender<aster_ssh::console::Input>>,
     file_tx: Sender<(WindowId, PaneId, aster_core::files::FileReply)>,
@@ -137,7 +138,7 @@ impl<P: Platform> Handler<P> {
         let saved = load_session::<P>();
         let recent = saved.recent;
         let pending = if config.terminal.recover_tabs { saved.windows } else { Vec::new() };
-        Ok((Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent }, worker))
+        Ok((Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent }, worker))
     }
 
     pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
@@ -287,9 +288,17 @@ impl<P: Platform> Handler<P> {
         let id = window.id();
         match effect {
             Effect::Spawn { pane, launch, terminal } if launch.serial.is_some() => {
-                let spawned = crate::serial::connect(launch.serial.as_deref().unwrap_or_default());
-                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal);
-                self.sessions.insert((id, pane), session);
+                match crate::serial::Serial::new(launch.serial.as_deref().unwrap_or_default(), launch.stream) {
+                    Ok(serial) => {
+                        self.serials.insert((id, pane), serial);
+                        self.start_serial(id, pane, terminal);
+                    }
+                    Err(error) => {
+                        if let Some(state) = self.windows.get_mut(&id) {
+                            state.app.spawn_failed(pane, &error);
+                        }
+                    }
+                }
             }
             Effect::Spawn { pane, launch, terminal } if launch.socket.is_some() => {
                 let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), launch.stream.as_ref().is_none_or(|s| s.input == aster_core::profile::InputMode::Normal));
@@ -364,8 +373,29 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::Write { pane, bytes } => {
-                if let Some(s) = self.sessions.get(&(id, pane)) {
-                    s.write(bytes);
+                use crate::serial::KeysAction;
+                match self.serials.get(&(id, pane)).map(|s| s.keys(&bytes)) {
+                    Some(KeysAction::Reconnect) => {
+                        if let Some(terminal) = self.windows.get(&id).and_then(|s| s.app.terminal(pane)).cloned() {
+                            self.start_serial(id, pane, terminal);
+                        }
+                    }
+                    Some(KeysAction::Close) => {
+                        if let Some(s) = self.windows.get_mut(&id) {
+                            s.app.close_pane(pane);
+                        }
+                    }
+                    Some(KeysAction::Ignore) => {}
+                    Some(KeysAction::Write) | None => {
+                        if let Some(s) = self.sessions.get(&(id, pane)) {
+                            s.write(bytes);
+                        }
+                    }
+                }
+            }
+            Effect::SerialControl { pane, control } => {
+                if let Some(serial) = self.serials.get_mut(&(id, pane)) {
+                    serial.control(control);
                 }
             }
             Effect::Resize { pane, cols, rows } => {
@@ -374,6 +404,7 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::Kill { pane } => {
+                self.serials.remove(&(id, pane));
                 if let Some(s) = self.sessions.remove(&(id, pane)) {
                     s.pty.kill();
                 }
@@ -555,6 +586,19 @@ impl<P: Platform> Handler<P> {
         }
     }
 
+    fn start_serial(&mut self, window: WindowId, pane: PaneId, terminal: aster_core::app::Shared) {
+        let start = self.session_start(window, pane);
+        let wake = start.flow.wake.clone();
+        let screen = terminal.clone();
+        let serial = self.serials.get_mut(&(window, pane)).expect("serial session");
+        let spawned = serial.connect(move |message| {
+            let clean: String = message.chars().filter(|c| !c.is_control()).collect();
+            screen.lock().feed(format!("\r\n\x1b[2m[{clean}]\x1b[0m\r\n").as_bytes());
+            wake();
+        });
+        self.sessions.insert((window, pane), Session::start(start, spawned, terminal));
+    }
+
     fn session_start(&mut self, window: WindowId, pane: PaneId) -> crate::session::Start {
         let state = self.windows.get_mut(&window).expect("session window");
         crate::session::Start { flow: state.flow.clone(), raw_output: state.output.entry(pane).or_default().clone(),
@@ -651,8 +695,22 @@ impl<P: Platform> Handler<P> {
             }
         }
         while let Ok((wid, pane, code)) = self.exits.try_recv() {
-            self.sessions.remove(&(wid, pane));
+            let session = self.sessions.remove(&(wid, pane));
             self.remotes.remove(&(wid, pane));
+            if self.serials.get_mut(&(wid, pane)).is_some_and(|s| s.disconnected(code)) {
+                if let Some(session) = session {
+                    session.abandon_transfer();
+                }
+                if let Some(state) = self.windows.get_mut(&wid) {
+                    state.app.transfer_offered(pane, aster_core::app::PaneTransfer::None);
+                    if let Some(terminal) = state.app.terminal(pane) {
+                        let notice = aster_core::i18n::serial_disconnected();
+                        terminal.lock().feed(format!("\r\n\x1b[0;2m{notice}\x1b[0m\r\n").as_bytes());
+                    }
+                }
+                continue;
+            }
+            self.serials.remove(&(wid, pane));
             if let Some(s) = self.windows.get_mut(&wid) {
                 s.app.exited(pane, code);
             }
@@ -822,6 +880,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             }
         }
         self.remotes.retain(|(w, _), _| *w != id);
+        self.serials.retain(|(w, _), _| *w != id);
         self.sessions.retain(|(w, _), s| {
             if *w == id {
                 s.pty.kill();

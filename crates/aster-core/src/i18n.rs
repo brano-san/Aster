@@ -74,11 +74,27 @@ fn russian() -> &'static HashMap<&'static str, &'static str> {
     CATALOG.get_or_init(|| parse(RU_CATALOG))
 }
 
-pub fn t(text: &'static str) -> &'static str {
+pub fn t(text: &str) -> &str {
     match current::get() {
         RU => russian().get(text).copied().unwrap_or(text),
         _ => text,
     }
+}
+
+pub fn serial_disconnected() -> &'static str {
+    t("[the port is gone — press Enter to reconnect, Esc to close]")
+}
+
+pub fn serial_baud_failed(baud: u32, error: &str) -> String {
+    tf("Cannot set serial speed to {baud}: {error}", &[("baud", &baud.to_string()), ("error", error)])
+}
+
+pub fn serial_break_failed(error: &str) -> String {
+    tf("Cannot send a serial break: {error}", &[("error", error)])
+}
+
+pub fn serial_open_failed(port: &str, error: &str) -> String {
+    tf("Cannot open {port}: {error}", &[("port", port), ("error", error)])
 }
 
 pub fn tf(text: &'static str, args: &[(&str, &str)]) -> String {

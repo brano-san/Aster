@@ -15,6 +15,7 @@ impl App {
         self.tabs.insert(at, crate::app::Tab { root: crate::panes::Node::Leaf(id), focus: id, zoomed: None, title: None, color: None });
         self.active = at;
         self.overlay = None;
+        self.prompt_pending_serial();
         self.dirty = true;
     }
 

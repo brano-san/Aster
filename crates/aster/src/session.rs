@@ -147,6 +147,11 @@ enum Out {
     Transfer(Vec<u8>),
 }
 
+enum Pump {
+    Advance,
+    Disconnect,
+}
+
 pub type Exit = (WindowId, PaneId, Option<u32>);
 pub type TransferNote = (WindowId, PaneId, Note);
 
@@ -157,7 +162,7 @@ struct Ctx {
     terminal: Shared,
     transfer: Arc<Mutex<Transfer>>,
     writer: Sender<Out>,
-    pump: Sender<()>,
+    pump: Sender<Pump>,
     notes: Sender<TransferNote>,
     flow: OutputFlow,
     raw_output: RawOutput,
@@ -192,7 +197,7 @@ impl Ctx {
             (self.flow.wake)();
         }
         if out.pump {
-            let _ = self.pump.send(());
+            let _ = self.pump.send(Pump::Advance);
         }
     }
 }
@@ -213,7 +218,7 @@ impl Session {
         let wake = flow.wake.clone();
         let Spawned { pty, mut reader, mut writer, mut raw, wait } = spawned;
         let (tx, rx) = unbounded::<Out>();
-        let (pump_tx, pump_rx) = unbounded::<()>();
+        let (pump_tx, pump_rx) = unbounded();
         let ctx = Ctx { window, pane, terminal, transfer: Arc::new(Mutex::new(Transfer::new(downloads))), writer: tx.clone(), pump: pump_tx, notes, flow, raw_output };
         let reading = ctx.clone();
         std::thread::Builder::new()
@@ -239,7 +244,13 @@ impl Session {
         std::thread::Builder::new()
             .name(format!("aster-zmodem-{pane}"))
             .spawn(move || {
-                for () in pump_rx {
+                for command in pump_rx {
+                    if matches!(command, Pump::Disconnect) {
+                        if let Ok(mut transfer) = transfer.lock() {
+                            transfer.cancel();
+                        }
+                        break;
+                    }
                     loop {
                         let next = transfer.lock().ok().and_then(|mut t| t.poll());
                         let Some(bytes) = next else { break };
@@ -295,6 +306,10 @@ impl Session {
     pub fn cancel_transfer(&self) {
         let out = self.ctx.transfer.lock().map(|mut t| t.cancel()).unwrap_or_default();
         self.ctx.deliver(out, false);
+    }
+
+    pub fn abandon_transfer(&self) {
+        let _ = self.ctx.pump.send(Pump::Disconnect);
     }
 }
 
