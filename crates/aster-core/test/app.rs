@@ -61,6 +61,52 @@ fn the_first_frame_spawns_the_default_profile_sized_to_the_pane() {
 }
 
 #[test]
+fn terminal_identification_in_spawn_preserves_explicit_environment() {
+    for mode in ["aster", "xterm"] {
+        for overrides in [false, true] {
+            let (mut a, mut gfx) = app();
+            if mode != "aster" {
+                a.set_config(toml::from_str("[terminal]\nidentification = 'xterm'").unwrap());
+            }
+            let mut p = profile("local");
+            if overrides {
+                a.config.terminal.environment.insert("TERM_PROGRAM_VERSION".into(), "custom-version".into());
+                a.config.terminal.environment.insert("TERM_PROGRAM".into(), "global".into());
+                p.env.insert("TERM_PROGRAM".into(), "profile".into());
+            }
+            a.open_tab(p);
+            a.frame(&mut gfx, false);
+            let launches = spawns(&a.take_effects());
+            let env = &launches[0].1.env;
+            assert_eq!(env["TERM"], "xterm-256color");
+            assert_eq!(env["COLORTERM"], "truecolor");
+            let (name, version) = if overrides { (Some("profile"), Some("custom-version")) }
+                else if mode == "aster" { (Some("Aster"), Some(env!("CARGO_PKG_VERSION"))) }
+                else { (None, None) };
+            assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), name);
+            assert_eq!(env.get("TERM_PROGRAM_VERSION").map(String::as_str), version);
+        }
+    }
+}
+
+#[test]
+fn debug_actions_target_the_focused_terminal() {
+    let (mut a, mut gfx) = app();
+    a.open_default_tab();
+    a.focused_terminal().unwrap().lock().feed(b"first pane");
+    a.run(Action::SplitRight);
+    a.frame(&mut gfx, false);
+    a.take_effects();
+    a.focused_terminal().unwrap().lock().feed(b"second pane");
+    let pane = a.focused_pane().unwrap();
+    a.run(Action::DebugCopyState);
+    a.run(Action::DebugSaveOutput);
+    let effects = a.take_effects();
+    assert!(effects.iter().any(|e| matches!(e, Effect::SetClipboard(s) if s.contains("second pane") && !s.contains("first pane"))));
+    assert!(effects.iter().any(|e| matches!(e, Effect::SaveOutput { pane: id } if *id == pane)));
+}
+
+#[test]
 fn typing_writes_to_the_focused_pane_and_hotkeys_swallow_their_char() {
     let (mut a, mut g) = app();
     a.open_default_tab();

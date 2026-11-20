@@ -32,6 +32,14 @@ pub enum Bell {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+pub enum Identification {
+    #[default]
+    Aster,
+    Xterm,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum SchemeMode {
     #[default]
     Dark,
@@ -113,6 +121,7 @@ pub struct Terminal {
     pub scroll_on_input: bool,
     pub profile: String,
     pub environment: BTreeMap<String, String>,
+    pub identification: Identification,
     pub search_options: SearchOptions,
     pub recover_tabs: bool,
     pub confirm_close: bool,
@@ -143,6 +152,7 @@ impl Default for Terminal {
             scroll_on_input: true,
             profile: String::new(),
             environment: BTreeMap::new(),
+            identification: Identification::Aster,
             search_options: SearchOptions::default(),
             recover_tabs: true,
             confirm_close: true,

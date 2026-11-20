@@ -72,7 +72,8 @@ impl Pty for UnixPty {
 }
 
 pub fn environment(overrides: &[(String, String)]) -> Vec<CString> {
-    let mut vars: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os().map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec())).collect();
+    let mut vars: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os().filter(|(k, _)| !matches!(k.as_bytes(), b"TERM_PROGRAM" | b"TERM_PROGRAM_VERSION"))
+        .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec())).collect();
     for (k, v) in overrides {
         vars.retain(|(name, _)| name != k.as_bytes());
         vars.push((k.as_bytes().to_vec(), v.as_bytes().to_vec()));

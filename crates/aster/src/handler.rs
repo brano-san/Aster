@@ -26,6 +26,8 @@ struct State<P: Platform> {
     app: App,
     gfx: Gfx<P::Text>,
     renderer: Option<P::Renderer>,
+    flow: crate::session::OutputFlow,
+    output: HashMap<PaneId, crate::session::RawOutput>,
 }
 
 pub struct Handler<P: Platform> {
@@ -214,8 +216,11 @@ impl<P: Platform> Handler<P> {
                 self.effect(window, e);
             }
         }
-        if self.windows.get(&id).is_some_and(|s| s.app.needs_redraw()) {
-            window.request_redraw();
+        if let Some(state) = self.windows.get_mut(&id) {
+            state.output.retain(|pane, _| state.app.terminal(*pane).is_some());
+            if state.app.needs_redraw() {
+                window.request_redraw();
+            }
         }
     }
 
@@ -224,14 +229,12 @@ impl<P: Platform> Handler<P> {
         match effect {
             Effect::Spawn { pane, launch, terminal } if launch.serial.is_some() => {
                 let spawned = crate::serial::connect(launch.serial.as_deref().unwrap_or_default());
-                let waker = self.waker.clone();
-                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal, move || waker.wake());
+                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal);
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal } if launch.socket.is_some() => {
                 let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), launch.stream.as_ref().is_none_or(|s| s.input == aster_core::profile::InputMode::Normal));
-                let waker = self.waker.clone();
-                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal, move || waker.wake());
+                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal);
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
@@ -250,8 +253,7 @@ impl<P: Platform> Handler<P> {
                     tracing::error!("file reply thread: {e}");
                 }
                 self.remotes.insert((id, pane), remote.input);
-                let waker = self.waker.clone();
-                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(remote.spawned, launch.stream.as_ref()), terminal, move || waker.wake());
+                let session = Session::start(self.session_start(id, pane), crate::stream::wrap(remote.spawned, launch.stream.as_ref()), terminal);
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal } => {
@@ -281,8 +283,7 @@ impl<P: Platform> Handler<P> {
                         if let Some(s) = self.windows.get_mut(&id) {
                             s.app.set_pane_pid(pane, pid);
                         }
-                        let waker = self.waker.clone();
-                        let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal, move || waker.wake());
+                        let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal);
                         self.sessions.insert((id, pane), session);
                     }
                     Err(e) => {
@@ -309,6 +310,13 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::SetClipboard(text) => window.set_clipboard_text(&text),
+            Effect::SaveOutput { pane } => {
+                if let Some(state) = self.windows.get(&id) {
+                    if let Some(terminal) = state.app.terminal(pane) {
+                        state.output.get(&pane).cloned().unwrap_or_default().save(pane, P::downloads_dir, terminal.clone(), state.flow.wake.clone());
+                    }
+                }
+            }
             Effect::RequestPaste => {
                 if let (Some(text), Some(s)) = (window.clipboard_text(), self.windows.get_mut(&id)) {
                     s.app.paste(text);
@@ -456,16 +464,18 @@ impl<P: Platform> Handler<P> {
         }
     }
 
-    fn session_start(&self, window: WindowId, pane: PaneId) -> crate::session::Start {
-        crate::session::Start { window, pane, downloads: P::downloads_dir().unwrap_or_else(std::env::temp_dir), exits: self.exit_tx.clone(), notes: self.note_tx.clone() }
+    fn session_start(&mut self, window: WindowId, pane: PaneId) -> crate::session::Start {
+        let state = self.windows.get_mut(&window).expect("session window");
+        crate::session::Start { flow: state.flow.clone(), raw_output: state.output.entry(pane).or_default().clone(),
+            window, pane, downloads: P::downloads_dir().unwrap_or_else(std::env::temp_dir), exits: self.exit_tx.clone(), notes: self.note_tx.clone() }
     }
 
     fn drain_elevated(&mut self) {
         while let Ok((id, pane, result, terminal)) = self.elevated_rx.try_recv() {
             match result {
+                Ok(spawned) if self.windows.get(&id).and_then(|s| s.app.terminal(pane)).is_none() => spawned.pty.kill(),
                 Ok(spawned) => {
-                    let waker = self.waker.clone();
-                    let session = Session::start(self.session_start(id, pane), spawned, terminal, move || waker.wake());
+                    let session = Session::start(self.session_start(id, pane), spawned, terminal);
                     self.sessions.insert((id, pane), session);
                 }
                 Err(e) => {
@@ -517,7 +527,8 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         };
         let waker = self.waker.clone();
         let home = P::home_dir().map(|p| p.to_string_lossy().into_owned());
-        let mut app = App::new(self.config.clone(), self.profiles.clone(), window.is_dark_mode(), home, Arc::new(move || waker.wake()));
+        let flow = crate::session::OutputFlow::new(move || waker.wake());
+        let mut app = App::new(self.config.clone(), self.profiles.clone(), window.is_dark_mode(), home, flow.wake.clone());
         let (w, h) = window.size();
         app.set_viewport(w, h, window.scale());
         app.set_ssh(self.ssh.clone());
@@ -540,7 +551,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         }
         window.set_dark(app.is_dark());
         let first = self.windows.is_empty();
-        self.windows.insert(window.id(), State { app, gfx: Gfx::new(text, ATLAS), renderer: None });
+        self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx: Gfx::new(text, ATLAS), renderer: None });
         if first {
             self.apply_window_prefs(window);
             if self.config.system.explorer_menu {
@@ -630,7 +641,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         }
         s.gfx.uploads.clear();
         match renderer.render(&s.gfx.dl) {
-            Ok(()) => {}
+            Ok(()) => s.flow.frame_drawn(),
             Err(RenderError::DeviceLost) => {
                 tracing::warn!("graphics device lost");
                 s.renderer = None;

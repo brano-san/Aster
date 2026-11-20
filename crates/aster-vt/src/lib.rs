@@ -409,6 +409,19 @@ impl Terminal {
         }
         out.join("\n")
     }
+
+    pub fn debug_dump(&self) -> String {
+        use std::fmt::Write;
+        let p = self.term.grid().cursor.point;
+        let mut dump = format!("Grid: {}x{}\nCursor (row, column; 1-based): {}, {}\nModes: {:?}\nScrollback:\n",
+            self.size.cols, self.size.rows, p.line.0 + 1, p.column.0 + 1, self.mode());
+        for line in self.term.topmost_line().0.max(-200)..0 {
+            writeln!(dump, "{}", search::row_text(&self.term, line).trim_end()).unwrap();
+        }
+        dump.push_str("Screen:\n");
+        dump.push_str(&self.screen_text());
+        dump
+    }
 }
 
 fn config(options: &Options) -> Config {

@@ -16,6 +16,24 @@ fn prints_text_and_wraps_lines() {
 }
 
 #[test]
+fn debug_dump_reports_cursor_modes_viewport_and_last_200_history_rows() {
+    let (mut t, _) = term(12, 2);
+    for i in 0..205 {
+        t.feed(format!("row{i:03}\r\n").as_bytes());
+    }
+    t.feed(b"end\x1b[?1h");
+    t.scroll(Scroll::Delta(2));
+    let dump = t.debug_dump();
+    assert!(dump.starts_with("Grid: 12x2\nCursor (row, column; 1-based): 2, 4\nModes: "));
+    assert!(dump.contains("APP_CURSOR"));
+    let (head, screen) = dump.split_once("\nScreen:\n").unwrap();
+    assert_eq!(screen, "row202\nrow203");
+    let (_, history) = head.split_once("\nScrollback:\n").unwrap();
+    let rows: Vec<_> = history.lines().collect();
+    assert_eq!((rows.len(), rows[0], rows[199]), (200, "row004", "row203"));
+}
+
+#[test]
 fn carriage_return_and_newline_move_the_cursor() {
     let (mut t, _) = term(10, 3);
     t.feed(b"ab\r\ncd");
