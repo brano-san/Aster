@@ -1,9 +1,10 @@
 use crossbeam_channel::Sender;
 use russh_sftp::client::SftpSession;
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CHUNK: usize = 64 * 1024;
@@ -109,11 +110,38 @@ fn entry(name: String, meta: &russh_sftp::client::fs::Metadata) -> Entry {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct EditStamp {
+    modified: Option<SystemTime>,
+    size: u64,
+    hash: u64,
+}
+
+async fn edit_stamp(path: &Path) -> Result<Option<EditStamp>, String> {
+    let error = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(error(e)),
+    };
+    let meta = file.metadata().await.map_err(error)?;
+    let mut hash = DefaultHasher::new();
+    let mut buf = vec![0; CHUNK];
+    loop {
+        let n = file.read(&mut buf).await.map_err(error)?;
+        if n == 0 {
+            break;
+        }
+        hash.write(&buf[..n]);
+    }
+    Ok(Some(EditStamp { modified: meta.modified().ok(), size: meta.len(), hash: hash.finish() }))
+}
+
 #[derive(Clone)]
 pub struct Files {
     session: Arc<SftpSession>,
     replies: Sender<Reply>,
-    running: Arc<Mutex<HashMap<u64, tokio::task::AbortHandle>>>,
+    running: Arc<Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>>,
 }
 
 impl Files {
@@ -125,7 +153,13 @@ impl Files {
         if let Request::Cancel { id } = request {
             if let Some(task) = self.running.lock().ok().and_then(|mut r| r.remove(&id)) {
                 task.abort();
-                let _ = self.replies.send(Reply::Failed { id: Some(id), error: "cancelled".into() });
+                let replies = self.replies.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = task.await {
+                        let error = if error.is_cancelled() { "cancelled".into() } else { error.to_string() };
+                        let _ = replies.send(Reply::Failed { id: Some(id), error });
+                    }
+                });
             }
             return;
         }
@@ -144,7 +178,7 @@ impl Files {
             let _ = me.replies.send(reply);
         });
         if let (Some(id), Ok(mut r)) = (id, self.running.lock()) {
-            r.insert(id, task.abort_handle());
+            r.insert(id, task);
         }
     }
 
@@ -208,17 +242,16 @@ impl Files {
         let Reply::Downloaded { local, .. } = self.download(id, remote, &dir.join(id.to_string())).await? else {
             return Err("download failed".into());
         };
+        let mut saved = edit_stamp(&local).await?.ok_or_else(|| format!("{}: file disappeared", local.display()))?;
         let _ = self.replies.send(Reply::Editing { id, local: local.clone() });
-        let stamp = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.modified().ok(), m.len()));
-        let mut saved = stamp(&local);
         loop {
             tokio::time::sleep(EDIT_POLL).await;
-            let now = stamp(&local);
-            if now.is_none() || now == saved {
+            let Some(now) = edit_stamp(&local).await? else { continue };
+            if now == saved {
                 continue;
             }
             tokio::time::sleep(EDIT_POLL).await;
-            if stamp(&local) != now {
+            if edit_stamp(&local).await?.as_ref() != Some(&now) {
                 continue;
             }
             self.put(&local, remote).await?;
