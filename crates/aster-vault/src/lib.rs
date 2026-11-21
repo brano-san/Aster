@@ -1,3 +1,4 @@
+pub mod config;
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::STANDARD;
@@ -19,11 +20,13 @@ const LANES: u32 = 1;
 pub struct Secret {
     pub kind: String,
     pub key: String,
+    pub label: String,
     pub value: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Vault {
+    #[serde(deserialize_with = "deserialize_secrets")]
     pub secrets: Vec<Secret>,
 }
 
@@ -62,8 +65,76 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; KEY_LEN] {
     key
 }
 
+pub fn kind_for_key(key: &str) -> &'static str {
+    if key.starts_with("ssh:") {
+        "ssh-password"
+    } else if key.starts_with("key:") {
+        "key-passphrase"
+    } else if key.starts_with("key-file:") {
+        "key-file"
+    } else {
+        "other"
+    }
+}
+
+fn canonical_kind<'a>(kind: &'a str, key: &str) -> &'a str {
+    match kind {
+        "password" | "" => kind_for_key(key),
+        "ssh:password" => "ssh-password",
+        "ssh:key-passphrase" => "key-passphrase",
+        "ssh:key-file" => "key-file",
+        _ => kind,
+    }
+}
+
+fn label_for(kind: &str, key: &str) -> String {
+    match kind {
+        "ssh-password" => key.strip_prefix("ssh:"),
+        "key-passphrase" => key.strip_prefix("key:"),
+        "key-file" => key.strip_prefix("key-file:"),
+        _ => None,
+    }.unwrap_or(key).to_owned()
+}
+
+fn deserialize_secrets<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Secret>, D::Error> {
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        #[serde(default)]
+        kind: String,
+        key: String,
+        label: Option<String>,
+        value: String,
+    }
+
+    let entries: Vec<Entry> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(entries.into_iter().map(|entry| {
+        let kind = canonical_kind(&entry.kind, &entry.key);
+        let kind = match kind {
+            "ssh-password" | "key-passphrase" | "key-file" | "other" => kind,
+            _ => "other",
+        };
+        let label = entry.label.unwrap_or_else(|| label_for(kind, &entry.key));
+        Secret { kind: kind.to_owned(), key: entry.key, label, value: entry.value }
+    }).collect())
+}
+
+fn decode_contents(plaintext: &[u8]) -> Result<Vault, VaultError> {
+    serde_json::from_slice(plaintext)
+        .map_err(|error| VaultError::Corrupted(format!("invalid contents: {error}")))
+}
+
 impl Vault {
+    pub fn key_file(&self, fingerprint_or_label: &str) -> Option<&str> {
+        let key = format!("key-file:{fingerprint_or_label}");
+        self.get("key-file", &key).or_else(|| {
+            self.secrets.iter()
+                .find(|secret| secret.kind == "key-file" && (secret.key == fingerprint_or_label || secret.label == fingerprint_or_label))
+                .map(|secret| secret.value.as_str())
+        })
+    }
+
     pub fn get(&self, kind: &str, key: &str) -> Option<&str> {
+        let kind = canonical_kind(kind, key);
         self.secrets
             .iter()
             .find(|secret| secret.kind == kind && secret.key == key)
@@ -71,6 +142,11 @@ impl Vault {
     }
 
     pub fn set(&mut self, kind: &str, key: &str, value: &str) {
+        let kind = canonical_kind(kind, key);
+        let kind = match kind {
+            "ssh-password" | "key-passphrase" | "key-file" | "other" => kind,
+            _ => "other",
+        };
         match self
             .secrets
             .iter_mut()
@@ -80,12 +156,14 @@ impl Vault {
             None => self.secrets.push(Secret {
                 kind: kind.to_owned(),
                 key: key.to_owned(),
+                label: label_for(kind, key),
                 value: value.to_owned(),
             }),
         }
     }
 
     pub fn remove(&mut self, kind: &str, key: &str) -> bool {
+        let kind = canonical_kind(kind, key);
         let before = self.secrets.len();
         self.secrets
             .retain(|secret| !(secret.kind == kind && secret.key == key));
@@ -137,8 +215,7 @@ impl Vault {
                 ciphertext,
             )
             .map_err(|_| VaultError::WrongPassphrase)?;
-        serde_json::from_slice(&plaintext)
-            .map_err(|error| VaultError::Corrupted(format!("invalid contents: {error}")))
+        decode_contents(&plaintext)
     }
 }
 

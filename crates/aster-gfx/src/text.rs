@@ -199,6 +199,12 @@ impl<B: TextBackend> Gfx<B> {
         }
     }
 
+    pub fn with_transient_text(&mut self, draw: impl FnOnce(&mut Self)) {
+        let cached = std::mem::take(&mut self.shapes);
+        draw(self);
+        self.shapes = cached;
+    }
+
     pub fn reset_atlas(&mut self) {
         self.atlas.clear();
         self.glyphs.clear();

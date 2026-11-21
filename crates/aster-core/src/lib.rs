@@ -23,6 +23,7 @@ pub mod quick_connect;
 pub mod search;
 pub mod session;
 pub mod settings;
+pub mod vault_settings;
 pub mod ssh;
 mod start;
 pub mod sudo;

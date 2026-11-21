@@ -55,7 +55,7 @@ impl App {
                 continue;
             }
             let saved = view.configured.then(|| {
-                view.unlocked && view.entries.iter().any(|(kind, key)| kind == "password" && key == &prompt.key)
+                view.unlocked && view.entries.iter().any(|entry| entry.kind == "other" && entry.key == prompt.key)
             });
             if route_changed || saved != prompt.saved {
                 if prompt.pending_fill.take().is_some() {
@@ -197,7 +197,8 @@ impl App {
             self.effects.push(Effect::SaveSecret { key, value });
             return true;
         }
-        if prompt.can_fill() {
+        let authorize = self.vault.configured && self.config.vault.remember_minutes == 0 && !prompt.submitted && prompt.typed.is_empty();
+        if prompt.can_fill() || authorize {
             let Some(p) = self.panes.get(&pane) else { return false };
             let (text, line) = p.terminal.lock().prompt_line();
             if line != prompt.line || !aster_proto::prompt::is_password_prompt(&text) {

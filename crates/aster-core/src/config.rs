@@ -320,11 +320,12 @@ impl Default for Updates {
 pub struct Vault {
     pub sealed: String,
     pub remember_minutes: u32,
+    pub encrypt_config: bool,
 }
 
 impl Default for Vault {
     fn default() -> Self {
-        Self { sealed: String::new(), remember_minutes: 15 }
+        Self { sealed: String::new(), remember_minutes: 15, encrypt_config: false }
     }
 }
 

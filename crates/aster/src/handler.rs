@@ -1,20 +1,22 @@
+use crate::config_file::ConfigAccess;
 use crate::session::{Exit, Session};
-use crate::secrets::{Secrets, System, VaultCommand, VaultUpdate, VaultWorker};
+use crate::secrets::{Secrets, Reply, SecretUse, System, VaultCommand, VaultUpdate, VaultWorker, WindowSecrets};
 use aster_core::app::{App, Effect};
 use aster_core::config::Config;
 use aster_core::input::{Event, HitArea};
 use aster_core::panes::PaneId;
 use aster_core::profile::Profile;
 use aster_core::settings::{VaultIssue, VaultView};
+use aster_core::vault_settings::VaultReply;
 use aster_core::session::{SessionState, WindowState};
 use aster_gfx::text::{Gfx, TextBackend};
 use aster_core::config::{Dock, SshClient};
 use aster_core::keymap::Chord;
 use aster_platform::{DockSpec, Edge, Platform, RenderError, Renderer, SpawnRequest, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 const ATLAS: u32 = 2048;
@@ -35,6 +37,10 @@ enum StoreEvent {
     FontFamilies { monospace: Vec<String>, all: Vec<String> },
     CommandProbe { window: WindowId, request: u64, busy: bool },
     Vault(VaultUpdate),
+    VaultReply(WindowId, u64, Result<VaultReply, VaultIssue>),
+    VaultAccess(WindowId, AccessPrompt),
+    ConfigEncryption(bool),
+    ConfigOpened(WindowId, u64, Result<Box<Config>, VaultIssue>),
     Config(u64, Option<SystemTime>, Result<Box<Config>, String>),
     ConfigStatus(u64, Option<String>),
     StartMenuShortcut(Option<WindowId>, Result<bool, aster_platform::PlatformError>),
@@ -57,6 +63,18 @@ impl<W: Waker> StoreEvents<W> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigStartup {
+    Ready,
+    Prompt,
+    Skipped,
+}
+
+struct AccessPrompt {
+    issue: Option<VaultIssue>,
+    reply: Reply<Option<String>>,
+}
+
 pub struct Handler<P: Platform> {
     desktop: crate::desktop::Worker,
     launcher_installed: Option<bool>,
@@ -77,10 +95,14 @@ pub struct Handler<P: Platform> {
     local_spawns: crate::local_spawn::LocalSpawns,
     exit_tx: Sender<Exit>,
     config_path: Option<PathBuf>,
+    config_access: Arc<Mutex<ConfigAccess>>,
+    config_startup: ConfigStartup,
+    startup_config: Option<(WindowId, Box<Config>)>,
     config_stamp: Option<SystemTime>,
     settings_revision: u64,
     secrets: Secrets,
     vault_view: VaultView,
+    vault_access: HashMap<WindowId, VecDeque<AccessPrompt>>,
     store_events: StoreEvents<<P::Windows as WindowSystem>::Waker>,
     store_rx: Receiver<StoreEvent>,
     ssh: Option<String>,
@@ -136,6 +158,38 @@ fn initialize_tabs(app: &mut App, saved: Option<WindowState>, first: bool, comma
     }
 }
 
+fn serve_request(app: &mut App, request: crate::cli::Request) -> bool {
+    use crate::cli::Command;
+    match request.command {
+        Command::Window => return false,
+        Command::Hidden => return true,
+        Command::Open { dir } => {
+            if let Some(profile) = app.default_profile() {
+                app.open_tab_at(profile, Some(dir));
+            }
+        }
+        Command::Run { command, dir } => app.run_command(&command, dir.or(request.cwd)),
+        Command::Profile { name } => {
+            if !app.open_named_profile(&name) {
+                tracing::warn!("no profile named {name}");
+            }
+        }
+        Command::Paste { text } => app.paste(text),
+        Command::PastePath { path } => app.paste_path(&path),
+    }
+    true
+}
+
+fn populate_window(app: &mut App, saved: Option<WindowState>, first: bool, request: Option<crate::cli::Request>) {
+    initialize_tabs(app, saved, first, request.as_ref().map(|r| &r.command));
+    if first && !crate::update::restarted() {
+        app.check_updates_on_start();
+    }
+    if let Some(request) = request {
+        serve_request(app, request);
+    }
+}
+
 fn load_session<P: Platform>() -> SessionState {
     if capturing() {
         return SessionState::default();
@@ -144,7 +198,7 @@ fn load_session<P: Platform>() -> SessionState {
 }
 
 impl<P: Platform> Handler<P> {
-    pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker) -> std::io::Result<(Self, VaultWorker)> {
+    pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker, encrypted: bool) -> std::io::Result<(Self, VaultWorker)> {
         let mut profiles = P::shells();
         let ssh = P::ssh_command().or_else(|| (config.ssh.client == SshClient::Native).then(|| "ssh".to_owned()));
         if let Some(cmd) = &ssh {
@@ -157,6 +211,9 @@ impl<P: Platform> Handler<P> {
         let local_spawns = crate::local_spawn::LocalSpawns::new()?;
         let config_path = crate::config_path::<P>();
         let path = config_path.clone();
+        let config_access = Arc::new(Mutex::new(ConfigAccess::default()));
+        let access = config_access.clone();
+        let config_startup = if encrypted { ConfigStartup::Prompt } else { ConfigStartup::Ready };
         let (tx, store_rx) = unbounded();
         let store_events = StoreEvents { tx, waker: waker.clone() };
         let fonts = store_events.clone();
@@ -166,11 +223,15 @@ impl<P: Platform> Handler<P> {
             tracing::warn!("font family worker: {e}");
         }
         let events = store_events.clone();
+        let config_events = store_events.clone();
         let vault_view = VaultView { configured: !config.vault.sealed.is_empty(), ..VaultView::default() };
-        let (secrets, worker) = Secrets::start(Arc::new(System::<P>::default()), config.vault.sealed.clone(), config.vault.remember_minutes, move |expected, sealed| {
+        let (secrets, worker) = Secrets::start(Arc::new(System::<P>::default()), config.vault.sealed.clone(), config.vault.remember_minutes, move |expected, sealed, rekey| {
             let Some(path) = &path else { return false };
-            match crate::config_file::save_vault(path, expected, sealed) {
-                Ok(()) => true,
+            match access.lock().expect("config access").save_vault(path, expected, sealed, rekey) {
+                Ok(encrypted) => {
+                    config_events.post(StoreEvent::ConfigEncryption(encrypted));
+                    true
+                }
                 Err(e) => {
                     tracing::error!("{}: {e}", path.display());
                     false
@@ -180,7 +241,7 @@ impl<P: Platform> Handler<P> {
         let saved = load_session::<P>();
         let recent = saved.recent;
         let recent_folders = saved.recent_folders;
-        let pending = if config.terminal.recover_tabs || crate::update::restarted() { saved.windows } else { Vec::new() };
+        let pending = if encrypted || config.terminal.recover_tabs || crate::update::restarted() { saved.windows } else { Vec::new() };
         let update_waker = waker.clone();
         let updates = crate::update::UpdateWorker::start::<P>(Arc::new(move || update_waker.wake()))?;
         let desktop = crate::desktop::Worker::start()?;
@@ -190,9 +251,11 @@ impl<P: Platform> Handler<P> {
             let events = store_events.clone();
             shell_integration.shortcut(None, move |result| events.post(StoreEvent::StartMenuShortcut(None, result)));
         }
-        let handler = Self { desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false };
-        handler.update_launcher(&handler.config, None);
-        handler.apply_autostart(&handler.config);
+        let handler = Self { desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false };
+        if !encrypted {
+            handler.update_launcher(&handler.config, None);
+            handler.apply_autostart(&handler.config);
+        }
         Ok((handler, worker))
     }
 
@@ -205,36 +268,14 @@ impl<P: Platform> Handler<P> {
         self.last_focused.filter(|id| self.windows.contains_key(id)).or_else(|| self.windows.keys().min().copied())
     }
 
-    fn serve_request(app: &mut App, request: crate::cli::Request) -> bool {
-        use crate::cli::Command;
-        match request.command {
-            Command::Window => return false,
-            Command::Hidden => return true,
-            Command::Open { dir } => {
-                if let Some(profile) = app.default_profile() {
-                    app.open_tab_at(profile, Some(dir));
-                }
-            }
-            Command::Run { command, dir } => app.run_command(&command, dir.or(request.cwd)),
-            Command::Profile { name } => {
-                if !app.open_named_profile(&name) {
-                    tracing::warn!("no profile named {name}");
-                }
-            }
-            Command::Paste { text } => app.paste(text),
-            Command::PastePath { path } => app.paste_path(&path),
-        }
-        true
-    }
-
     fn drain_requests(&mut self, window: &Win<P>) {
-        if self.request_target() != Some(window.id()) {
+        if self.config_startup == ConfigStartup::Prompt || self.request_target() != Some(window.id()) {
             return;
         }
         let incoming: Vec<String> = self.requests.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
         for text in incoming {
             let Some(request) = crate::cli::Request::decode(&text).filter(|r| r.command != crate::cli::Command::Hidden) else { continue };
-            let handled = self.windows.get_mut(&window.id()).is_some_and(|s| Self::serve_request(&mut s.app, request));
+            let handled = self.windows.get_mut(&window.id()).is_some_and(|s| serve_request(&mut s.app, request));
             if !handled {
                 let dark = self.windows.get(&window.id()).is_none_or(|s| s.app.is_dark());
                 window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark, visible: true });
@@ -248,27 +289,111 @@ impl<P: Platform> Handler<P> {
     fn save_config(&mut self, text: String) {
         let Ok(mut config) = Config::parse(&text) else { return };
         config.vault.sealed.clone_from(&self.config.vault.sealed);
+        config.vault.encrypt_config = self.config.vault.encrypt_config;
         self.settings_revision += 1;
         self.apply_config(config.clone());
+        if self.config_startup != ConfigStartup::Ready { return; }
         let events = self.store_events.clone();
         let revision = self.settings_revision;
         let path = self.config_path.clone();
+        let access = self.config_access.clone();
         self.secrets.sync_config(move |sealed| {
             if let Some(path) = path {
-                match crate::config_file::save_settings(&path, &mut config, sealed) {
+                match access.lock().expect("config access").save_settings(&path, &mut config, sealed) {
                     Ok(()) => {
                         events.post(StoreEvent::ConfigStatus(revision, None));
                         return Some((config.vault.sealed, config.vault.remember_minutes));
                     }
                     Err(e) => {
                         tracing::error!("{}: {e}", path.display());
-                        let error = crate::config_file::load(&path).err().map(|error| error.to_string());
-                        events.post(StoreEvent::ConfigStatus(revision, error));
+                        events.post(StoreEvent::ConfigStatus(revision, Some(e.to_string())));
                     }
                 }
             }
             Some((sealed.to_owned(), config.vault.remember_minutes))
         });
+    }
+
+    fn unlock_config(&mut self, window: WindowId, request: u64, passphrase: String) {
+        if self.config_startup != ConfigStartup::Prompt { return; }
+        let path = self.config_path.clone();
+        let access = self.config_access.clone();
+        let events = self.store_events.clone();
+        if !self.secrets.sync_config(move |_| {
+            let result = path.ok_or(VaultIssue::ConfigReadFailed).and_then(|path| {
+                access.lock().expect("config access").unlock(&path, &passphrase).map(Box::new)
+            });
+            events.post(StoreEvent::ConfigOpened(window, request, result));
+            None
+        }) {
+            if let Some(state) = self.windows.get_mut(&window) {
+                state.app.config_unlock_error(request, VaultIssue::Unavailable);
+            }
+        }
+    }
+
+    fn protect_config(&mut self, window: WindowId, request: u64, enabled: bool, passphrase: String) {
+        let path = self.config_path.clone();
+        let access = self.config_access.clone();
+        let events = self.store_events.clone();
+        if !self.secrets.sync_config(move |sealed| {
+            let result = path.ok_or(VaultIssue::SaveFailed).and_then(|path| {
+                access.lock().expect("config access").set_encryption(&path, sealed, &passphrase, enabled)
+            });
+            if result.is_ok() {
+                events.post(StoreEvent::ConfigEncryption(enabled));
+            }
+            events.post(StoreEvent::VaultReply(window, request, result.map(|()| VaultReply::Applied)));
+            None
+        }) {
+            if let Some(state) = self.windows.get_mut(&window) {
+                state.app.vault_reply(request, Err(VaultIssue::Unavailable));
+            }
+        }
+    }
+
+    fn take_window_startup(&mut self) -> (Option<WindowState>, Option<crate::cli::Request>) {
+        let saved = (!self.pending.is_empty()).then(|| self.pending.remove(0));
+        let request = self.startup.take().filter(|r| r.command != crate::cli::Command::Window);
+        (saved, request)
+    }
+
+    fn open_pending_windows(&self, window: &Win<P>, dark: bool, visible: bool) {
+        for _ in &self.pending {
+            window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark, visible });
+        }
+    }
+
+    fn finish_config_start(&mut self, window: &Win<P>, config: Option<Config>) {
+        if self.config_startup != ConfigStartup::Prompt { return; }
+        self.startup_config = None;
+        if let Some(config) = config {
+            if !config.terminal.recover_tabs && !crate::update::restarted() {
+                self.pending.clear();
+            }
+            let sealed = config.vault.sealed.clone();
+            let minutes = config.vault.remember_minutes;
+            self.show_vault(VaultView { configured: !sealed.is_empty(), ..VaultView::default() });
+            self.secrets.sync_config(move |_| Some((sealed, minutes)));
+            self.apply_config(config);
+            self.config_startup = ConfigStartup::Ready;
+        } else {
+            self.config_startup = ConfigStartup::Skipped;
+            self.pending.clear();
+            self.recent.clear();
+            self.recent_folders.clear();
+        }
+        let (saved, request) = self.take_window_startup();
+        if let Some(state) = self.windows.get_mut(&window.id()) {
+            state.app.dismiss_config_unlock();
+            state.app.set_recent(self.recent.clone());
+            populate_window(&mut state.app, saved, true, request);
+            let dark = state.app.is_dark();
+            window.set_dark(dark);
+            self.open_pending_windows(window, dark, true);
+            self.apply_window_prefs(window);
+            window.request_redraw();
+        }
     }
 
     fn show_config_status(&mut self, error: Option<String>) {
@@ -283,17 +408,18 @@ impl<P: Platform> Handler<P> {
                 s.app.set_config(config.clone());
             }
         }
+        let starting = self.config_startup == ConfigStartup::Prompt;
         let explorer = config.system.explorer_menu;
-        if explorer != self.config.system.explorer_menu || (explorer && config.appearance.language != self.config.appearance.language) {
+        if (starting && (explorer || cfg!(target_os = "linux"))) || explorer != self.config.system.explorer_menu || (explorer && config.appearance.language != self.config.appearance.language) {
             self.apply_explorer_menu(explorer);
         }
-        if config.profiles != self.config.profiles {
+        if starting || config.profiles != self.config.profiles {
             self.update_launcher(&config, None);
         }
-        if config.system.autostart != self.config.system.autostart || (config.system.autostart && crate::background_mode(&config) != crate::background_mode(&self.config)) {
+        if starting || config.system.autostart != self.config.system.autostart || (config.system.autostart && crate::background_mode(&config) != crate::background_mode(&self.config)) {
             self.apply_autostart(&config);
         }
-        if config.system.url_scheme != self.config.system.url_scheme {
+        if (starting && (config.system.url_scheme || !capturing())) || config.system.url_scheme != self.config.system.url_scheme {
             self.shell_integration.url_scheme(config.system.url_scheme);
         }
         if config.appearance != self.config.appearance {
@@ -356,16 +482,18 @@ impl<P: Platform> Handler<P> {
     }
 
     fn reload_config(&mut self, force: bool) {
+        if self.config_startup != ConfigStartup::Ready { return; }
         let Some(path) = self.config_path.clone() else { return };
         let events = self.store_events.clone();
         let revision = self.settings_revision;
         let previous = self.config_stamp;
+        let access = self.config_access.clone();
         self.secrets.sync_config(move |_| {
             let stamp = std::fs::metadata(&path).and_then(|metadata| metadata.modified()).ok();
             if !force && stamp.is_some() && stamp == previous {
                 return None;
             }
-            match crate::config_file::load(&path) {
+            match access.lock().expect("config access").load(&path) {
                 Ok(config) => {
                     let vault = (config.vault.sealed.clone(), config.vault.remember_minutes);
                     events.post(StoreEvent::Config(revision, stamp, Ok(Box::new(config))));
@@ -444,7 +572,7 @@ impl<P: Platform> Handler<P> {
                     share: self.config.ssh.share_connections,
                     forward_agent: self.config.ssh.forward_agent,
                     remember: self.config.ssh.remember_passwords,
-                    secrets: Arc::new(self.secrets.clone()),
+                    secrets: Arc::new(self.window_secrets(id)),
                 };
                 let remote = crate::remote::connect(&destination, launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), P::home_dir(), options);
                 let (files, tx, waker) = (remote.files, self.file_tx.clone(), self.waker.clone());
@@ -616,7 +744,11 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::CheckSecret { pane, key } => {
-                if let Some(prompt) = self.windows.get(&id).and_then(|s| s.app.password_prompt(pane)) {
+                if self.config.vault.remember_minutes == 0 && self.vault_view.configured {
+                    if let Some(state) = self.windows.get_mut(&id) {
+                        state.app.secret_known(pane, self.vault_view.entries.iter().any(|entry| entry.key == key));
+                    }
+                } else if let Some(prompt) = self.windows.get(&id).and_then(|s| s.app.password_prompt(pane)) {
                     let line = prompt.line;
                     let events = self.store_events.clone();
                     self.secrets.read(key.clone(), move |secret| events.post(StoreEvent::Known { window: id, pane, key, line, known: secret.is_some() }));
@@ -625,22 +757,39 @@ impl<P: Platform> Handler<P> {
             Effect::FillSecret { pane, key } => {
                 if let Some(request) = self.windows.get(&id).and_then(|s| s.app.pending_secret_fill(pane)) {
                     let events = self.store_events.clone();
-                    self.secrets.read(key.clone(), move |secret| events.post(StoreEvent::Fill { window: id, pane, key, request, secret }));
+                    self.window_secrets(id).use_secret(SecretUse::Read(key.clone()), move |result| {
+                        events.post(StoreEvent::Fill { window: id, pane, key, request, secret: result.ok().flatten() });
+                    });
                 }
             }
             Effect::SaveSecret { key, value } => {
-                self.secrets.write(key, value, |saved| {
-                    if !saved {
+                self.window_secrets(id).use_secret(SecretUse::Write(key, Some(value)), |result| {
+                    if result.is_err() {
                         tracing::warn!("could not save a prompt password");
                     }
                 });
             }
-            Effect::VaultCreate { passphrase } => self.vault_command(VaultCommand::Create(passphrase)),
-            Effect::VaultUnlock { passphrase } => self.vault_command(VaultCommand::Unlock(passphrase)),
-            Effect::VaultLock => self.vault_command(VaultCommand::Lock),
-            Effect::VaultChange { old, new } => self.vault_command(VaultCommand::Change { old, new }),
-            Effect::VaultErase => self.vault_command(VaultCommand::Erase),
-            Effect::VaultRemove { kind, key } => self.vault_command(VaultCommand::Remove { kind, key }),
+            Effect::UnlockConfig { request, passphrase } => self.unlock_config(id, request, passphrase),
+            Effect::CancelConfigUnlock if self.config_startup == ConfigStartup::Prompt => {
+                let access = self.config_access.clone();
+                self.secrets.sync_config(move |_| {
+                    access.lock().expect("config access").skip();
+                    None
+                });
+                self.finish_config_start(window, None);
+            }
+            Effect::CancelConfigUnlock => {}
+            Effect::VaultAccessInput(password) => self.answer_vault_access(id, password),
+            Effect::ProtectConfig { request, enabled, passphrase } => self.protect_config(id, request, enabled, passphrase),
+            Effect::VaultCreate { passphrase } => self.vault_command(id, VaultCommand::Create(passphrase)),
+            Effect::VaultUnlock { passphrase } => self.vault_command(id, VaultCommand::Unlock(passphrase)),
+            Effect::VaultLock => self.vault_command(id, VaultCommand::Lock),
+            Effect::VaultChange { old, new } => self.vault_command(id, VaultCommand::Change { old, new }),
+            Effect::VaultErase { passphrase } => self.vault_command(id, VaultCommand::Erase(passphrase)),
+            Effect::VaultManage { action, passphrase, request } => {
+                let events = self.store_events.clone();
+                self.secrets.manage(action, passphrase, move |result| events.post(StoreEvent::VaultReply(id, request, result)));
+            }
             Effect::SendFiles { pane, files } => {
                 if let Some(s) = self.sessions.get(&(id, pane)) {
                     s.send_files(&files);
@@ -729,7 +878,7 @@ impl<P: Platform> Handler<P> {
     }
 
     fn save_session(&self) {
-        if capturing() {
+        if capturing() || self.config_startup != ConfigStartup::Ready {
             return;
         }
         let Some(path) = crate::session_path::<P>() else { return };
@@ -759,12 +908,32 @@ impl<P: Platform> Handler<P> {
             window, pane, downloads: P::downloads_dir().unwrap_or_else(std::env::temp_dir), exits: self.exit_tx.clone(), notes: self.note_tx.clone() }
     }
 
-    fn vault_command(&mut self, command: VaultCommand) {
-        if !self.secrets.command(command) {
-            let mut view = self.vault_view.clone();
-            view.error = Some(VaultIssue::Unavailable);
-            self.show_vault(view);
+    fn window_secrets(&self, window: WindowId) -> WindowSecrets {
+        let events = self.store_events.clone();
+        WindowSecrets::new(self.secrets.clone(), move |issue, reply| {
+            events.post(StoreEvent::VaultAccess(window, AccessPrompt { issue, reply }));
+        })
+    }
+
+    fn answer_vault_access(&mut self, window: WindowId, password: Option<String>) {
+        let Some(queue) = self.vault_access.get_mut(&window) else { return };
+        if let Some(prompt) = queue.pop_front() {
+            (prompt.reply)(password);
         }
+        if let Some(prompt) = queue.front() {
+            if let Some(state) = self.windows.get_mut(&window) {
+                state.app.prompt_vault_access(prompt.issue);
+            }
+        } else {
+            self.vault_access.remove(&window);
+        }
+    }
+
+    fn vault_command(&self, window: WindowId, command: VaultCommand) {
+        let Some(state) = self.windows.get(&window) else { return };
+        let request = state.app.vault_request_id();
+        let events = self.store_events.clone();
+        self.secrets.command(command, move |result| events.post(StoreEvent::VaultReply(window, request, result)));
     }
 
     fn show_vault(&mut self, view: VaultView) {
@@ -791,9 +960,41 @@ impl<P: Platform> Handler<P> {
                         }
                     }
                 },
+                StoreEvent::ConfigEncryption(encrypted) => {
+                    if encrypted != self.config.vault.encrypt_config {
+                        let mut config = self.config.clone();
+                        config.vault.encrypt_config = encrypted;
+                        self.apply_config(config);
+                    }
+                    for state in self.windows.values_mut() {
+                        state.app.set_config_encrypted(encrypted);
+                    }
+                }
+                StoreEvent::ConfigOpened(window, request, result) => {
+                    if let Some(state) = self.windows.get_mut(&window).filter(|state| state.app.config_unlock_waiting(request)) {
+                        match result {
+                            Ok(config) => self.startup_config = Some((window, config)),
+                            Err(issue) => state.app.config_unlock_error(request, issue),
+                        }
+                    }
+                }
                 StoreEvent::CommandProbe { window, request, busy } => {
                     if let Some(state) = self.windows.get_mut(&window) {
                         state.app.command_probe_finished(request, Some(busy));
+                    }
+                }
+                StoreEvent::VaultAccess(window, prompt) => {
+                    if let Some(state) = self.windows.get_mut(&window) {
+                        let queue = self.vault_access.entry(window).or_default();
+                        if queue.is_empty() {
+                            state.app.prompt_vault_access(prompt.issue);
+                        }
+                        queue.push_back(prompt);
+                    }
+                }
+                StoreEvent::VaultReply(window, request, result) => {
+                    if let Some(state) = self.windows.get_mut(&window) {
+                        state.app.vault_reply(request, result);
                     }
                 }
                 StoreEvent::Vault(update) => {
@@ -1022,29 +1223,25 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         app.set_start_menu_shortcut(self.start_menu_shortcut);
         app.set_system_language(&P::ui_language());
         app.vault_state(self.vault_view.clone());
+        app.set_config_encrypted(self.config.vault.encrypt_config || self.config_startup != ConfigStartup::Ready);
         app.set_cwd_probe(Arc::new(P::process_cwd));
         app.set_children_probe(Arc::new(P::child_processes));
         app.set_can_elevate(P::can_elevate());
         app.set_recent(self.recent.clone());
         let first = self.windows.is_empty();
-        let saved = (!self.pending.is_empty()).then(|| self.pending.remove(0));
-        let startup = self.startup.take().filter(|r| r.command != crate::cli::Command::Window);
-        let hidden = startup.as_ref().is_some_and(|r| r.command == crate::cli::Command::Hidden);
-        initialize_tabs(&mut app, saved, first, startup.as_ref().map(|r| &r.command));
-        if first && !crate::update::restarted() {
-            app.check_updates_on_start();
+        let mut hidden = false;
+        if self.config_startup == ConfigStartup::Prompt {
+            app.prompt_config_unlock();
+        } else {
+            let (saved, request) = self.take_window_startup();
+            hidden = request.as_ref().is_some_and(|r| r.command == crate::cli::Command::Hidden);
+            populate_window(&mut app, saved, first, request);
         }
-        if let Some(request) = startup {
-            Self::serve_request(&mut app, request);
-        }
-        if first {
-            for _ in &self.pending {
-                window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: app.is_dark(), visible: !hidden });
-            }
-        }
-        window.set_dark(app.is_dark());
+        let dark = app.is_dark();
+        window.set_dark(dark);
         self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx: Gfx::new(text, ATLAS), renderer: None });
-        if first {
+        if first && self.config_startup != ConfigStartup::Prompt {
+            self.open_pending_windows(window, dark, !hidden);
             self.applied = None;
             self.waker.wake();
             self.apply_window_prefs(window);
@@ -1155,6 +1352,11 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             return self.close_for_restart(window);
         }
         self.drain_store();
+        if self.startup_config.as_ref().is_some_and(|(id, _)| *id == window.id()) {
+            if let Some((_, config)) = self.startup_config.take() {
+                self.finish_config_start(window, Some(*config));
+            }
+        }
         if self.window_prefs_dirty && self.windows.keys().min() == Some(&window.id()) {
             self.window_prefs_dirty = false;
             self.apply_window_prefs(window);
@@ -1186,6 +1388,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
                 }
             }
         }
+        self.vault_access.remove(&id);
         self.remotes.retain(|(w, _), _| *w != id);
         self.serials.retain(|(w, _), _| *w != id);
         self.sessions.retain(|(w, _), s| {

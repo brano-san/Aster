@@ -6,6 +6,7 @@ mod d3d;
 mod elevate;
 mod environment;
 mod explorer;
+pub mod config_lock;
 mod instance;
 mod jump_list;
 mod process;

@@ -35,20 +35,20 @@ pub fn config_path<P: Platform>() -> Option<PathBuf> {
     config_dir::<P>().map(|d| d.join("config.toml"))
 }
 
-fn load_config<P: Platform>() -> Config {
-    let Some(path) = config_path::<P>() else { return Config::default() };
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Config::parse(&text).unwrap_or_else(|e| {
+fn load_config<P: Platform>() -> (Config, bool) {
+    let Some(path) = config_path::<P>() else { return (Config::default(), false) };
+    match config_file::read_initial(&path) {
+        Ok(text) if aster_vault::config::is_encrypted(&text) => (Config::default(), true),
+        Ok(text) => (Config::parse(&text).map(|mut config| {
+            config.vault.encrypt_config = false;
+            config
+        }).unwrap_or_else(|e| {
             tracing::error!("{}: {e}", path.display());
             Config::default()
-        }),
-        Err(_) => {
-            let config = Config::default();
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&path, config.to_text());
-            config
+        }), false),
+        Err(error) => {
+            tracing::error!("{}: {error}", path.display());
+            (Config::default(), false)
         }
     }
 }
@@ -98,14 +98,14 @@ fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::Pla
     if !alone && requests.is_none() && P::instance_send(&request.encode()) {
         return Ok(());
     }
-    let config = load_config::<P>();
-    let hidden = starts_hidden(&config, &request.command) && std::env::var_os("ASTER_CAPTURE").is_none() && (cfg!(windows) || requests.is_some());
+    let (config, encrypted) = load_config::<P>();
+    let hidden = !encrypted && starts_hidden(&config, &request.command) && std::env::var_os("ASTER_CAPTURE").is_none() && (cfg!(windows) || requests.is_some());
     if !hidden && request.command == cli::Command::Hidden {
         request.command = cli::Command::Window;
     }
     let dark = config.appearance.color_scheme_mode != SchemeMode::Light;
     let placement = state_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| parse_placement(&t));
-    let (mut handler, _vault_worker) = handler::Handler::<P>::new(config, waker)
+    let (mut handler, _vault_worker) = handler::Handler::<P>::new(config, waker, encrypted)
         .map_err(|e| aster_platform::PlatformError::new(0, format!("vault worker: {e}")))?;
     handler.set_instance(requests, (!hidden || cfg!(windows)).then_some(request));
     let result = windows.run(WindowOptions { title: "Aster".into(), placement, dark, visible: !hidden }, handler);

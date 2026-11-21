@@ -97,7 +97,7 @@ fn an_open_prompt_tracks_vault_changes_without_losing_manual_input_or_save_offer
     let (mut a, pane) = ssh_app();
     let key = "sudo:ann@box";
     let locked = VaultView { configured: true, ..VaultView::default() };
-    let mut open = VaultView { unlocked: true, entries: vec![("password".into(), key.into())], ..locked.clone() };
+    let mut open = VaultView { unlocked: true, entries: vec![crate::settings::VaultEntry { kind: "other".into(), key: key.into(), label: key.into() }], ..locked.clone() };
     output(&mut a, pane, b"Password: ");
     a.secret_known(pane, true);
     press(&mut a, Key::Enter, FILL);

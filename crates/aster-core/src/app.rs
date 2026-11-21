@@ -125,8 +125,12 @@ pub enum Effect {
     VaultUnlock { passphrase: String },
     VaultLock,
     VaultChange { old: String, new: String },
-    VaultErase,
-    VaultRemove { kind: String, key: String },
+    VaultErase { passphrase: Option<String> },
+    VaultManage { action: crate::vault_settings::VaultAction, passphrase: Option<String>, request: u64 },
+    UnlockConfig { request: u64, passphrase: String },
+    CancelConfigUnlock,
+    VaultAccessInput(Option<String>),
+    ProtectConfig { request: u64, enabled: bool, passphrase: String },
     ImeArea(Rect),
     Update(crate::update::UpdateRequest),
 }
@@ -227,6 +231,8 @@ pub struct App {
     pub(crate) config_status: Option<Result<(), String>>,
     pub(crate) launcher_installed: Option<bool>,
     pub(crate) start_menu_shortcut: bool,
+    pub(crate) config_encrypted: bool,
+    pub(crate) vault_prompt: Option<crate::vault_settings::VaultDialog>,
     pub(crate) vault: crate::settings::VaultView,
     pub(crate) vault_input_id: u64,
     pub(crate) menu: Option<crate::menu::Menu>,
@@ -328,6 +334,8 @@ impl App {
             config_status: None,
             launcher_installed: None,
             start_menu_shortcut: false,
+            config_encrypted: false,
+            vault_prompt: None,
             menu: None,
             rename: None,
             paste_confirm: None,
@@ -1051,6 +1059,12 @@ impl App {
     }
 
     pub fn paste_vault(&mut self, input: u64, text: String) {
+        if self.vault_prompt.is_some() {
+            if input == self.vault_input_id {
+                self.vault_prompt_text(&text);
+            }
+            return;
+        }
         if input == self.vault_input_id && self.settings.as_ref().is_some_and(|p| p.editing_passphrase()) {
             self.settings_text(&text);
         }
@@ -1706,6 +1720,12 @@ impl App {
     }
 
     fn handle(&mut self, event: Event) {
+        if self.vault_prompt.is_some() && self.vault_prompt_event(&event) {
+            if matches!(event, Event::Key { key: Key::Escape | Key::Enter, pressed: true, .. }) {
+                self.swallow_control = true;
+            }
+            return;
+        }
         match event {
             Event::Resized { width, height } => {
                 self.size = (width as f32, height as f32);
@@ -1866,7 +1886,7 @@ impl App {
                 self.swallow_char = true;
                 return self.settings_key(key, mods);
             }
-            if page.editor.is_some() || page.group_editor.is_some() {
+            if page.vault_dialog.is_some() || page.editor.is_some() || page.group_editor.is_some() {
                 return self.settings_key(key, mods);
             }
             let editing = page.editing();

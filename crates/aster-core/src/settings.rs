@@ -1,3 +1,4 @@
+use crate::vault_settings::{AfterUnlock, DialogKind, VaultDialog};
 use crate::app::{App, Effect};
 use crate::config::Config;
 use crate::i18n::{t, tf};
@@ -138,7 +139,8 @@ pub const SETTINGS: &[Setting] = &[
     item(DOCK, "appearance.dock-always-on-top", "Always on top", "The docked window stays above other windows", Control::Toggle),
     item(DOCK, "appearance.dock-hide-on-blur", "Hide on focus loss", "The docked window hides when another window is activated", Control::Toggle),
     item(DOCK, "appearance.global-hotkey", "Global hotkey", "Shows and hides the window from anywhere, for example Ctrl-`", Control::Text),
-    item(VAULT, "vault.remember-minutes", "Stay unlocked for (minutes)", "Zero keeps the vault unlocked until Aster exits", Control::Number { min: 0.0, max: 1440.0, step: 5.0 }),
+    item(VAULT, "vault.encrypt-config", "Encrypt the entire config", "Ask for the master passphrase when Aster starts", Control::Toggle),
+    item(VAULT, "vault.remember-minutes", "Stay unlocked for (minutes)", "Zero asks for the master passphrase each time", Control::Number { min: 0.0, max: 1440.0, step: 1.0 }),
     item(SSH, "ssh.client", "SSH client", "Built-in client, or the ssh program installed in the system", Control::Choice(SSH_CLIENTS)),
     item(SSH, "ssh.remember-passwords", "Offer to save passwords", "After a typed password or key passphrase works, offer to save it", Control::Toggle),
     item(SSH, "ssh.forward-agent", "Forward the SSH agent", "Let servers use your local SSH agent; ForwardAgent in ~/.ssh/config decides per host", Control::Toggle),
@@ -231,6 +233,7 @@ pub struct SchemeRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VaultIssue {
     Locked, WrongPassphrase, Corrupted, Unsupported, SaveFailed, EmptyPassphrase, AlreadyConfigured, NotConfigured, Unavailable,
+    EntryMissing, EmptyLabel, DuplicateLabel, ExportFailed, ImportFailed, ConfigReadFailed,
 }
 
 impl VaultIssue {
@@ -245,6 +248,30 @@ impl VaultIssue {
             Self::AlreadyConfigured => t("The vault is already configured"),
             Self::NotConfigured => t("The vault is not configured"),
             Self::Unavailable => t("The vault is unavailable"),
+            Self::EntryMissing => t("The secret no longer exists"),
+            Self::EmptyLabel => t("Enter a label for the secret"),
+            Self::DuplicateLabel => t("A key file already uses this label"),
+            Self::ExportFailed => t("Could not create the export file"),
+            Self::ImportFailed => t("Could not read the key file"),
+            Self::ConfigReadFailed => t("Could not read the encrypted config"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultEntry {
+    pub kind: String,
+    pub key: String,
+    pub label: String,
+}
+
+impl VaultEntry {
+    pub(crate) fn kind_label(&self) -> &'static str {
+        match self.kind.as_str() {
+            "ssh-password" => t("SSH password"),
+            "key-passphrase" => t("Key passphrase"),
+            "key-file" => t("Key file"),
+            _ => t("Other secret"),
         }
     }
 }
@@ -253,41 +280,30 @@ impl VaultIssue {
 pub struct VaultView {
     pub configured: bool,
     pub unlocked: bool,
-    pub entries: Vec<(String, String)>,
+    pub entries: Vec<VaultEntry>,
     pub error: Option<VaultIssue>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum VaultRow {
-    Create, Unlock, Entry(usize), Lock, Change, Erase,
+    Create, Unlock, Manage, Import, Entry(usize),
 }
 
 impl VaultRow {
-    fn edit(self) -> Option<InlineEdit> {
-        let step = match self {
-            Self::Create => PassphraseStep::Create,
-            Self::Unlock => PassphraseStep::Unlock,
-            Self::Change => PassphraseStep::Current,
-            _ => return None,
-        };
-        Some(InlineEdit::Passphrase { step, value: String::new() })
-    }
-
     fn text(self) -> (&'static str, &'static str) {
         match self {
             Self::Create => ("Set a master passphrase", "Encrypt new passwords in the config instead of using the system credential store"),
-            Self::Unlock => ("Unlock the vault", "The vault is locked"),
-            Self::Lock => ("Lock now", "Require the master passphrase to access saved passwords"),
-            Self::Change => ("Change the master passphrase", "Enter the current passphrase, then the new one"),
-            Self::Erase => ("Erase the vault", "Delete all vault entries and use the system credential store again"),
+            Self::Unlock => ("Show vault contents", "The vault is locked"),
+            Self::Manage => ("Manage vault", ""),
+            Self::Import => ("Import key file", ""),
             Self::Entry(_) => ("", ""),
         }
     }
 
     pub(crate) fn labels(self, view: &VaultView) -> (&str, &str) {
         if let Self::Entry(i) = self {
-            let (kind, key) = &view.entries[i];
-            return (key, if kind == "password" { t("password") } else { kind });
+            let entry = &view.entries[i];
+            return (&entry.label, entry.kind_label());
         }
         let (label, hint) = self.text();
         (t(label), t(hint))
@@ -300,49 +316,19 @@ impl VaultView {
             return (index == 0).then_some(VaultRow::Create);
         }
         if !self.unlocked {
-            return (index == 0).then_some(VaultRow::Unlock);
+            return [VaultRow::Unlock, VaultRow::Manage].get(index).copied();
         }
-        match index.checked_sub(self.entries.len()) {
-            None => Some(VaultRow::Entry(index)),
-            Some(k) => [VaultRow::Lock, VaultRow::Change, VaultRow::Erase].get(k).copied(),
+        match index {
+            0 => Some(VaultRow::Manage),
+            1 => Some(VaultRow::Import),
+            _ => self.entries.get(index - 2).map(|_| VaultRow::Entry(index - 2)),
         }
     }
 }
 
-#[derive(Clone, PartialEq)]
-enum PassphraseStep {
-    Create, Unlock, Current, New { old: String },
-}
-
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum InlineEdit {
     Setting(String),
-    Passphrase { step: PassphraseStep, value: String },
-    Waiting,
-    Interrupted,
-}
-
-impl InlineEdit {
-    fn buffer(&mut self) -> Option<&mut String> {
-        match self {
-            Self::Setting(value) | Self::Passphrase { value, .. } => Some(value),
-            Self::Waiting | Self::Interrupted => None,
-        }
-    }
-
-    fn visible(&self) -> String {
-        match self {
-            Self::Setting(value) => value.clone(),
-            Self::Passphrase { value, .. } => "•".repeat(value.chars().count()),
-            Self::Waiting | Self::Interrupted => String::new(),
-        }
-    }
-}
-
-impl std::fmt::Debug for InlineEdit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.visible())
-    }
 }
 
 pub fn split_args(text: &str) -> Vec<String> {
@@ -446,7 +432,7 @@ pub struct SettingsPage {
     pub profiles: Vec<ProfileRow>,
     pub(crate) vault: VaultView,
     launcher_installed: Option<bool>,
-    confirming_vault: Option<VaultRow>,
+    pub(crate) vault_dialog: Option<VaultDialog>,
     pub schemes: Vec<SchemeRow>,
     pub(crate) editor: Option<ProfileEditor>,
     pub(crate) group_editor: Option<GroupEditor>,
@@ -473,7 +459,7 @@ impl SettingsPage {
                 Control::Run(Action::ApplicationsMenu(install)) => self.launcher_installed == Some(!install),
                 _ => true,
             };
-            available && item_matches(i, &self.query)
+            available && (self.vault.configured || SETTINGS[i].key != "vault.encrypt-config") && item_matches(i, &self.query)
         }).collect();
         let vault_rows = (0..).map_while(|k| self.vault.row(k).map(|row| (k, row))).filter_map(|(k, row)| {
             let (source, hint) = row.text();
@@ -499,13 +485,14 @@ impl SettingsPage {
         shown.splice(after_colors..after_colors, schemes);
         shown.extend((base..base + self.tree.len()).chain(shortcuts));
         self.deleting = None;
-        self.shown = if self.query.trim().is_empty() {
+        self.shown = if self.searching_vault() && !self.query.trim().is_empty() {
+            shown.into_iter().filter(|i| matches!(self.vault_at(*i), Some(VaultRow::Entry(_)))).collect()
+        } else if self.query.trim().is_empty() {
             let page = PAGES[self.page.min(PAGES.len() - 1)];
             shown.into_iter().filter(|&i| if self.profile_action(i).is_some() { page == SHORTCUTS } else { self.section(i) == page }).collect()
         } else {
             shown
         };
-        self.confirming_vault = None;
         self.selected = 0;
         self.scroll = 0.0;
     }
@@ -536,6 +523,7 @@ impl SettingsPage {
         self.font_replace = false;
         self.capture = None;
         self.editing = None;
+        self.cancel_vault_input();
         self.notice = None;
         self.refilter();
     }
@@ -600,39 +588,26 @@ impl SettingsPage {
     }
 
     pub(crate) fn editing(&self) -> bool {
-        self.editing.is_some()
+        self.editing.is_some() || self.vault_dialog.is_some()
     }
 
     pub(crate) fn editing_passphrase(&self) -> bool {
-        matches!(self.editing, Some(InlineEdit::Passphrase { .. } | InlineEdit::Waiting | InlineEdit::Interrupted))
+        self.vault_dialog.is_some()
     }
 
     pub(crate) fn edit_text(&self) -> String {
-        self.editing.as_ref().map(InlineEdit::visible).unwrap_or_default()
-    }
-
-    pub(crate) fn vault_placeholder(&self) -> &'static str {
-        match &self.editing {
-            Some(InlineEdit::Waiting) => t("Please wait…"),
-            Some(InlineEdit::Passphrase { step: PassphraseStep::Current, .. }) => t("Current passphrase"),
-            Some(InlineEdit::Passphrase { step: PassphraseStep::New { .. }, .. }) => t("New passphrase"),
-            _ => t("Master passphrase"),
-        }
+        self.editing.as_ref().map(|InlineEdit::Setting(text)| text.clone()).unwrap_or_default()
     }
 
     pub(crate) fn cancel_vault_input(&mut self) {
-        if self.editing_passphrase() {
-            self.editing = None;
-        }
-        if self.confirming_vault.take().is_some() {
-            self.notice = None;
-        }
+        self.vault_dialog = None;
+    }
+
+    pub(crate) fn searching_vault(&self) -> bool {
+        PAGES[self.page] == VAULT && self.vault.unlocked
     }
 
     pub(crate) fn vault_notice(&self) -> Option<&str> {
-        if matches!(self.editing, Some(InlineEdit::Interrupted)) {
-            return Some(t("Vault state changed. Press Esc to leave this field."));
-        }
         self.notice.as_deref().or_else(|| self.vault.error.map(VaultIssue::message))
     }
 
@@ -853,8 +828,7 @@ pub fn part_at(control: Control, r: Rect, s: f32, x: f32) -> Part {
 
 impl App {
     pub fn vault_state(&mut self, view: VaultView) {
-        let waiting = self.settings.as_ref().is_some_and(|page| matches!(page.editing, Some(InlineEdit::Waiting)));
-        if self.vault == view && !waiting {
+        if self.vault == view {
             return;
         }
         self.refresh_prompt_secrets(&view);
@@ -866,13 +840,11 @@ impl App {
                 _ => None,
             };
             let scroll = page.scroll;
-            let state_changed = page.vault.configured != view.configured || page.vault.unlocked != view.unlocked;
-            if matches!(page.editing, Some(InlineEdit::Waiting)) {
-                if state_changed || view.error.is_some() || old_row == Some(VaultRow::Change) {
-                    page.editing = if !state_changed && view.error.is_some() { old_row.and_then(VaultRow::edit) } else { None };
+            if page.vault.unlocked && !view.unlocked {
+                page.cancel_vault_input();
+                if PAGES[page.page] == VAULT {
+                    page.query.clear();
                 }
-            } else if state_changed && page.editing_passphrase() {
-                page.editing = Some(InlineEdit::Interrupted);
             }
             if old_row.is_some() {
                 page.notice = None;
@@ -880,7 +852,7 @@ impl App {
             page.vault = view.clone();
             page.refilter();
             let at = page.shown.iter().position(|&item| match old_row {
-                Some(VaultRow::Entry(_)) => matches!(page.vault_at(item), Some(VaultRow::Entry(k)) if page.vault.entries.get(k) == old_entry.as_ref()),
+                Some(VaultRow::Entry(_)) => matches!(page.vault_at(item), Some(VaultRow::Entry(k)) if old_entry.as_ref().is_some_and(|old| page.vault.entries[k].key == old.key && page.vault.entries[k].kind == old.kind)),
                 Some(row) => page.vault_at(item) == Some(row),
                 None => Some(item) == current,
             });
@@ -982,6 +954,11 @@ impl App {
         }
     }
 
+    pub fn set_config_encrypted(&mut self, encrypted: bool) {
+        self.config_encrypted = encrypted;
+        self.dirty = true;
+    }
+
     pub fn set_config_status(&mut self, error: Option<String>) {
         self.config_status = Some(error.map_or(Ok(()), Err));
         self.dirty = true;
@@ -1073,6 +1050,7 @@ impl App {
     pub fn setting_text(&self, setting: &Setting) -> String {
         match setting.control {
             Control::ReadOnly(Info::ConfigPath) => return self.config_path.as_deref().unwrap_or_else(|| t("Config folder unavailable")).to_owned(),
+            Control::ReadOnly(Info::ConfigStatus) if self.config_encrypted => return t("Encrypted").to_owned(),
             Control::ReadOnly(Info::ConfigStatus) => return match &self.config_status {
                 Some(Ok(())) => t("The config file is valid"),
                 Some(Err(error)) => error,
@@ -1175,6 +1153,9 @@ impl App {
     }
 
     fn adjust_setting(&mut self, setting: &Setting, delta: i32) {
+        if setting.key == "vault.encrypt-config" {
+            return self.open_vault_dialog(DialogKind::Protect(!self.config.vault.encrypt_config));
+        }
         match setting.control {
             Control::Toggle => {
                 let on = if delta == 0 { !self.setting_on(setting) } else { delta > 0 };
@@ -1290,66 +1271,15 @@ impl App {
     }
 
     fn activate_vault_row(&mut self, row: VaultRow) {
-        let Some(page) = self.settings.as_mut() else { return };
-        match row {
-            VaultRow::Lock => self.push(Effect::VaultLock),
-            VaultRow::Erase => self.confirm_vault_delete(row),
-            _ => {
-                page.confirming_vault = None;
-                page.notice = None;
-                page.editing = row.edit();
-                self.vault_input_id = self.vault_input_id.wrapping_add(1);
-            }
-        }
-    }
-
-    fn submit_passphrase(&mut self) {
-        let Some(page) = self.settings.as_mut() else { return };
-        let Some(InlineEdit::Passphrase { step, value }) = page.editing.take() else { return };
-        if value.is_empty() {
-            page.notice = Some(VaultIssue::EmptyPassphrase.message().to_owned());
-            page.editing = Some(InlineEdit::Passphrase { step, value });
-            return;
-        }
-        self.vault_input_id = self.vault_input_id.wrapping_add(1);
-        let effect = match step {
-            PassphraseStep::Create => Effect::VaultCreate { passphrase: value },
-            PassphraseStep::Unlock => Effect::VaultUnlock { passphrase: value },
-            PassphraseStep::Current => {
-                page.editing = Some(InlineEdit::Passphrase { step: PassphraseStep::New { old: value }, value: String::new() });
-                return;
-            }
-            PassphraseStep::New { old } => Effect::VaultChange { old, new: value },
+        let Some(page) = self.settings.as_ref() else { return };
+        let kind = match row {
+            VaultRow::Create => DialogKind::Create,
+            VaultRow::Unlock => DialogKind::Unlock(AfterUnlock::Close),
+            VaultRow::Manage => DialogKind::Manage,
+            VaultRow::Import => DialogKind::Import,
+            VaultRow::Entry(i) => DialogKind::Entry(page.vault.entries[i].clone()),
         };
-        page.editing = Some(InlineEdit::Waiting);
-        self.push(effect);
-    }
-
-    fn confirm_vault_delete(&mut self, row: VaultRow) {
-        let Some(page) = self.settings.as_mut() else { return };
-        let confirmed = page.confirming_vault == Some(row);
-        let effect = match row {
-            VaultRow::Entry(i) => {
-                let (kind, key) = &page.vault.entries[i];
-                if confirmed {
-                    Some(Effect::VaultRemove { kind: kind.clone(), key: key.clone() })
-                } else {
-                    page.notice = Some(tf("Press Del again to delete {name}", &[("name", key)]));
-                    None
-                }
-            }
-            VaultRow::Erase if confirmed => Some(Effect::VaultErase),
-            VaultRow::Erase => {
-                page.notice = Some(t("Confirm again to permanently erase the vault").to_owned());
-                None
-            }
-            _ => return,
-        };
-        page.confirming_vault = (!confirmed).then_some(row);
-        if let Some(effect) = effect {
-            page.notice = None;
-            self.push(effect);
-        }
+        self.open_vault_dialog(kind);
     }
 
     pub(crate) fn reveal_selected(&mut self) {
@@ -1375,21 +1305,16 @@ impl App {
         if page.editor.is_some() || page.group_editor.is_some() {
             return self.profile_modal_key(key, mods);
         }
-        if matches!(page.editing, Some(InlineEdit::Interrupted | InlineEdit::Waiting)) {
-            if matches!(key, Key::Escape | Key::Tab) || key == Key::Enter && matches!(page.editing, Some(InlineEdit::Interrupted)) {
-                page.editing = None;
-            }
-            return;
+        if page.vault_dialog.is_some() {
+            return self.vault_dialog_key(key, mods);
         }
-        if !page.editing() {
-            if let Some(row) = page.current_item().and_then(|item| page.vault_at(item)) {
-                match key {
-                    Key::Delete if matches!(row, VaultRow::Entry(_) | VaultRow::Erase) => return self.confirm_vault_delete(row),
-                    Key::Enter => return self.activate_vault_row(row),
-                    _ => {}
-                }
+        match (key, page.current_item().filter(|_| !page.editing()).and_then(|item| page.vault_at(item))) {
+            (Key::Delete, Some(VaultRow::Entry(i))) => {
+                let entry = page.vault.entries[i].clone();
+                return self.open_vault_dialog(DialogKind::Delete(entry));
             }
-            page.confirming_vault = None;
+            (Key::Enter, Some(row)) => return self.activate_vault_row(row),
+            _ => {}
         }
         if !page.editing() && page.current_item().and_then(|i| page.tree_at(i)).is_some() && self.profile_tree_key(key, mods) {
             return;
@@ -1405,7 +1330,6 @@ impl App {
                     page.font_matches.clear();
                     page.font_replace = false;
                 }
-                Key::Enter if matches!(page.editing, Some(InlineEdit::Passphrase { .. })) => self.submit_passphrase(),
                 Key::Up | Key::Down if !page.font_matches.is_empty() => {
                     page.font_index = if key == Key::Up { page.font_index.saturating_sub(1) } else { (page.font_index + 1).min(page.font_matches.len() - 1) };
                 }
@@ -1416,7 +1340,7 @@ impl App {
                 Key::Enter | Key::Tab => self.commit_edit(),
                 Key::Backspace => {
                     let replace = std::mem::take(&mut page.font_replace);
-                    if let Some(t) = page.editing.as_mut().and_then(InlineEdit::buffer) {
+                    if let Some(InlineEdit::Setting(t)) = page.editing.as_mut() {
                         if mods.ctrl || replace {
                             t.clear();
                         } else {
@@ -1425,10 +1349,7 @@ impl App {
                     }
                     self.filter_fonts();
                 }
-                Key::Char('V') if mods.ctrl => {
-                    let effect = if page.editing_passphrase() { Effect::RequestVaultPaste(self.vault_input_id) } else { Effect::RequestPaste };
-                    self.push(effect);
-                }
+                Key::Char('V') if mods.ctrl => self.push(Effect::RequestPaste),
                 _ => {}
             }
             return;
@@ -1493,6 +1414,7 @@ impl App {
     }
 
     pub(crate) fn settings_text(&mut self, text: &str) {
+        if self.vault_dialog_text(text) { return; }
         let Some(page) = self.settings.as_mut() else { return };
         let clean: String = text.chars().filter(|c| !c.is_control()).collect();
         if clean.is_empty() {
@@ -1512,12 +1434,10 @@ impl App {
             return;
         }
         match page.editing.as_mut() {
-            Some(edit) => {
-                if let Some(buffer) = edit.buffer() {
-                    if std::mem::take(&mut page.font_replace) { buffer.clear(); }
-                    buffer.push_str(&clean);
-                    self.filter_fonts();
-                }
+            Some(InlineEdit::Setting(buffer)) => {
+                if std::mem::take(&mut page.font_replace) { buffer.clear(); }
+                buffer.push_str(&clean);
+                self.filter_fonts();
             }
             None => {
                 page.query.push_str(&clean);
@@ -1530,12 +1450,9 @@ impl App {
     pub(crate) fn settings_click(&mut self, x: f32, y: f32) {
         let Some(geo) = self.settings_geometry() else { return };
         self.dirty = true;
-        if self.profile_modal_click(geo.page, x, y) { return; }
+        if self.vault_dialog_click(geo.page, x, y) || self.profile_modal_click(geo.page, x, y) { return; }
         if let Some(page) = self.settings.as_mut() {
             page.capture = None;
-            if page.confirming_vault.is_some() && !geo.rows.iter().any(|row| row.kind == RowKind::Item(page.selected) && row.rect.contains(x, y)) {
-                page.cancel_vault_input();
-            }
         }
         if let Some(&(index, _)) = geo.suggestions.iter().find(|(_, r)| r.contains(x, y)) {
             return self.accept_font(index);
@@ -1557,18 +1474,12 @@ impl App {
         let RowKind::Item(n) = row.kind else { return self.commit_edit() };
         let scale = self.ui();
         let editing_same = self.settings.as_ref().is_some_and(|p| p.selected == n && p.editing.is_some());
-        if editing_same && self.settings.as_ref().is_some_and(|p| matches!(p.editing, Some(InlineEdit::Passphrase { .. } | InlineEdit::Waiting))) {
-            return;
-        }
         let control = self.settings.as_ref().and_then(|p| SETTINGS.get(p.shown[n])).map(|s| s.control);
         if editing_same && row.control.contains(x, y) && control.is_some_and(|c| part_at(c, row.control, self.ui(), x) == Part::Whole) {
             return;
         }
         self.commit_edit();
         let Some(page) = self.settings.as_mut() else { return };
-        if page.selected != n {
-            page.confirming_vault = None;
-        }
         page.selected = n;
         page.notice = None;
         let item = page.shown[n];
@@ -1607,7 +1518,7 @@ impl App {
     }
 
     pub(crate) fn settings_wheel(&mut self, dy: f32) {
-        if self.profile_modal_wheel(dy) { return; }
+        if self.vault_dialog_wheel(dy) || self.profile_modal_wheel(dy) { return; }
         let Some(geo) = self.settings_geometry() else { return };
         let step = 60.0 * self.ui();
         let Some(page) = self.settings.as_mut() else { return };

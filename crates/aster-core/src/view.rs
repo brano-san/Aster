@@ -256,6 +256,12 @@ impl App {
         for sp in &layout.splitters {
             g.dl.rect(sp.rect, theme.divider);
         }
+        if let Some(dialog) = self.vault_prompt.as_ref().filter(|dialog| dialog.kind == crate::vault_settings::DialogKind::Startup) {
+            g.dl.rect(content, theme.surface);
+            self.draw_vault_dialog(g, content, dialog, false);
+            self.mark_drawn();
+            return;
+        }
         if self.tabs.is_empty() {
             self.draw_start_page(g);
         }
@@ -270,6 +276,9 @@ impl App {
         self.draw_paste(g, m);
         self.draw_close(g);
         self.draw_tab_toast(g);
+        if let Some(dialog) = &self.vault_prompt {
+            self.draw_vault_dialog(g, content, dialog, false);
+        }
         g.dl.confine(content_layers, content);
         self.draw_menu(g);
         self.draw_mru(g);
@@ -1433,6 +1442,128 @@ impl App {
         }
     }
 
+    fn draw_vault_dialog<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, dialog: &crate::vault_settings::VaultDialog, unlocked: bool) {
+        if dialog.revealed || dialog.value.is_some() {
+            g.with_transient_text(|g| self.draw_vault_dialog_content(g, area, dialog, unlocked));
+        } else {
+            self.draw_vault_dialog_content(g, area, dialog, unlocked);
+        }
+    }
+
+    fn draw_vault_dialog_content<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, dialog: &crate::vault_settings::VaultDialog, unlocked: bool) {
+        let s = self.ui();
+        let theme = self.theme;
+        let (mx, my) = self.mouse;
+        let layout = crate::vault_settings::vault_layout(area, s, dialog, unlocked);
+        let frame = layout.frame;
+        let radius = (8.0 * s).round();
+        let line = s.round().max(1.0);
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let title = FontStyle::new(FontFamily::Ui, (17.0 * s).round(), true);
+        let y = baseline(g, layout.title, title);
+        g.dl.rect(area, theme.dim);
+        g.dl.shadow(Rect::new(frame.x, frame.y + 6.0 * s, frame.w, frame.h), theme.shadow, radius, (18.0 * s).round());
+        g.dl.round_rect(frame, theme.overlay, radius);
+        g.dl.outline(frame, theme.overlay_border, radius, line);
+        g.dl.set_clip(Some(frame));
+        g.text(layout.title.x, y, dialog.kind.title(), title, theme.text, layout.title.w);
+        if let Some(entry) = dialog.kind.entry() {
+            let r = layout.subtitle;
+            let y = baseline(g, r, small);
+            g.text(r.x, y, &entry.label, small, theme.text_dim, r.w);
+        }
+        let menu = dialog.menu(unlocked);
+        for (i, &slot) in layout.rows.iter().enumerate().filter(|(_, slot)| slot.h > 0.0) {
+            let focused = i == dialog.focus && !dialog.waiting;
+            if let Some(label) = menu.get(i) {
+                g.dl.round_rect(slot, if slot.contains(mx, my) { theme.button_hover } else { theme.surface }, 5.0 * s);
+                g.dl.outline(slot, if focused { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
+                let inner = slot.inset(10.0 * s, 0.0);
+                let y = baseline(g, inner, ui);
+                g.text(inner.x, y, t(label), ui, theme.text, inner.w);
+            } else {
+                self.draw_editor_field(g, slot, (dialog.field_label(i), &dialog.display(i)), ProfileFieldControl::Text, focused);
+            }
+        }
+        if let Some(value) = dialog.value.as_deref() {
+            let preview = layout.preview;
+            g.dl.round_rect(preview, theme.surface, 5.0 * s);
+            g.dl.outline(preview, theme.overlay_border, 5.0 * s, line);
+            let mut inner = preview.inset(9.0 * s, 5.0 * s);
+            inner.w = (inner.w - 5.0 * s).max(0.0);
+            let pitch = 19.0 * s;
+            let lines = (inner.h / pitch).floor().max(0.0) as usize;
+            let mono = FontStyle::new(FontFamily::Mono, (13.0 * s).round(), false);
+            let mut wrapped = Vec::new();
+            for text in value.split('\n').map(|text| text.trim_end_matches('\r')) {
+                if text.is_empty() {
+                    wrapped.push(String::new());
+                } else {
+                    wrapped.extend(wrapped_info(g, text, mono, inner.w));
+                }
+            }
+            let maximum = wrapped.len().saturating_sub(lines);
+            dialog.max_scroll.set(maximum);
+            let scroll = dialog.scroll.min(maximum);
+            g.dl.set_clip(Some(inner));
+            for (i, text) in wrapped.iter().skip(scroll).take(lines).enumerate() {
+                let r = Rect::new(inner.x, inner.y + i as f32 * pitch, inner.w, pitch);
+                let y = baseline(g, r, mono);
+                g.text(r.x, y, text, mono, theme.text, r.w);
+            }
+            g.dl.set_clip(Some(frame));
+            if maximum > 0 && lines > 0 {
+                let thumb_h = (inner.h * lines as f32 / wrapped.len() as f32).max(10.0 * s).min(inner.h);
+                let top = inner.y + (inner.h - thumb_h) * scroll as f32 / maximum as f32;
+                g.dl.round_rect(Rect::new(inner.right() + 4.0 * s, top, 3.0 * s, thumb_h), theme.overlay_border, 1.5 * s);
+            }
+        }
+        let status = if dialog.waiting { Some(t("Please wait…")) } else { dialog.issue.map(|issue| issue.message()).or_else(|| dialog.kind.note()) };
+        if let Some(status) = status {
+            let r = layout.status;
+            let y = baseline(g, r, small);
+            let ink = if dialog.issue.is_some() { Color::rgb(if theme.dark { 0xFF9490 } else { 0xA52320 }) } else { theme.text_dim };
+            g.text(r.x, y, status, small, ink, r.w);
+        }
+        let end = if dialog.primary().is_none() || dialog.value.is_some() || dialog.waiting && !matches!(dialog.kind, crate::vault_settings::DialogKind::Startup) { t("Close") } else { t("Cancel") };
+        let reveal = (dialog.can_reveal() && !dialog.waiting).then(|| if dialog.revealed { t("Hide value") } else { t("Show value") });
+        for (r, label, primary) in [(layout.cancel, Some(end), false), (layout.primary, dialog.primary(), true), (layout.reveal, reveal, false)] {
+            let Some(label) = label else { continue };
+            let enabled = !dialog.waiting || !primary;
+            g.dl.round_rect(r, if enabled && r.contains(mx, my) { theme.button_hover } else if primary && enabled { theme.accent.alpha(0x38) } else { theme.surface }, 5.0 * s);
+            g.dl.outline(r, if primary && enabled { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
+            centered(g, r, label, ui, if enabled { theme.text } else { theme.text_dim });
+        }
+        g.dl.set_clip(None);
+    }
+
+    fn draw_vault_icon<B: TextBackend>(&self, g: &mut Gfx<B>, x: f32, y: f32, kind: &str) {
+        let s = self.ui();
+        let ink = self.theme.accent;
+        let line = s.round().max(1.0);
+        let tile = Rect::new(x, y, 30.0 * s, 30.0 * s).snap();
+        g.dl.round_rect(tile, ink.alpha(0x28), 5.0 * s);
+        let r = tile.inset(7.0 * s, 7.0 * s);
+        match kind {
+            "key-file" => {
+                g.dl.outline(r.inset(2.0 * s, 0.0), ink, 2.0 * s, line);
+                for n in [6.0, 10.0] {
+                    g.dl.rect(Rect::new(r.x + 5.0 * s, r.y + n * s, 6.0 * s, line), ink);
+                }
+            }
+            "key-passphrase" => {
+                g.dl.outline(Rect::new(r.x, r.y + 4.0 * s, 8.0 * s, 8.0 * s), ink, 4.0 * s, line);
+                g.dl.rect(Rect::new(r.x + 8.0 * s, r.y + 8.0 * s, 8.0 * s, line), ink);
+                g.dl.rect(Rect::new(r.right() - 3.0 * s, r.y + 8.0 * s, line, 4.0 * s), ink);
+            }
+            _ => {
+                g.dl.outline(Rect::new(r.x + 4.0 * s, r.y, 8.0 * s, 9.0 * s), ink, 3.0 * s, line);
+                g.dl.round_rect(Rect::new(r.x + 2.0 * s, r.y + 6.0 * s, 12.0 * s, 10.0 * s), ink, 2.0 * s);
+            }
+        }
+    }
+
     fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
         let s = self.ui();
@@ -1485,7 +1616,7 @@ impl App {
         let field_text = geo.field.inset((10.0 * s).round(), 0.0);
         let fy = baseline(g, field_text, ui);
         if page.query.is_empty() {
-            g.text(field_text.x, fy, t("Search settings"), ui, theme.text_dim, field_text.w);
+            g.text(field_text.x, fy, if page.searching_vault() { t("Search secrets") } else { t("Search settings") }, ui, theme.text_dim, field_text.w);
         }
         let qw = g.text(field_text.x, fy, &page.query, ui, theme.text, field_text.w);
         let caret_h = (16.0 * s).round();
@@ -1509,7 +1640,10 @@ impl App {
             g.text(inner.x, y, t(crate::settings::PAGES[k]), ui, if current { theme.text } else { theme.text_dim }, inner.w);
         }
         if page.shown.is_empty() {
-            centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), t("No settings match"), ui, theme.text_dim);
+            centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), if page.searching_vault() { t("No secrets match") } else { t("No settings match") }, ui, theme.text_dim);
+            if let Some(dialog) = &page.vault_dialog {
+                self.draw_vault_dialog(g, geo.page, dialog, page.vault.unlocked);
+            }
             return;
         }
         g.dl.set_clip(Some(geo.list));
@@ -1561,42 +1695,29 @@ impl App {
                     let item = page.shown[n];
                     if let Some(vault_row) = page.vault_at(item) {
                         let (label, hint) = vault_row.labels(&page.vault);
-                        let tx = row.rect.x + (14.0 * s).round();
+                        let mut tx = row.rect.x + (14.0 * s).round();
                         let c = row.control;
+                        if let VaultRow::Entry(i) = vault_row {
+                            self.draw_vault_icon(g, tx, row.rect.y + (row.rect.h - 30.0 * s) * 0.5, &page.vault.entries[i].kind);
+                            tx += (40.0 * s).round();
+                        }
                         let tw = (c.x - tx - 16.0 * s).max(0.0);
                         let notice = selected.then(|| page.vault_notice()).flatten();
-                        g.text(tx, row.rect.y + (25.0 * s).round(), label, ui, theme.text, tw);
-                        g.text(tx, row.rect.y + (43.0 * s).round(), notice.unwrap_or(hint), small, if notice.is_some() { theme.accent } else { theme.text_dim }, tw);
-                        let editing = selected && page.editing();
-                        if matches!(vault_row, VaultRow::Entry(_)) {
-                            if selected {
-                                centered(g, c, t("Del to delete"), small, theme.text_dim);
-                            }
-                        } else {
-                            g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
-                            g.dl.outline(c, if selected { theme.accent } else { theme.overlay_border }, radius, line);
-                            if editing || matches!(vault_row, VaultRow::Create | VaultRow::Unlock) {
-                                let inner = c.inset((10.0 * s).round(), 0.0);
-                                let y = baseline(g, inner, ui);
-                                let text = if editing { page.edit_text() } else { String::new() };
-                                let w = if text.is_empty() {
-                                    g.text(inner.x, y, page.vault_placeholder(), ui, theme.text_dim, inner.w);
-                                    0.0
-                                } else {
-                                    g.text(inner.x, y, &text, ui, theme.text, inner.w)
-                                };
-                                if editing {
-                                    g.dl.rect(Rect::new(inner.x + w.min(inner.w) + 1.0, c.y + ((c.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
-                                }
-                            } else {
-                                let button = match vault_row {
-                                    VaultRow::Lock => t("Lock"),
-                                    VaultRow::Change => t("Change"),
-                                    _ => t("Erase"),
-                                };
-                                centered(g, c, button, ui, theme.text);
-                            }
+                        let detail = notice.unwrap_or(hint);
+                        let y = if detail.is_empty() { baseline(g, row.rect, ui) } else { row.rect.y + (25.0 * s).round() };
+                        g.text(tx, y, label, ui, theme.text, tw);
+                        if !detail.is_empty() {
+                            g.text(tx, row.rect.y + (43.0 * s).round(), detail, small, if notice.is_some() { theme.accent } else { theme.text_dim }, tw);
                         }
+                        let button = match vault_row {
+                            VaultRow::Create => t("Set password"),
+                            VaultRow::Unlock => t("Unlock"),
+                            VaultRow::Manage | VaultRow::Entry(_) => t("Actions…"),
+                            VaultRow::Import => t("Import"),
+                        };
+                        g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
+                        g.dl.outline(c, if selected { theme.accent } else { theme.overlay_border }, radius, line);
+                        centered(g, c, button, ui, theme.text);
                         continue;
                     }
                     if let Some(scheme) = page.scheme_at(item) {
@@ -1746,6 +1867,10 @@ impl App {
             g.dl.outline(Rect::new(first.x, first.y, first.w, last.bottom() - first.y), theme.overlay_border, 0.0, line);
         }
         g.dl.set_clip(None);
+        if let Some(dialog) = &page.vault_dialog {
+            self.draw_vault_dialog(g, geo.page, dialog, page.vault.unlocked);
+            return;
+        }
         if page.editor.is_some() || page.group_editor.is_some() {
             self.draw_profile_editor(g, geo.page, page);
             return;

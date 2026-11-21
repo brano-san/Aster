@@ -8,6 +8,10 @@ pub trait Secrets: Send + Sync {
     fn get(&self, key: &str) -> Option<String>;
     fn set(&self, key: &str, value: &str) -> bool;
     fn delete(&self, key: &str);
+
+    fn key_file(&self, fingerprint_or_label: &str) -> Option<String> {
+        self.get(&key_file_key(fingerprint_or_label))
+    }
 }
 
 #[derive(Default)]
@@ -35,8 +39,18 @@ pub fn password_key(user: &str, host: &str, port: u16) -> String {
     format!("ssh:{user}@{host}:{port}")
 }
 
+pub fn key_file_key(fingerprint_or_label: &str) -> String {
+    format!("key-file:{fingerprint_or_label}")
+}
+
 pub fn passphrase_key(path: &Path) -> String {
     format!("key:{}", path.display())
+}
+
+pub fn private_key_fingerprint(encoded: &str) -> Option<String> {
+    PrivateKey::from_openssh(encoded.trim()).ok()
+        .or_else(|| russh::keys::decode_secret_key(encoded, None).ok())
+        .map(|key| key.public_key().fingerprint(HashAlg::Sha256).to_string())
 }
 
 fn fingerprint_key(key: &PublicKey) -> String {

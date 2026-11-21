@@ -5,6 +5,7 @@ mod desktop;
 mod explorer;
 mod fonts;
 mod gl;
+pub mod config_lock;
 mod instance;
 mod pty;
 mod shells;
