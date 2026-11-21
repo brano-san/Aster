@@ -1,11 +1,15 @@
 #![cfg(target_os = "linux")]
 
+mod autostart;
+mod desktop;
+mod explorer;
 mod fonts;
 mod gl;
 mod instance;
 mod pty;
 mod shells;
 mod text;
+mod thunar;
 mod update;
 mod window;
 
@@ -74,8 +78,31 @@ impl Platform for Linux {
         instance::listen(wake)
     }
 
-    fn set_explorer_menu(_label: &str, _enabled: bool) -> bool {
-        false
+    fn set_explorer_menu(label: &str, enabled: bool) -> bool {
+        let apply = || {
+            let data = desktop::xdg_home("XDG_DATA_HOME", ".local/share")?;
+            let config = desktop::xdg_home("XDG_CONFIG_HOME", ".config")?;
+            let executable = if enabled { std::env::current_exe()? } else { PathBuf::new() };
+            explorer::set(&data, &config, &executable, label, enabled)
+        };
+        match apply() {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("file manager menu: {e}");
+                false
+            }
+        }
+    }
+
+    fn update_launcher(profiles: &[String], install: Option<bool>) -> std::io::Result<bool> {
+        let data = desktop::xdg_home("XDG_DATA_HOME", ".local/share")?;
+        desktop::update_launcher(&data, &std::env::current_exe()?, profiles, install)
+    }
+
+    fn set_autostart(enabled: bool, args: &[&str]) -> std::io::Result<()> {
+        let config = desktop::xdg_home("XDG_CONFIG_HOME", ".config")?;
+        let executable = enabled.then(std::env::current_exe).transpose()?;
+        autostart::set(&config, executable.as_deref().map(|path| (path, args)))
     }
 
     fn instance_send(message: &str) -> bool {

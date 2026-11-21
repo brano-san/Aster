@@ -16,7 +16,7 @@ use winit::event_loop::run_on_demand::EventLoopExtRunOnDemand;
 use winit::event_loop::{ActiveEventLoop, AsyncRequestSerial, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle};
 use winit::keyboard::{Key as WinitKey, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::monitor::Fullscreen;
-use winit::platform::x11::WindowAttributesX11;
+use winit::platform::{wayland::WindowAttributesWayland, x11::WindowAttributesX11};
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::window::{ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, ResizeDirection, Theme, UserAttentionType, WindowAttributes};
 
@@ -407,8 +407,13 @@ impl WindowSystem for LinuxWindows {
     }
 
     fn run<H: WindowHandler<Self>>(mut self, first: WindowOptions, handler: H) -> Result<(), PlatformError> {
-        let commands: Commands = Rc::new(RefCell::new(vec![Command::Open(first)]));
-        let mut app = Loop { handler, nodes: Vec::new(), commands, pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None };
+        let (commands, waiting) = if first.visible {
+            (vec![Command::Open(first)], None)
+        } else {
+            (Vec::new(), Some(WindowOptions { visible: true, ..first }))
+        };
+        let commands = Rc::new(RefCell::new(commands));
+        let mut app = Loop { handler, nodes: Vec::new(), commands, waiting, pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None };
         self.event_loop.run_app_on_demand(&mut app).map_err(|e| PlatformError::new(-1, format!("event loop: {e}")))?;
         app.error.map_or(Ok(()), Err)
     }
@@ -424,6 +429,7 @@ struct Loop<H> {
     handler: H,
     nodes: Vec<Node>,
     commands: Commands,
+    waiting: Option<WindowOptions>,
     pastes: HashMap<AsyncRequestSerial, (WindowId, Option<u64>)>,
     pending: Arc<AtomicBool>,
     next_id: WindowId,
@@ -463,7 +469,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
                 }
             }
         }
-        if self.nodes.is_empty() {
+        if self.nodes.is_empty() && self.waiting.is_none() {
             el.exit();
         }
     }
@@ -478,11 +484,19 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
             Some(p) => attrs.with_surface_size(PhysicalSize::new(p.width as u32, p.height as u32)).with_maximized(p.maximized),
             None => attrs.with_surface_size(LogicalSize::new(DEFAULT_SIZE.0, DEFAULT_SIZE.1)),
         };
-        let visual = display().and_then(|d| d.display_handle().ok().map(|h| h.as_raw())).and_then(crate::gl::window_visual);
+        let display = display().and_then(|d| d.display_handle().ok().map(|h| h.as_raw()));
+        let visual = display.and_then(crate::gl::window_visual);
         let translucent = visual.is_some_and(|v| v.transparent);
         attrs = attrs.with_transparent(translucent);
-        if let Some(id) = visual.filter(|v| v.transparent).and_then(|v| v.x11_visual) {
-            attrs = attrs.with_platform_attributes(Box::new(WindowAttributesX11::default().with_x11_visual(id)));
+        let app_id = crate::desktop::APP_ID;
+        if matches!(display, Some(RawDisplayHandle::Wayland(_))) {
+            attrs = attrs.with_platform_attributes(Box::new(WindowAttributesWayland::default().with_name(app_id, app_id)));
+        } else {
+            let mut x11 = WindowAttributesX11::default().with_name(app_id, app_id);
+            if let Some(id) = visual.filter(|v| v.transparent).and_then(|v| v.x11_visual) {
+                x11 = x11.with_x11_visual(id);
+            }
+            attrs = attrs.with_platform_attributes(Box::new(x11));
         }
         let raw: Arc<dyn winit::window::Window> = match el.create_window(attrs) {
             Ok(raw) => Arc::from(raw),
@@ -647,6 +661,9 @@ impl<H: WindowHandler<LinuxWindows>> ApplicationHandler for Loop<H> {
 
     fn proxy_wake_up(&mut self, el: &dyn ActiveEventLoop) {
         self.pending.store(false, Ordering::Release);
+        if self.waiting.is_some() && self.handler.background_woken() {
+            self.commands.borrow_mut().extend(self.waiting.take().map(Command::Open));
+        }
         for node in &self.nodes {
             self.handler.woken(&node.window);
         }

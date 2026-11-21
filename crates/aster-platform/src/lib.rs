@@ -85,6 +85,7 @@ pub struct WindowOptions {
     pub title: String,
     pub placement: Option<Placement>,
     pub dark: bool,
+    pub visible: bool,
 }
 
 pub type WindowId = u64;
@@ -205,6 +206,8 @@ pub trait Platform: 'static {
     fn instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>>;
     fn instance_send(message: &str) -> bool;
     fn set_explorer_menu(label: &str, enabled: bool) -> bool;
+    fn update_launcher(_profiles: &[String], _install: Option<bool>) -> std::io::Result<bool> { Ok(false) }
+    fn set_autostart(enabled: bool, args: &[&str]) -> std::io::Result<()>;
     fn beep() -> bool;
     fn can_elevate() -> bool;
     fn spawn_elevated(req: &SpawnRequest) -> Result<Spawned, PlatformError>;

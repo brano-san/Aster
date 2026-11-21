@@ -34,6 +34,7 @@ fn background_wakes_preserve_the_first_request_and_queue_one_window() {
     let requests = Some(&rx);
     assert!(!queue_background_request(&mut startup, requests));
     tx.send(String::new()).unwrap();
+    tx.send(Request { cwd: None, command: Command::Hidden }.encode()).unwrap();
     let first = Request { cwd: None, command: Command::Profile { name: "Build".into() } };
     let next = Request { cwd: None, command: Command::Window };
     tx.send(first.encode()).unwrap();

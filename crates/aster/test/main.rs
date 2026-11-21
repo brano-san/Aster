@@ -9,6 +9,18 @@ fn placement_round_trips_and_rejects_garbage() {
 }
 
 #[test]
+fn hidden_start_requires_both_the_request_and_a_configured_activation_mode() {
+    let mut config = Config::default();
+    assert!(!starts_hidden(&config, &cli::Command::Hidden));
+    config.appearance.tray = true;
+    assert!(starts_hidden(&config, &cli::Command::Hidden));
+    assert!(!starts_hidden(&config, &cli::Command::Window));
+    config.appearance.tray = false;
+    config.appearance.dock = aster_core::config::Dock::Top;
+    assert!(starts_hidden(&config, &cli::Command::Hidden));
+}
+
+#[test]
 fn portable_mode_requires_a_data_directory_beside_the_executable() {
     let root = std::env::temp_dir().join(format!("aster-portable-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();

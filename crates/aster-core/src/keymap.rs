@@ -85,6 +85,7 @@ pub enum Action {
     OpenConfigFile,
     OpenConfigFolder,
     ShowDefaultConfig,
+    ApplicationsMenu(bool),
     WhatsNew,
     CheckForUpdates,
     ToggleTabBar,

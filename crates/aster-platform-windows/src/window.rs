@@ -694,7 +694,7 @@ impl<H: WindowHandler<Win32>> Shared<H> {
                     }
                 });
             }
-        } else {
+        } else if opts.visible {
             cloak(hwnd, true);
             let _ = ShowWindow(hwnd, if maximized { SW_SHOWMAXIMIZED } else { SW_SHOW });
             update_size(&node.window);
@@ -912,7 +912,7 @@ impl WindowSystem for Win32 {
                 events,
                 tray: crate::tray::Tray::new(self.hub, self.hinst),
                 quit_window: Cell::new(None),
-                new_window: WindowOptions { placement: None, ..first.clone() },
+                new_window: WindowOptions { placement: None, visible: true, ..first.clone() },
                 handler: RefCell::new(handler),
                 nodes: RefCell::default(),
                 dead: RefCell::default(),

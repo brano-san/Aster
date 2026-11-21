@@ -1673,10 +1673,15 @@ impl App {
                             let kx = if on { c.right() - knob - 3.0 * s } else { c.x + 3.0 * s };
                             g.dl.circle(Rect::new(kx.round(), c.y + ((c.h - knob) / 2.0).round(), knob, knob), if on { Color::rgb(0xFFFFFF) } else { theme.text_dim });
                         }
-                        Control::Run(_) => {
+                        Control::Run(action) => {
                             g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
                             g.dl.outline(c, if selected { theme.accent } else { theme.overlay_border }, radius, line);
-                            centered(g, c, t("Open"), ui, theme.text);
+                            let label = match action {
+                                crate::keymap::Action::ApplicationsMenu(true) => t("Add"),
+                                crate::keymap::Action::ApplicationsMenu(false) => t("Remove"),
+                                _ => t("Open"),
+                            };
+                            centered(g, c, label, ui, theme.text);
                         }
                         control => {
                             let editing = selected && page.editing() && matches!(control, Control::Text | Control::StringList | Control::Font { .. } | Control::Number { .. });

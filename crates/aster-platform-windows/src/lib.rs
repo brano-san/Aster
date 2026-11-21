@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+mod autostart;
 mod conpty;
 mod d3d;
 mod elevate;
@@ -103,6 +104,10 @@ impl Platform for Windows {
 
     fn set_explorer_menu(label: &str, enabled: bool) -> bool {
         explorer::set(label, enabled)
+    }
+
+    fn set_autostart(enabled: bool, args: &[&str]) -> std::io::Result<()> {
+        autostart::set(enabled, args)
     }
 
     fn instance_send(message: &str) -> bool {

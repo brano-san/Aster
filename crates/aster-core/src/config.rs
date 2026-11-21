@@ -294,6 +294,7 @@ pub struct CustomScheme {
 #[serde(default, rename_all = "kebab-case")]
 pub struct System {
     pub explorer_menu: bool,
+    pub autostart: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

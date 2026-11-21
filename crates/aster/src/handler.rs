@@ -33,6 +33,7 @@ struct State<P: Platform> {
 }
 
 enum StoreEvent {
+    Launcher(Option<WindowId>, std::io::Result<bool>),
     FontFamilies { monospace: Vec<String>, all: Vec<String> },
     CommandProbe { window: WindowId, request: u64, busy: bool },
     Vault(VaultUpdate),
@@ -58,6 +59,8 @@ impl<W: Waker> StoreEvents<W> {
 }
 
 pub struct Handler<P: Platform> {
+    desktop: crate::desktop::Worker,
+    launcher_installed: Option<bool>,
     font_families: Option<(Vec<String>, Vec<String>)>,
     config: Config,
     profiles: Vec<Profile>,
@@ -112,7 +115,7 @@ fn queue_background_request(startup: &mut Option<crate::cli::Request>, requests:
     if startup.is_some() {
         return false;
     }
-    *startup = requests.and_then(|rx| rx.try_iter().find_map(|text| crate::cli::Request::decode(&text)));
+    *startup = requests.and_then(|rx| rx.try_iter().find_map(|text| crate::cli::Request::decode(&text).filter(|r| r.command != crate::cli::Command::Hidden)));
     startup.is_some()
 }
 
@@ -123,7 +126,7 @@ fn initialize_tabs(app: &mut App, saved: Option<WindowState>, first: bool, comma
     }
     let open_default = match command {
         Some(Command::Paste { .. }) => true,
-        Some(Command::Window) | None => !first || app.config().terminal.open_on_start,
+        Some(Command::Window | Command::Hidden) | None => !first || app.config().terminal.open_on_start,
         _ => false,
     };
     if open_default {
@@ -177,7 +180,12 @@ impl<P: Platform> Handler<P> {
         let pending = if config.terminal.recover_tabs || crate::update::restarted() { saved.windows } else { Vec::new() };
         let update_waker = waker.clone();
         let updates = crate::update::UpdateWorker::start::<P>(Arc::new(move || update_waker.wake()))?;
-        Ok((Self { font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, updates, update_window: None, restarting: false }, worker))
+        let desktop = crate::desktop::Worker::start()?;
+        let launcher_installed = cfg!(target_os = "linux").then_some(false);
+        let handler = Self { desktop, launcher_installed, font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, updates, update_window: None, restarting: false };
+        handler.update_launcher(&handler.config, None);
+        handler.apply_autostart(&handler.config);
+        Ok((handler, worker))
     }
 
     pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
@@ -193,12 +201,13 @@ impl<P: Platform> Handler<P> {
         use crate::cli::Command;
         match request.command {
             Command::Window => return false,
+            Command::Hidden => return true,
             Command::Open { dir } => {
                 if let Some(profile) = app.default_profile() {
                     app.open_tab_at(profile, Some(dir));
                 }
             }
-            Command::Run { command } => app.run_command(&command, request.cwd),
+            Command::Run { command, dir } => app.run_command(&command, dir.or(request.cwd)),
             Command::Profile { name } => match app.find_profile(&name) {
                 Some(profile) => app.open_tab(profile),
                 None => tracing::warn!("no profile named {name}"),
@@ -214,11 +223,11 @@ impl<P: Platform> Handler<P> {
         }
         let incoming: Vec<String> = self.requests.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
         for text in incoming {
-            let Some(request) = crate::cli::Request::decode(&text) else { continue };
+            let Some(request) = crate::cli::Request::decode(&text).filter(|r| r.command != crate::cli::Command::Hidden) else { continue };
             let handled = self.windows.get_mut(&window.id()).is_some_and(|s| Self::serve_request(&mut s.app, request));
             if !handled {
                 let dark = self.windows.get(&window.id()).is_none_or(|s| s.app.is_dark());
-                window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark });
+                window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark, visible: true });
             }
             window.set_visible(true);
             window.activate();
@@ -265,8 +274,14 @@ impl<P: Platform> Handler<P> {
             }
         }
         let explorer = config.system.explorer_menu;
-        if explorer != self.config.system.explorer_menu {
+        if explorer != self.config.system.explorer_menu || (explorer && config.appearance.language != self.config.appearance.language) {
             self.apply_explorer_menu(explorer);
+        }
+        if config.profiles != self.config.profiles {
+            self.update_launcher(&config, None);
+        }
+        if config.system.autostart != self.config.system.autostart || (config.system.autostart && crate::background_mode(&config) != crate::background_mode(&self.config)) {
+            self.apply_autostart(&config);
         }
         if config.appearance != self.config.appearance {
             self.window_prefs_dirty = true;
@@ -275,10 +290,41 @@ impl<P: Platform> Handler<P> {
         self.config = config;
     }
 
-    fn apply_explorer_menu(&self, enabled: bool) {
-        if !P::set_explorer_menu(aster_core::settings::explorer_label(), enabled) && enabled {
-            tracing::warn!("could not add the Explorer menu");
+    fn update_launcher(&self, config: &Config, change: Option<(WindowId, bool)>) {
+        if self.launcher_installed.is_none() || std::env::var_os("ASTER_CAPTURE").is_some() {
+            return;
         }
+        let profiles: Vec<_> = config.profiles.iter().map(|p| p.name.clone()).collect();
+        let events = self.store_events.clone();
+        self.desktop.send(move || {
+            let result = P::update_launcher(&profiles, change.map(|(_, install)| install));
+            events.post(StoreEvent::Launcher(change.map(|(id, _)| id), result));
+        });
+    }
+
+    fn apply_explorer_menu(&self, enabled: bool) {
+        if std::env::var_os("ASTER_CAPTURE").is_some() {
+            return;
+        }
+        let label = aster_core::settings::explorer_label();
+        self.desktop.send(move || {
+            if !P::set_explorer_menu(label, enabled) {
+                tracing::warn!("could not update the file manager menu");
+            }
+        });
+    }
+
+    fn apply_autostart(&self, config: &Config) {
+        if std::env::var_os("ASTER_CAPTURE").is_some() {
+            return;
+        }
+        let enabled = config.system.autostart;
+        let args: &[&str] = if crate::background_mode(config) { &["--hidden"] } else { &[] };
+        self.desktop.send(move || {
+            if let Err(e) = P::set_autostart(enabled, args) {
+                tracing::warn!("autostart: {e}");
+            }
+        });
     }
 
     fn reload_config(&mut self, force: bool) {
@@ -506,6 +552,7 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::CheckConfigFile => self.reload_config(true),
+            Effect::ApplicationsMenu(install) => self.update_launcher(&self.config, Some((id, install))),
             Effect::ShowDefaultConfig => {
                 if let Some(dir) = self.config_path.as_deref().and_then(|p| p.parent()).map(ToOwned::to_owned) {
                     let events = self.store_events.clone();
@@ -533,7 +580,7 @@ impl<P: Platform> Handler<P> {
                 }
                 window.close();
             }
-            Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()) }),
+            Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()), visible: true }),
             Effect::Timer(ms) => window.set_timer(ms),
             Effect::Attention => window.request_attention(),
             Effect::ProbeCommand { request, pids } => {
@@ -711,6 +758,20 @@ impl<P: Platform> Handler<P> {
     fn drain_store(&mut self) {
         while let Ok(event) = self.store_rx.try_recv() {
             match event {
+                StoreEvent::Launcher(window, result) => match result {
+                    Ok(installed) => {
+                        self.launcher_installed = Some(installed);
+                        for state in self.windows.values_mut() {
+                            state.app.set_launcher_installed(installed);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("applications menu: {e}");
+                        if let Some(state) = window.and_then(|id| self.windows.get_mut(&id)) {
+                            state.app.launcher_error(&e.to_string());
+                        }
+                    }
+                },
                 StoreEvent::CommandProbe { window, request, busy } => {
                     if let Some(state) = self.windows.get_mut(&window) {
                         state.app.command_probe_finished(request, Some(busy));
@@ -914,6 +975,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         app.set_viewport(w, h, window.scale());
         app.set_ssh(self.ssh.clone());
         app.set_config_path(self.config_path.as_ref().map(|p| p.to_string_lossy().into_owned()));
+        if let Some(installed) = self.launcher_installed {
+            app.set_launcher_installed(installed);
+        }
         app.set_system_language(&P::ui_language());
         app.vault_state(self.vault_view.clone());
         app.set_cwd_probe(Arc::new(P::process_cwd));
@@ -923,6 +987,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let first = self.windows.is_empty();
         let saved = (!self.pending.is_empty()).then(|| self.pending.remove(0));
         let startup = self.startup.take().filter(|r| r.command != crate::cli::Command::Window);
+        let hidden = startup.as_ref().is_some_and(|r| r.command == crate::cli::Command::Hidden);
         initialize_tabs(&mut app, saved, first, startup.as_ref().map(|r| &r.command));
         if first && !crate::update::restarted() {
             app.check_updates_on_start();
@@ -930,8 +995,10 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         if let Some(request) = startup {
             Self::serve_request(&mut app, request);
         }
-        for _ in 0..std::mem::take(&mut self.pending).len() {
-            window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: app.is_dark() });
+        if first {
+            for _ in &self.pending {
+                window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: app.is_dark(), visible: !hidden });
+            }
         }
         window.set_dark(app.is_dark());
         self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx: Gfx::new(text, ATLAS), renderer: None });
@@ -939,8 +1006,8 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             self.applied = None;
             self.waker.wake();
             self.apply_window_prefs(window);
-            if self.config.system.explorer_menu {
-                self.apply_explorer_menu(true);
+            if self.config.system.explorer_menu || cfg!(target_os = "linux") {
+                self.apply_explorer_menu(self.config.system.explorer_menu);
             }
         }
         window.request_redraw();

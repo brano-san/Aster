@@ -146,7 +146,10 @@ pub const SETTINGS: &[Setting] = &[
     item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run(&Action::OpenLog)),
     item(SYSTEM, "action.open-config-file", "Config file", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
     item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
-    item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add \"Open in Aster\" to the folder menu of Windows Explorer", Control::Toggle),
+    item(SYSTEM, "system.explorer-menu", "File manager menu", "Add \"Open in Aster\" to the context menu for folders", Control::Toggle),
+    item(SYSTEM, "system.autostart", "Start at sign-in", "Launch Aster automatically for your user account", Control::Toggle),
+    item(SYSTEM, "action.install-launcher", "Add to the applications menu", "Create a launcher for Aster and its profiles", Control::Run(&Action::ApplicationsMenu(true))),
+    item(SYSTEM, "action.remove-launcher", "Remove from the applications menu", "Remove the launcher and its icon", Control::Run(&Action::ApplicationsMenu(false))),
     item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run(&Action::ReportProblem)),
     item(CONFIG_FILE, "info.config-path", "File path", "Location of the active configuration", Control::ReadOnly(Info::ConfigPath)),
     item(CONFIG_FILE, "action.edit-config", "Open in the editor", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
@@ -430,6 +433,7 @@ pub struct SettingsPage {
     pub notice: Option<String>,
     pub profiles: Vec<ProfileRow>,
     pub(crate) vault: VaultView,
+    launcher_installed: Option<bool>,
     confirming_vault: Option<VaultRow>,
     pub schemes: Vec<SchemeRow>,
     pub(crate) editor: Option<ProfileEditor>,
@@ -452,7 +456,13 @@ impl SettingsPage {
     pub(crate) fn refilter(&mut self) {
         self.tree = profiles_page::tree(&self.groups, &self.profiles, &self.collapsed, &self.query);
         let base = self.profile_base();
-        let mut shown: Vec<_> = (0..SETTINGS.len()).filter(|&i| item_matches(i, &self.query)).collect();
+        let mut shown: Vec<_> = (0..SETTINGS.len()).filter(|&i| {
+            let available = match SETTINGS[i].control {
+                Control::Run(Action::ApplicationsMenu(install)) => self.launcher_installed == Some(!install),
+                _ => true,
+            };
+            available && item_matches(i, &self.query)
+        }).collect();
         let vault_rows = (0..).map_while(|k| self.vault.row(k).map(|row| (k, row))).filter_map(|(k, row)| {
             let (source, hint) = row.text();
             let (label, detail) = row.labels(&self.vault);
@@ -919,7 +929,7 @@ impl App {
             background: rgb(scheme.palette.background),
             colors: scheme.palette.ansi.map(rgb),
         }).collect();
-        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.profile_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes, vault: self.vault.clone(), ..SettingsPage::default() };
+        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.profile_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes, vault: self.vault.clone(), launcher_installed: self.launcher_installed, ..SettingsPage::default() };
         page.refilter();
         page
     }
@@ -949,6 +959,29 @@ impl App {
     pub fn set_config_status(&mut self, error: Option<String>) {
         self.config_status = Some(error.map_or(Ok(()), Err));
         self.dirty = true;
+    }
+
+    pub fn set_launcher_installed(&mut self, installed: bool) {
+        if self.launcher_installed == Some(installed) {
+            return;
+        }
+        self.launcher_installed = Some(installed);
+        for page in self.settings.iter_mut().chain(self.settings_stash.iter_mut()) {
+            let (selected, scroll) = (page.selected, page.scroll);
+            page.launcher_installed = self.launcher_installed;
+            page.refilter();
+            page.selected = selected.min(page.shown.len().saturating_sub(1));
+            page.scroll = scroll;
+        }
+        self.reveal_selected();
+        self.dirty = true;
+    }
+
+    pub fn launcher_error(&mut self, error: &str) {
+        if let Some(page) = self.settings.as_mut() {
+            page.notice = Some(tf("Could not update the applications menu: {error}", &[("error", error)]));
+            self.dirty = true;
+        }
     }
 
     pub fn settings_file_error(&mut self, error: &str) {

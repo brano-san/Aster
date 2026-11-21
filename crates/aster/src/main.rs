@@ -2,6 +2,7 @@
 
 mod cli;
 mod config_file;
+mod desktop;
 mod handler;
 mod log;
 mod net;
@@ -73,7 +74,15 @@ pub fn log_path<P: Platform>() -> Option<PathBuf> {
     config_dir::<P>().map(|d| d.join("aster.log"))
 }
 
-fn run<P: Platform>(request: cli::Request) -> Result<(), aster_platform::PlatformError> {
+fn starts_hidden(config: &Config, command: &cli::Command) -> bool {
+    *command == cli::Command::Hidden && background_mode(config)
+}
+
+fn background_mode(config: &Config) -> bool {
+    config.appearance.tray || config.appearance.dock != aster_core::config::Dock::Off
+}
+
+fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::PlatformError> {
     let log = log::open(log_path::<P>().as_deref());
     tracing_subscriber::fmt().with_ansi(false).with_writer(move || log.clone()).with_max_level(tracing::Level::INFO).init();
     tracing::info!("Aster {} on {} {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
@@ -87,12 +96,16 @@ fn run<P: Platform>(request: cli::Request) -> Result<(), aster_platform::Platfor
         return Ok(());
     }
     let config = load_config::<P>();
+    let hidden = starts_hidden(&config, &request.command) && std::env::var_os("ASTER_CAPTURE").is_none() && (cfg!(windows) || requests.is_some());
+    if !hidden && request.command == cli::Command::Hidden {
+        request.command = cli::Command::Window;
+    }
     let dark = config.appearance.color_scheme_mode != SchemeMode::Light;
     let placement = state_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| parse_placement(&t));
     let (mut handler, _vault_worker) = handler::Handler::<P>::new(config, waker)
         .map_err(|e| aster_platform::PlatformError::new(0, format!("vault worker: {e}")))?;
-    handler.set_instance(requests, Some(request));
-    let result = windows.run(WindowOptions { title: "Aster".into(), placement, dark }, handler);
+    handler.set_instance(requests, (!hidden || cfg!(windows)).then_some(request));
+    let result = windows.run(WindowOptions { title: "Aster".into(), placement, dark, visible: !hidden }, handler);
     update::relaunch_if_installed();
     result
 }

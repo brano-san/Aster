@@ -221,6 +221,33 @@ fn application_page_opens_the_notes_and_checks_for_updates_in_place() {
 }
 
 #[test]
+fn autostart_is_off_by_default_and_can_be_toggled_from_application_settings() {
+    let mut a = app();
+    assert!(!a.config().system.autostart);
+    a.run(Action::Settings);
+    let page = a.settings.as_mut().unwrap();
+    page.selected = page.shown.iter().position(|&i| SETTINGS[i].key == "system.autostart").unwrap();
+    key(&mut a, Key::Enter);
+    assert!(saved(&mut a).unwrap().system.autostart);
+}
+
+#[test]
+fn applications_menu_shows_only_the_available_launcher_action() {
+    let mut a = app();
+    a.run(Action::Settings);
+    let launcher_action = |app: &App| app.settings.as_ref().unwrap().shown.iter().position(|&i| {
+        matches!(SETTINGS[i].control, Control::Run(Action::ApplicationsMenu(_)))
+    });
+    assert!(launcher_action(&a).is_none());
+    for installed in [false, true] {
+        a.set_launcher_installed(installed);
+        a.settings.as_mut().unwrap().selected = launcher_action(&a).unwrap();
+        key(&mut a, Key::Enter);
+        assert!(a.take_effects().iter().any(|e| matches!(e, Effect::ApplicationsMenu(install) if *install != installed)));
+    }
+}
+
+#[test]
 fn values_are_written_by_path_and_type_checked() {
     let config = set(&Config::default(), "terminal.search-options.regex", Value::Boolean(true)).unwrap();
     assert!(config.terminal.search_options.regex);
@@ -239,16 +266,19 @@ fn numbers_print_without_float_noise() {
 #[test]
 fn the_query_filters_by_every_word_across_label_hint_and_section() {
     let mut page = SettingsPage::new();
-    let mut listed = 0;
-    for (k, name) in PAGES.iter().enumerate() {
-        page.show_page(k);
-        assert!(page.shown.iter().all(|&i| page.section(i) == *name), "{name} shows only its own items");
-        listed += page.shown.iter().filter(|&&i| i < SETTINGS.len()).count();
-        if *name == SHORTCUTS {
-            assert!(page.shown.iter().any(|&i| shortcut(i).is_some()), "shortcuts have their page");
+    let mut listed = std::collections::BTreeSet::new();
+    for installed in [None, Some(false), Some(true)] {
+        page.launcher_installed = installed;
+        for (k, name) in PAGES.iter().enumerate() {
+            page.show_page(k);
+            assert!(page.shown.iter().all(|&i| page.section(i) == *name), "{name} shows only its own items");
+            listed.extend(page.shown.iter().copied().filter(|&i| i < SETTINGS.len()));
+            if *name == SHORTCUTS {
+                assert!(page.shown.iter().any(|&i| shortcut(i).is_some()), "shortcuts have their page");
+            }
         }
     }
-    assert_eq!(listed, SETTINGS.len(), "every setting is on some page");
+    assert_eq!(listed.len(), SETTINGS.len(), "every setting is on some page");
     page.query = "dock top".into();
     page.refilter();
     let keys: Vec<_> = page.shown.iter().map(|&i| SETTINGS[i].key).collect();
