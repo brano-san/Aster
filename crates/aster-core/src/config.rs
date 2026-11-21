@@ -181,6 +181,24 @@ pub enum TabBar {
     Never,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabWidth {
+    #[default]
+    Fit,
+    Fixed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabBarPosition {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Appearance {
@@ -203,6 +221,12 @@ pub struct Appearance {
     pub global_hotkey: String,
     pub language: String,
     pub tab_bar: TabBar,
+    pub tab_index: bool,
+    pub tab_close_buttons: bool,
+    pub tabs_in_fullscreen: bool,
+    pub tab_width: TabWidth,
+    pub tab_bar_position: TabBarPosition,
+    pub mru_tabs: bool,
 }
 
 impl Default for Appearance {
@@ -227,6 +251,12 @@ impl Default for Appearance {
             global_hotkey: "Ctrl-`".into(),
             language: "auto".into(),
             tab_bar: TabBar::Always,
+            tab_index: false,
+            tab_close_buttons: true,
+            tabs_in_fullscreen: false,
+            tab_width: TabWidth::Fit,
+            tab_bar_position: TabBarPosition::Top,
+            mru_tabs: false,
         }
     }
 }

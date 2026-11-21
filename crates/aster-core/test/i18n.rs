@@ -208,9 +208,12 @@ fn every_label_drawn_from_constants_has_a_russian_entry() {
     }
     texts.extend(Action::all().filter(|a| !matches!(a, Action::Tab(_))).map(|a| a.source_label()));
     let mut a = app();
-    a.open_default_tab();
+    a.open_tab(crate::profile::Profile::new("local:test", "Shell", "shell", &[]));
     a.open_tab_menu(0, 10.0, 10.0);
     let mut menus = a.menu.take().expect("tab menu").entries;
+    a.run(Action::PinTab);
+    a.open_tab_menu(0, 10.0, 10.0);
+    menus.extend(a.menu.take().expect("pinned tab menu").entries);
     a.open_terminal_menu(10.0, 10.0);
     menus.extend(a.menu.take().expect("terminal menu").entries);
     texts.extend(menus.into_iter().filter_map(|e| if let Entry::Item { label, .. } = e { Some(label.to_owned()) } else { None }));

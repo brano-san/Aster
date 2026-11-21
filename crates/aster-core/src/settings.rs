@@ -46,6 +46,8 @@ const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("
 const BELLS: &[(&str, &str)] = &[("off", "Off"), ("visual", "Flash the pane"), ("audible", "System sound")];
 const IDENTIFICATION: &[(&str, &str)] = &[("aster", "Aster"), ("xterm", "Compatibility")];
 const TAB_BARS: &[(&str, &str)] = &[("always", "Always"), ("auto", "With two or more tabs"), ("never", "Never")];
+const TAB_WIDTHS: &[(&str, &str)] = &[("fit", "Fit"), ("fixed", "Fixed")];
+const TAB_POSITIONS: &[(&str, &str)] = &[("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
 const BACKDROPS: &[(&str, &str)] = &[("none", "None"), ("acrylic", "Acrylic"), ("mica", "Mica")];
 const SSH_CLIENTS: &[(&str, &str)] = &[("native", "Built in"), ("system", "System OpenSSH")];
 const LANGUAGES: &[(&str, &str)] = &[("auto", "Automatic"), ("en", "English"), ("ru", "Russian")];
@@ -88,6 +90,12 @@ pub const SETTINGS: &[Setting] = &[
     item(APPEARANCE, "terminal.fallback-font", "Fallback font", "Font to try for missing terminal characters before system fallback", Control::Text),
     item(APPEARANCE, "terminal.ligatures", "Font ligatures", "Allow the terminal font to join adjacent characters", Control::Toggle),
     item(APPEARANCE, "appearance.tab-bar", "Tab bar", "Hide the tab bar and window buttons to leave only the terminal; Ctrl+Shift+B toggles it", Control::Choice(TAB_BARS)),
+    item(APPEARANCE, "appearance.tab-index", "Show tab numbers", "Display the tab number before its title", Control::Toggle),
+    item(APPEARANCE, "appearance.tab-close-buttons", "Show close buttons on tabs", "Show a close button on unpinned tabs", Control::Toggle),
+    item(APPEARANCE, "appearance.tabs-in-fullscreen", "Keep the tab bar in full screen", "Use the usual tab bar visibility in full screen", Control::Toggle),
+    item(APPEARANCE, "appearance.tab-width", "Tab width", "Choose the width of horizontal tabs", Control::Choice(TAB_WIDTHS)),
+    item(APPEARANCE, "appearance.tab-bar-position", "Tab bar position", "Choose the edge of the window for the tab bar", Control::Choice(TAB_POSITIONS)),
+    item(APPEARANCE, "appearance.mru-tabs", "Switch tabs in order of recent use", "Hold Ctrl and press Tab to choose a recently used tab", Control::Toggle),
     item(APPEARANCE, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
     item(APPEARANCE, "appearance.animations", "Animations", "Show tab name toasts, visual bells and cursor blink", Control::Toggle),
     item(APPEARANCE, "appearance.last-tab-closes-window", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),
@@ -727,8 +735,8 @@ impl App {
         match self.tabs.iter().position(|t| t.focus == SETTINGS_PANE) {
             Some(i) => self.active = i,
             None => {
-                let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
-                self.tabs.insert(at, Tab { root: crate::panes::Node::Leaf(SETTINGS_PANE), focus: SETTINGS_PANE, zoomed: None, title: None, color: None });
+                let at = self.tab_insert_index(false);
+                self.tabs.insert(at, Tab::new(crate::panes::Node::Leaf(SETTINGS_PANE), SETTINGS_PANE));
                 self.active = at;
             }
         }

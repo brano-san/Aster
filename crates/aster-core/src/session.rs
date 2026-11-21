@@ -22,6 +22,8 @@ pub struct WindowState {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TabState {
+    #[serde(default)]
+    pub pinned: bool,
     pub root: NodeState,
     pub focus: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,7 +88,7 @@ impl App {
         let t = self.tabs.get(index)?;
         let root = self.node_state(&t.root)?;
         let focus = t.root.panes().iter().position(|p| *p == t.focus).unwrap_or(0);
-        Some(TabState { root, focus, title: t.title.clone(), color: t.color.clone() })
+        Some(TabState { root, focus, title: t.title.clone(), color: t.color.clone(), pinned: t.pinned })
     }
 
     pub fn session_snapshot(&self) -> WindowState {
@@ -94,8 +96,17 @@ impl App {
     }
 
     pub fn snapshot(&self) -> WindowState {
-        let tabs = (0..self.tabs.len()).filter_map(|i| self.tab_state(i)).collect::<Vec<_>>();
-        WindowState { active: self.active.min(tabs.len().saturating_sub(1)), tabs }
+        let mut tabs = Vec::new();
+        let mut active = 0;
+        for index in 0..self.tabs.len() {
+            if let Some(tab) = self.tab_state(index) {
+                if index <= self.active {
+                    active = tabs.len();
+                }
+                tabs.push(tab);
+            }
+        }
+        WindowState { active, tabs }
     }
 
     pub(crate) fn build(&mut self, state: &NodeState) -> Node {
@@ -127,9 +138,13 @@ impl App {
             let root = self.build(&tab.root);
             let order = root.panes();
             let focus = order.get(tab.focus).or(order.first()).copied().unwrap_or(0);
-            self.tabs.push(Tab { root, focus, zoomed: None, title: tab.title.clone(), color: tab.color.clone() });
+            self.tabs.push(Tab { title: tab.title.clone(), color: tab.color.clone(), pinned: tab.pinned, ..Tab::new(root, focus) });
         }
         self.active = state.active.min(self.tabs.len().saturating_sub(1));
+        if let Some(focus) = self.focused_pane() {
+            self.tabs.sort_by_key(|t| !t.pinned);
+            self.active = self.tabs.iter().position(|t| t.focus == focus).unwrap_or(0);
+        }
         self.dirty = true;
         !self.tabs.is_empty()
     }

@@ -33,18 +33,20 @@ pub struct SearchGeometry {
 }
 
 pub fn geometry(pane: Rect, s: f32) -> SearchGeometry {
-    let w = (380.0 * s).min(pane.w - 16.0 * s).max(160.0 * s).round();
-    let h = (34.0 * s).round();
-    let frame = Rect::new((pane.right() - w - 8.0 * s).round(), (pane.y + 8.0 * s).round(), w, h);
-    let b = (26.0 * s).round();
-    let pad = ((h - b) / 2.0).round();
+    let margin = (8.0 * s).round().min(pane.w / 8.0).min(pane.h / 8.0);
+    let w = (380.0 * s).round().min(pane.w - 2.0 * margin);
+    let h = (34.0 * s).round().min(pane.h - 2.0 * margin);
+    let frame = Rect::new(pane.right() - w - margin, pane.y + margin, w, h);
+    let control_scale = s.min(w / 250.0);
+    let b = (26.0 * control_scale).round().min(h);
+    let pad = (4.0 * control_scale).round();
     let order = [SearchHit::Close, SearchHit::Newer, SearchHit::Older, SearchHit::Word, SearchHit::Regex, SearchHit::Case];
     let mut buttons = [(SearchHit::Close, Rect::default()); 6];
     let mut x = frame.right() - pad;
     for (i, hit) in order.into_iter().enumerate() {
         x -= b;
-        buttons[i] = (hit, Rect::new(x, frame.y + pad, b, b));
-        x -= if i == 2 { 8.0 * s } else { 2.0 * s };
+        buttons[i] = (hit, Rect::new(x, frame.y + (h - b) / 2.0, b, b));
+        x -= if i == 2 { 8.0 * control_scale } else { 2.0 * control_scale };
     }
     let field = Rect::new(frame.x + (10.0 * s).round(), frame.y, (x - frame.x - 14.0 * s).max(0.0), h);
     SearchGeometry { frame, field, buttons }

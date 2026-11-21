@@ -8,10 +8,10 @@ use std::sync::Arc;
 fn app(tabs: usize) -> App {
     let mut a = App::new(Config::default(), vec![Profile::new("local:a", "Shell", "a.exe", &[])], true, None, Arc::new(|| {}));
     a.set_viewport(1000, 700, 1.0);
-    a.chrome = crate::view::chrome(1000.0, 700.0, 1.0, tabs);
     for _ in 0..tabs {
         a.open_default_tab();
     }
+    a.chrome = a.tab_chrome();
     a.take_effects();
     a
 }
@@ -125,8 +125,330 @@ fn administrator_tabs_need_support_and_a_local_shell() {
     assert_eq!(b.tab_count(), 1, "remote tabs are not elevated");
 }
 
+#[test]
+fn pinning_preserves_order_focus_and_the_window_title() {
+    let mut a = app(4);
+    for (i, title) in ["A", "B", "C", "D"].into_iter().enumerate() {
+        a.tabs[i].title = Some(title.to_owned());
+    }
+    a.run(Action::PinTab);
+    a.activate(2);
+    a.run(Action::PinTab);
+    assert_eq!((a.active, a.tab_title(0), a.tab_title(1)), (1, "D".into(), "B".into()));
+    a.run(Action::MoveTabRight);
+    assert_eq!(a.active, 1);
+    a.mark_drawn();
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Title(title) if title == "B")));
+    a.activate(0);
+    a.open_default_tab();
+    assert_eq!(a.active, 2);
+    a.activate(0);
+    a.run(Action::PinTab);
+    assert_eq!((a.active, a.tab_title(0), a.tab_title(1)), (1, "B".into(), "D".into()));
+    assert!(a.tabs[0].pinned && !a.tabs[1].pinned);
+}
+
+#[test]
+fn pinned_tabs_survive_group_closes_and_ask_before_individual_close() {
+    for action in [Action::CloseTabsToLeft, Action::CloseTabsToRight, Action::CloseOtherTabs] {
+        let mut a = app(4);
+        a.run(Action::PinTab);
+        let id = a.tabs[0].focus;
+        a.activate(2);
+        a.run(action);
+        assert_eq!(a.tabs[0].focus, id);
+        assert!(a.close_confirm().is_none());
+        a.activate(0);
+        key(&mut a, Key::Char('W'), Mods { ctrl: true, shift: true, ..Mods::NONE });
+        assert!(a.close_confirm().is_some());
+        key(&mut a, Key::Escape, Mods::NONE);
+        assert_eq!(a.tabs[0].focus, id);
+        a.run(Action::CloseTab);
+        key(&mut a, Key::Enter, Mods::NONE);
+        assert!(a.tabs.iter().all(|t| t.focus != id));
+        a.run(Action::ReopenTab);
+        assert!(a.tabs[0].pinned);
+        assert_eq!(a.active, 0);
+    }
+}
+
+#[test]
+fn pinned_tabs_round_trip_and_older_sessions_default_to_unpinned() {
+    let mut a = app(3);
+    a.run(Action::PinTab);
+    a.activate(1);
+    let json = serde_json::to_value(a.snapshot()).unwrap();
+    assert_eq!(json["tabs"][0]["pinned"], true);
+    let mut legacy = json.clone();
+    for tab in legacy["tabs"].as_array_mut().unwrap() {
+        tab.as_object_mut().unwrap().remove("pinned");
+    }
+    for (value, pinned) in [(json, true), (legacy, false)] {
+        let mut b = app(0);
+        assert!(b.restore(&serde_json::from_value(value).unwrap()));
+        assert_eq!((b.tabs[0].pinned, b.active), (pinned, 1));
+    }
+}
+
+#[test]
+fn fullscreen_visibility_respects_the_setting_and_restores_the_bar() {
+    let mut a = app(2);
+    a.set_fullscreen(true);
+    assert!(a.tab_bar_hidden());
+    a.run(Action::ToggleTabBar);
+    assert!(a.tab_bar_hidden());
+    a.set_fullscreen(false);
+    assert!(!a.tab_bar_hidden());
+    let mut config = a.config().clone();
+    config.appearance.tabs_in_fullscreen = true;
+    a.set_config(config.clone());
+    a.set_fullscreen(true);
+    assert!(!a.tab_bar_hidden());
+    config.appearance.tab_bar = crate::config::TabBar::Never;
+    a.set_config(config);
+    assert!(a.tab_bar_hidden());
+}
+
+#[test]
+fn closing_the_last_tab_can_keep_its_window_for_another_profile() {
+    let mut a = app(1);
+    let old = a.tabs[0].focus;
+    let mut config = a.config().clone();
+    config.appearance.last_tab_closes_window = false;
+    a.set_config(config);
+    a.run(Action::CloseTab);
+    assert!(a.tabs.is_empty());
+    assert!(a.overlay.is_none(), "the start page shows instead of a picker");
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
+    key(&mut a, Key::Enter, Mods::NONE);
+    assert_eq!(a.tabs.len(), 1);
+    assert_ne!(a.tabs[0].focus, old);
+    a.set_config(Config::default());
+    a.run(Action::CloseTab);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
+}
+
 fn alt() -> Mods {
     Mods { alt: true, ..Mods::NONE }
+}
+
+fn encloses(outer: Rect, inner: Rect) -> bool {
+    inner.x >= outer.x && inner.y >= outer.y && inner.right() <= outer.right() && inner.bottom() <= outer.bottom()
+}
+
+#[test]
+fn each_bar_position_separates_panes_tabs_and_caption_buttons() {
+    use crate::input::HitArea;
+    use TabBarPosition::*;
+    let mut a = app(3);
+    for position in [Top, Bottom, Left, Right] {
+        a.config.appearance.tab_bar_position = position;
+        a.set_viewport(1100, 700, 1.25);
+        a.chrome = a.tab_chrome();
+        let c = &a.chrome;
+        let viewport = Rect::new(0.0, 0.0, 1100.0, 700.0);
+        let center = |r: Rect| (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert!(encloses(viewport, c.content) && encloses(viewport, c.tab_bar));
+        match position {
+            Top => assert_eq!(c.tab_bar.bottom(), c.content.y),
+            Bottom => assert_eq!(c.content.bottom(), c.tab_bar.y),
+            Left => assert_eq!((c.tab_bar.w, c.tab_bar.right()), (275.0, c.content.x)),
+            Right => assert_eq!((c.tab_bar.w, c.tab_bar.x), (275.0, c.content.right())),
+        }
+        if position != Top {
+            assert_eq!(c.caption.h, 40.0);
+            assert_eq!(c.content.y, c.caption.bottom());
+        }
+        let (x, y) = if position == Top { (c.plus.right() + 1.0, 4.0) } else { center(c.caption) };
+        assert_eq!(a.hit_test(x, y), HitArea::Caption);
+        for (r, area) in [(c.min, HitArea::Minimize), (c.max, HitArea::Maximize), (c.close, HitArea::Close)] {
+            assert!(encloses(c.caption, r));
+            let (x, y) = center(r);
+            assert_eq!(a.hit_test(x, y), area);
+        }
+        assert!(encloses(c.tab_bar, c.plus));
+        for slot in &c.tabs {
+            assert!(slot.rect.w > 0.0 && encloses(c.tab_bar, slot.rect) && encloses(slot.rect, slot.close));
+            let (x, y) = center(slot.rect);
+            assert_eq!(a.hit_test(x, y), HitArea::Client);
+        }
+        let last = c.tabs.last().unwrap().rect;
+        assert!(if c.vertical { last.bottom() <= c.plus.y } else { last.right() <= c.plus.x });
+    }
+}
+
+#[test]
+fn fixed_width_shrinks_to_fit_and_pins_keep_their_compact_slot() {
+    let mut a = app(3);
+    a.tabs[0].pinned = true;
+    let fit = a.tab_chrome();
+    assert_eq!(fit.tabs[1].rect.w, 220.0);
+    a.config.appearance.tab_width = TabWidth::Fixed;
+    let fixed = a.tab_chrome();
+    assert_eq!((fixed.tabs[0].rect.w, fixed.tabs[1].rect.w, fixed.tabs[2].rect.w), (48.0, 200.0, 200.0));
+    assert_eq!(fixed.tabs[0].close.w, 0.0);
+    a.set_viewport(480, 350, 1.0);
+    let narrow = a.tab_chrome();
+    assert_eq!(narrow.tabs[0].rect.w, 48.0);
+    assert!((84.0..200.0).contains(&narrow.tabs[1].rect.w));
+    assert_eq!(narrow.tabs[1].rect.w, narrow.tabs[2].rect.w);
+    for _ in 0..12 {
+        a.open_default_tab();
+    }
+    let many = a.tab_chrome();
+    assert_eq!(many.tabs[0].rect.w, 48.0);
+    assert_eq!(many.tabs[a.active].rect.w, 84.0);
+    assert!(many.plus.right() <= many.min.x);
+}
+
+#[test]
+fn disabled_close_buttons_leave_the_slot_clickable_and_middle_click_still_closes() {
+    let mut a = app(2);
+    let old = a.chrome.tabs[0].close;
+    a.config.appearance.tab_close_buttons = false;
+    a.chrome = a.tab_chrome();
+    assert!(a.chrome.tabs.iter().all(|slot| slot.close.w == 0.0));
+    let (x, y) = (old.x + 1.0, old.y + 1.0);
+    a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+    a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+    assert_eq!((a.active, a.tabs.len()), (0, 2));
+    a.on_event(Event::MouseDown { x, y, button: MouseButton::Middle, clicks: 1 });
+    assert_eq!(a.tabs.len(), 1);
+}
+
+#[test]
+fn numbered_and_pinned_tab_labels_preserve_the_full_window_title() {
+    let mut a = app(2);
+    a.tabs[1].title = Some("Build output".into());
+    assert_eq!(a.tab_label(1), "Build output");
+    a.config.appearance.tab_index = true;
+    assert_eq!(a.tab_label(1), "2  Build output");
+    a.toggle_pin();
+    a.config.appearance.tab_index = false;
+    assert_eq!(a.tab_label(0), "1");
+    a.mark_drawn();
+    assert!(a.take_effects().iter().any(|effect| matches!(effect, Effect::Title(text) if text == "Build output")));
+}
+
+#[test]
+fn dragging_sidebar_tabs_uses_the_vertical_axis_and_respects_pins() {
+    let mut a = app(3);
+    a.config.appearance.tab_bar_position = TabBarPosition::Right;
+    a.tabs[0].pinned = true;
+    a.chrome = a.tab_chrome();
+    let tab = a.tabs[2].focus;
+    let (last, before, pin) = (a.chrome.tabs[2].rect, a.chrome.tabs[1].rect, a.chrome.tabs[0].rect);
+    let x = last.x + 12.0;
+    a.on_event(Event::MouseDown { x, y: last.y + 10.0, button: MouseButton::Left, clicks: 1 });
+    a.on_event(Event::MouseMove { x: x + 30.0, y: last.y + 10.0 });
+    assert_eq!(a.active, 2);
+    a.on_event(Event::MouseMove { x, y: before.y + 10.0 });
+    assert_eq!((a.active, a.tabs[1].focus), (1, tab));
+    a.on_event(Event::MouseMove { x, y: pin.y + 10.0 });
+    assert_eq!((a.active, a.tabs[1].focus), (1, tab));
+}
+
+#[test]
+fn search_controls_stay_inside_a_narrow_pane_beside_the_tab_bar() {
+    let mut a = app(1);
+    a.config.appearance.tab_bar_position = TabBarPosition::Left;
+    a.set_viewport(360, 260, 1.0);
+    let content = a.tab_chrome().content;
+    let pane = Rect::new(content.x, content.y, content.w / 2.0, content.h);
+    let search = crate::search::geometry(pane, 1.0);
+    assert!(encloses(pane, search.frame));
+    assert!(search.buttons.iter().all(|(_, button)| encloses(search.frame, *button)));
+}
+
+#[test]
+fn mru_walk_wraps_both_ways_and_updates_history_only_on_visit() {
+    let mut mru = MruTabs::default();
+    for key in [11, 22, 33, 11] {
+        mru.visit(key);
+    }
+    let live = [11, 22, 33, 44];
+    mru.step(&live, true);
+    assert_eq!(mru.selection(), Some(([11, 33, 22, 44].as_slice(), 3)));
+    mru.step(&live, false);
+    mru.step(&live, false);
+    mru.visit(11);
+    assert_eq!(mru.finish(), Some(33));
+    mru.visit(33);
+    mru.step(&live, false);
+    assert_eq!(mru.finish(), Some(11));
+    mru.step(&live, true);
+    mru.remove(44);
+    assert_eq!(mru.selection(), None);
+}
+
+#[test]
+fn mru_shortcuts_commit_on_ctrl_release_and_keep_tab_identity() {
+    let mut a = app(4);
+    let ctrl = Mods { ctrl: true, ..Mods::NONE };
+    let reverse = Mods { shift: true, ..ctrl };
+    let mut config = a.config().clone();
+    config.appearance.mru_tabs = true;
+    a.set_config(config);
+    a.activate(0);
+    a.activate(2);
+    let from = a.tabs[2].key;
+    let previous = a.tabs[0].key;
+    a.run(Action::SplitRight);
+    a.run(Action::MoveTabRight);
+    key(&mut a, Key::Tab, ctrl);
+    a.on_event(Event::Char('\t'));
+    assert_eq!(a.tabs[a.active].key, from);
+    assert!(a.mru.selection().is_some_and(|(order, i)| order[i] == previous));
+    key(&mut a, Key::Tab, ctrl);
+    key(&mut a, Key::Tab, reverse);
+    a.on_event(Event::Key { key: Key::Tab, mods: ctrl, pressed: false });
+    assert_eq!(a.tabs[a.active].key, from);
+    a.on_event(Event::Key { key: Key::Control, mods: Mods::NONE, pressed: false });
+    assert_eq!(a.tabs[a.active].key, previous);
+    assert_eq!(a.mru.selection(), None);
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Write { .. })));
+    key(&mut a, Key::Tab, ctrl);
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert_eq!(a.tabs[a.active].key, from);
+    key(&mut a, Key::Tab, ctrl);
+    a.on_event(Event::Focus(false));
+    assert_eq!(a.mru.selection(), None);
+}
+
+#[test]
+fn mru_defaults_follow_the_setting_and_respect_custom_shortcuts() {
+    let mut a = app(3);
+    a.activate(0);
+    let ctrl = Mods { ctrl: true, ..Mods::NONE };
+    key(&mut a, Key::Tab, ctrl);
+    assert_eq!((a.active, a.mru.selection()), (1, None));
+    let mut config = a.config().clone();
+    config.appearance.mru_tabs = true;
+    config.hotkeys.insert(Action::Tab(3).id(), vec!["Ctrl-Tab".into()]);
+    config.hotkeys.insert(Action::NextMruTab.id(), vec!["F8".into()]);
+    a.set_config(config);
+    key(&mut a, Key::Tab, ctrl);
+    assert_eq!((a.active, a.mru.selection()), (2, None));
+    key(&mut a, Key::F(8), Mods::NONE);
+    assert_eq!((a.active, a.mru.selection()), (1, None));
+}
+
+#[test]
+fn mru_shortcuts_can_be_cleared_and_restored_in_settings() {
+    let mut a = app(1);
+    let mut config = a.config().clone();
+    config.appearance.mru_tabs = true;
+    a.set_config(config);
+    a.run(Action::Settings);
+    let page = a.settings.as_mut().unwrap();
+    page.show_page(crate::settings::PAGES.iter().position(|p| *p == crate::settings::SHORTCUTS).unwrap());
+    page.selected = page.shown.iter().position(|&i| crate::settings::shortcut(i) == Some(Action::NextMruTab)).unwrap();
+    assert_eq!(a.shortcut_text(Action::NextMruTab), "Ctrl-Tab");
+    key(&mut a, Key::Delete, Mods::NONE);
+    assert_eq!(a.keymap.bindings_of(Action::NextMruTab).count(), 0);
+    key(&mut a, Key::Delete, Mods { shift: true, ..Mods::NONE });
+    assert_eq!(a.shortcut_text(Action::NextMruTab), "Ctrl-Tab");
+    assert_eq!(a.shortcut_text(Action::NextTab), "Ctrl-Shift-Right");
 }
 
 #[test]

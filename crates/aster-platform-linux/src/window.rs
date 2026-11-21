@@ -255,7 +255,8 @@ pub(crate) fn map_key(physical: PhysicalKey, unmodified: &WinitKey) -> Key {
             NamedKey::Insert => Some(Key::Insert),
             NamedKey::Tab => Some(Key::Tab),
             NamedKey::ContextMenu => Some(Key::Apps),
-            NamedKey::Control | NamedKey::Shift | NamedKey::Alt | NamedKey::Meta | NamedKey::AltGraph => Some(Key::Other),
+            NamedKey::Control => Some(Key::Control),
+            NamedKey::Shift | NamedKey::Alt | NamedKey::Meta | NamedKey::AltGraph => Some(Key::Other),
             other => function_key(other),
         };
         if let Some(k) = key {

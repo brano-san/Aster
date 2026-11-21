@@ -181,7 +181,7 @@ fn keys_do_not_reach_the_terminal_while_settings_are_open() {
 fn moving_the_selection_scrolls_it_into_view() {
     let mut a = app();
     a.set_viewport(1000, 360, 1.0);
-    a.chrome = crate::view::chrome(1000.0, 360.0, 1.0, 1);
+    a.chrome = a.tab_chrome();
     a.run(Action::Settings);
     let rows = a.settings.as_ref().unwrap().shown.len();
     for _ in 0..rows {
@@ -198,7 +198,7 @@ fn moving_the_selection_scrolls_it_into_view() {
 #[test]
 fn clicking_a_switch_row_toggles_it() {
     let mut a = app();
-    a.chrome = crate::view::chrome(1000.0, 700.0, 1.0, 1);
+    a.chrome = a.tab_chrome();
     a.run(Action::Settings);
     typed(&mut a, "copy on select");
     let row = a.settings_geometry().unwrap().rows.into_iter().find(|r| matches!(r.kind, RowKind::Item(_))).unwrap();
@@ -527,7 +527,8 @@ fn partial_scheme_name_is_searchable_from_another_page() {
 #[test]
 fn opening_color_scheme_page_selects_and_reveals_current_scheme() {
     let mut a = app();
-    a.chrome = crate::view::chrome(1000.0, 360.0, 1.0, 1);
+    a.set_viewport(1000, 360, 1.0);
+    a.chrome = a.tab_chrome();
     let name = a.scheme_names().pop().unwrap();
     let mut config = a.config().clone();
     config.appearance.color_scheme = name.to_lowercase();
@@ -552,7 +553,7 @@ fn opening_color_scheme_page_selects_and_reveals_current_scheme() {
 #[test]
 fn clicking_a_scheme_updates_only_the_active_light_mode() {
     let mut a = app();
-    a.chrome = crate::view::chrome(1000.0, 700.0, 1.0, 1);
+    a.chrome = a.tab_chrome();
     let mut config = a.config().clone();
     config.appearance.color_scheme_mode = crate::config::SchemeMode::Light;
     let name = a.scheme_names().pop().unwrap();

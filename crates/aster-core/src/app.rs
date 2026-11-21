@@ -102,6 +102,7 @@ pub enum Effect {
     NewWindow,
     Timer(u32),
     Attention,
+    ProbeCommand { request: u64, pids: Vec<u32> },
     Beep,
     Surface(crate::config::Backdrop),
     Progress(Option<Progress>),
@@ -135,11 +136,22 @@ pub(crate) struct Pane {
 }
 
 pub(crate) struct Tab {
+    pub key: u64,
+    pub command_watch: crate::close::CommandWatch,
+    pub pinned: bool,
     pub root: Node,
     pub focus: PaneId,
     pub zoomed: Option<PaneId>,
     pub title: Option<String>,
     pub color: Option<String>,
+}
+
+impl Tab {
+    pub(crate) fn new(root: Node, focus: PaneId) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self { key: NEXT.fetch_add(1, Ordering::Relaxed), root, focus, zoomed: None, title: None, color: None, pinned: false, command_watch: Default::default() }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,7 +160,7 @@ pub(crate) enum Drag {
     Select { pane: PaneId },
     Report { pane: PaneId, button: MouseButton },
     Splitter { path: Vec<bool>, axis: Axis, span: Rect },
-    Tab { index: usize, start_x: f32, moved: bool },
+    Tab { index: usize, start: f32, moved: bool },
     Button(HitArea),
     TabClose(usize),
     Plus,
@@ -221,18 +233,20 @@ pub struct App {
     mouse_mods: Mods,
     pub(crate) closed_tabs: Vec<crate::session::TabState>,
     last_tab: Option<PaneId>,
+    pub(crate) mru: crate::tabs::MruTabs,
     current_tab: Option<PaneId>,
     pub(crate) broadcast: Option<Broadcast>,
     pub(crate) recent: Vec<String>,
     pub(crate) start_selected: usize,
     pub(crate) tab_bar_override: Option<bool>,
+    fullscreen: bool,
     pub(crate) tab_toast: Option<(String, Instant)>,
     pub(crate) settings_stash: Option<crate::settings::SettingsPage>,
     pub(crate) shown_progress: Option<Progress>,
     swallow_control: bool,
     pub(crate) blink_on: bool,
     blink_since: Instant,
-    blink_armed: bool,
+    timer_due: Option<Instant>,
     pub(crate) metrics: Option<Metrics>,
     pub(crate) layout: Layout,
     pub(crate) chrome: Chrome,
@@ -248,7 +262,7 @@ impl App {
         let mut profiles = detected.clone();
         profiles.extend(config.profiles.iter().cloned());
         let (sender, events) = channel();
-        let keymap = Keymap::new(&config.hotkeys);
+        let keymap = Keymap::with_mru(&config.hotkeys, config.appearance.mru_tabs);
         let mut app = App {
             vault: crate::settings::VaultView { configured: !config.vault.sealed.is_empty(), ..Default::default() },
             vault_input_id: 0,
@@ -308,18 +322,20 @@ impl App {
             mouse_mods: Mods::NONE,
             closed_tabs: Vec::new(),
             last_tab: None,
+            mru: crate::tabs::MruTabs::default(),
             current_tab: None,
             broadcast: None,
             recent: Vec::new(),
             start_selected: 0,
             tab_bar_override: None,
+            fullscreen: false,
             tab_toast: None,
             settings_stash: None,
             shown_progress: None,
             swallow_control: false,
             blink_on: true,
             blink_since: Instant::now(),
-            blink_armed: false,
+            timer_due: None,
             metrics: None,
             layout: Layout::default(),
             chrome: Chrome::default(),
@@ -576,7 +592,8 @@ impl App {
         let mut profiles = self.detected.clone();
         profiles.extend(config.profiles.iter().cloned());
         self.profiles = profiles;
-        self.keymap = Keymap::new(&config.hotkeys);
+        self.keymap = Keymap::with_mru(&config.hotkeys, config.appearance.mru_tabs);
+        self.mru.cancel();
         if config.appearance.backdrop != self.config.appearance.backdrop {
             self.effects.push(Effect::Surface(config.appearance.backdrop));
         }
@@ -768,6 +785,7 @@ impl App {
             self.closed_tabs.push(state);
         }
         let tab = self.tabs.remove(index);
+        self.mru.remove(tab.key);
         for id in tab.root.panes() {
             if let Some(p) = self.panes.remove(&id) {
                 if p.exited.is_none() {
@@ -780,6 +798,7 @@ impl App {
                 self.effects.push(Effect::Close);
             } else {
                 self.active = 0;
+                self.mru.cancel();
                 self.start_selected = 0;
                 self.current_tab = None;
                 self.drag = Drag::None;
@@ -821,8 +840,15 @@ impl App {
     }
 
     pub fn activate(&mut self, index: usize) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            if tab.command_watch == crate::close::CommandWatch::Finished {
+                tab.command_watch = Default::default();
+                self.dirty = true;
+            }
+        }
         if index < self.tabs.len() && index != self.active {
             self.active = index;
+            self.mru.visit(self.tabs[index].key);
             self.overlay = None;
             self.reset_blink();
             self.dirty = true;
@@ -841,7 +867,7 @@ impl App {
 
     fn move_tab(&mut self, delta: isize) {
         let to = self.active as isize + delta;
-        if to >= 0 && (to as usize) < self.tabs.len() {
+        if to >= 0 && self.can_move_tab(self.active, to as usize) {
             self.tabs.swap(self.active, to as usize);
             self.active = to as usize;
             self.dirty = true;
@@ -853,6 +879,9 @@ impl App {
     }
 
     pub fn tab_bar_hidden(&self) -> bool {
+        if self.fullscreen && !self.config.appearance.tabs_in_fullscreen {
+            return true;
+        }
         if let Some(hidden) = self.tab_bar_override {
             return hidden;
         }
@@ -860,6 +889,13 @@ impl App {
             crate::config::TabBar::Always => false,
             crate::config::TabBar::Auto => self.tabs.len() < 2,
             crate::config::TabBar::Never => true,
+        }
+    }
+
+    pub fn set_fullscreen(&mut self, fullscreen: bool) {
+        if self.fullscreen != fullscreen {
+            self.fullscreen = fullscreen;
+            self.dirty = true;
         }
     }
 
@@ -871,8 +907,8 @@ impl App {
     }
 
     pub(crate) fn tab_activity(&self, index: usize) -> bool {
-        index != self.active
-            && self.tabs.get(index).is_some_and(|t| t.root.panes().iter().filter_map(|id| self.panes.get(id)).any(|p| p.exited.is_none() && p.terminal.lock().output_seq() != p.seen))
+        self.tabs.get(index).is_some_and(|t| t.command_watch == crate::close::CommandWatch::Finished || (index != self.active
+            && t.root.panes().iter().filter_map(|id| self.panes.get(id)).any(|p| p.exited.is_none() && p.terminal.lock().output_seq() != p.seen)))
     }
 
     pub fn tab_progress(&self, index: usize) -> Option<aster_vt::Progress> {
@@ -1146,14 +1182,18 @@ impl App {
                     }
                 }
             }
+            NotifyCommand => self.toggle_command_watch(),
             OpenLog => self.effects.push(Effect::OpenLog),
             OpenConfigFile => self.effects.push(Effect::OpenConfigFile),
             ToggleTabBar => {
-                self.tab_bar_override = Some(!self.tab_bar_hidden());
+                if !self.fullscreen || self.config.appearance.tabs_in_fullscreen {
+                    self.tab_bar_override = Some(!self.tab_bar_hidden());
+                }
                 self.dirty = true;
             }
             Settings => self.open_settings(),
             RenameTab => self.start_rename(self.active),
+            PinTab => self.toggle_pin(),
             OpenFiles => self.open_files(),
             FillPassword => {
                 self.fill_password();
@@ -1192,6 +1232,7 @@ impl App {
             ReopenTab => self.reopen_tab(),
             NextTab => self.cycle(1),
             PreviousTab => self.cycle(-1),
+            NextMruTab | PreviousMruTab => self.switch_mru(action, false),
             MoveTabLeft => self.move_tab(-1),
             MoveTabRight => self.move_tab(1),
             Tab(n) if self.tabs.is_empty() => {
@@ -1427,7 +1468,8 @@ impl App {
     }
 
     pub fn on_timer(&mut self) {
-        self.blink_armed = false;
+        self.timer_due = None;
+        self.poll_commands(Instant::now());
         if self.tab_toast.as_ref().is_some_and(|(_, t)| t.elapsed() >= TOAST) {
             self.tab_toast = None;
             self.dirty = true;
@@ -1441,6 +1483,7 @@ impl App {
             self.blink_since = Instant::now();
             self.dirty = true;
         }
+        self.schedule_timer();
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -1449,6 +1492,9 @@ impl App {
     }
 
     fn track_tab(&mut self) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            self.mru.visit(tab.key);
+        }
         let on = self.tabs.get(self.active).is_some_and(|t| t.focus == SETTINGS_PANE);
         if on && self.settings.is_none() {
             let page = self.settings_stash.take().unwrap_or_else(|| self.fresh_settings_page());
@@ -1498,26 +1544,24 @@ impl App {
         if rest.is_empty() {
             return;
         }
-        let (focus, color) = (tab.focus, tab.color.clone());
+        let (focus, color, pinned) = (tab.focus, tab.color.clone(), tab.pinned);
         tab.root = Node::Leaf(first);
         tab.focus = first;
         tab.zoomed = None;
         let at = self.active;
         for (i, &id) in rest.iter().enumerate() {
-            self.tabs.insert(at + 1 + i, Tab { root: Node::Leaf(id), focus: id, zoomed: None, title: None, color: color.clone() });
+            self.tabs.insert(at + 1 + i, Tab { color: color.clone(), pinned, ..Tab::new(Node::Leaf(id), id) });
         }
         self.active = at + panes.iter().position(|p| *p == focus).unwrap_or(0);
         self.dirty = true;
     }
 
     fn combine_tabs(&mut self) {
-        let active = self.tabs.get(self.active).map(|t| t.focus).filter(|f| *f != SETTINGS_PANE);
-        let (settings, terminals): (Vec<Tab>, Vec<Tab>) = std::mem::take(&mut self.tabs).into_iter().partition(|t| t.focus == SETTINGS_PANE);
-        if terminals.len() < 2 {
-            self.tabs = terminals.into_iter().chain(settings).collect();
-            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        if self.tabs.iter().filter(|t| t.focus != SETTINGS_PANE).count() < 2 {
             return;
         }
+        let active = self.tabs.get(self.active).map(|t| t.focus).filter(|f| *f != SETTINGS_PANE);
+        let (settings, terminals): (Vec<Tab>, Vec<Tab>) = std::mem::take(&mut self.tabs).into_iter().partition(|t| t.focus == SETTINGS_PANE);
         let focus = active.unwrap_or(terminals[0].focus);
         let mut tabs = terminals.into_iter();
         let Some(first) = tabs.next() else { return };
@@ -1531,7 +1575,8 @@ impl App {
         combined.focus = focus;
         combined.zoomed = None;
         self.tabs = std::iter::once(combined).chain(settings).collect();
-        self.active = 0;
+        self.tabs.sort_by_key(|t| !t.pinned);
+        self.active = self.tabs.iter().position(|t| t.focus == focus).unwrap_or(0);
         self.dirty = true;
     }
 
@@ -1547,8 +1592,8 @@ impl App {
         let root = self.build(&state.root);
         let order = root.panes();
         let focus = order.get(state.focus).or(order.first()).copied().unwrap_or(0);
-        let at = if self.tabs.is_empty() { 0 } else { self.active + 1 };
-        self.tabs.insert(at, Tab { root, focus, zoomed: None, title: state.title, color: state.color });
+        let at = self.tab_insert_index(state.pinned);
+        self.tabs.insert(at, Tab { title: state.title, color: state.color, pinned: state.pinned, ..Tab::new(root, focus) });
         self.active = at;
         self.overlay = None;
         self.dirty = true;
@@ -1564,6 +1609,8 @@ impl App {
                 self.scale = s;
                 self.dirty = true;
             }
+            Event::Key { key: Key::Control, mods, pressed: false } if !mods.ctrl => self.finish_mru(),
+            Event::Key { key: Key::Control, .. } => {}
             Event::Key { key, mods, pressed: true } => self.on_key(key, mods),
             Event::Key { .. } => {}
             Event::Char(c) => self.on_char(c, false),
@@ -1575,6 +1622,10 @@ impl App {
                 self.dirty = true;
             }
             Event::Focus(f) => {
+                if !f {
+                    self.mru.cancel();
+                    self.dirty = true;
+                }
                 self.focused = f;
                 self.keymap.reset();
                 self.reset_blink();
@@ -1590,9 +1641,20 @@ impl App {
                 self.restyle();
             }
             Event::MouseMove { x, y } => self.on_move(x, y),
-            Event::MouseDown { x, y, button, clicks } => self.on_down(x, y, button, clicks),
+            Event::MouseDown { x, y, button, clicks } => {
+                if self.mru.selection().is_some() {
+                    self.mru.cancel();
+                    self.dirty = true;
+                }
+                self.on_down(x, y, button, clicks);
+            }
             Event::MouseUp { x, y, button } => self.on_up(x, y, button),
-            Event::Modifiers(mods) => self.mouse_mods = mods,
+            Event::Modifiers(mods) => {
+                if !mods.ctrl {
+                    self.finish_mru();
+                }
+                self.mouse_mods = mods;
+            }
             Event::Wheel { dy, .. } => self.on_wheel(dy),
             Event::MouseLeave => {
                 self.mouse = (-1.0, -1.0);
@@ -1626,6 +1688,19 @@ impl App {
         self.swallow_char = false;
         self.swallow_chord = None;
         self.swallow_control = (modal || self.tabs.is_empty()) && matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
+        if self.mru.selection().is_some() {
+            if key == Key::Escape {
+                self.mru.cancel();
+                self.swallow_char = true;
+                self.dirty = true;
+            } else if key != Key::Other {
+                if let Outcome::Action(action @ (Action::NextMruTab | Action::PreviousMruTab)) = self.keymap.press(Chord { key, mods }) {
+                    self.switch_mru(action, mods.ctrl);
+                }
+                self.swallow_chord = Some(key);
+            }
+            return;
+        }
         if self.overlay.is_some() {
             self.overlay_key(key, mods);
             return;
@@ -1663,7 +1738,7 @@ impl App {
                 Outcome::Action(Action::Settings) => return self.close_settings(),
                 Outcome::Action(a) if !editing && a.works_beside_settings() => {
                     self.swallow_chord = Some(key);
-                    return self.run(a);
+                    return self.run_shortcut(a, mods);
                 }
                 _ => {}
             }
@@ -1682,7 +1757,7 @@ impl App {
         match outcome {
             Outcome::Action(a) => {
                 self.swallow_chord = Some(key);
-                self.run(a);
+                self.run_shortcut(a, mods);
             }
             Outcome::Pending => self.swallow_chord = Some(key),
             Outcome::None if self.search.is_some() => {}
@@ -1700,7 +1775,18 @@ impl App {
         }
     }
 
+    fn run_shortcut(&mut self, action: Action, mods: Mods) {
+        if mods.ctrl && matches!(action, Action::NextMruTab | Action::PreviousMruTab) {
+            self.switch_mru(action, true);
+        } else {
+            self.run(action);
+        }
+    }
+
     fn on_char(&mut self, c: char, alt: bool) {
+        if self.mru.selection().is_some() {
+            return;
+        }
         if std::mem::take(&mut self.swallow_char) {
             return;
         }
@@ -1797,6 +1883,7 @@ impl App {
     }
 
     fn on_move(&mut self, x: f32, y: f32) {
+        let was_on_bar = self.chrome.tab_bar.contains(self.mouse.0, self.mouse.1);
         self.mouse = (x, y);
         if self.menu.is_some() {
             return self.menu_hover(x, y);
@@ -1806,7 +1893,7 @@ impl App {
             self.hover = hover;
             self.dirty = true;
         }
-        if self.chrome.tab_bar.contains(x, y) {
+        if was_on_bar || self.chrome.tab_bar.contains(x, y) {
             self.dirty = true;
         }
         match self.drag.clone() {
@@ -1839,16 +1926,19 @@ impl App {
                 self.dirty = true;
                 return;
             }
-            Drag::Tab { index, start_x, moved } => {
+            Drag::Tab { index, start, moved } => {
                 let threshold = 6.0 * self.ui();
-                if moved || (x - start_x).abs() > threshold {
-                    self.drag = Drag::Tab { index, start_x, moved: true };
-                    if let Some(target) = self.chrome.tabs.iter().position(|t| t.rect.contains(x, t.rect.y + 1.0)) {
-                        if target != index {
+                let coordinate = self.chrome.tab_axis(x, y);
+                if moved || (coordinate - start).abs() > threshold {
+                    self.drag = Drag::Tab { index, start, moved: true };
+                    if let Some(target) = self.chrome.tabs.iter().position(|t| {
+                        if self.chrome.vertical { t.rect.contains(t.rect.x, y) } else { t.rect.contains(x, t.rect.y) }
+                    }) {
+                        if target != index && self.can_move_tab(index, target) {
                             let tab = self.tabs.remove(index);
                             self.tabs.insert(target, tab);
                             self.active = target;
-                            self.drag = Drag::Tab { index: target, start_x, moved: true };
+                            self.drag = Drag::Tab { index: target, start, moved: true };
                         }
                     }
                     self.dirty = true;
@@ -1998,7 +2088,7 @@ impl App {
             self.drag = Drag::Button(hit);
             return;
         }
-        if self.chrome.tab_bar.contains(x, y) {
+        if !self.tab_bar_hidden() && self.chrome.tab_bar.contains(x, y) {
             if self.chrome.plus.contains(x, y) {
                 self.drag = Drag::Plus;
                 return;
@@ -2010,7 +2100,7 @@ impl App {
                     MouseButton::Left if self.click_count(x, y, clicks) >= 2 => self.start_rename(i),
                     MouseButton::Left => {
                         self.activate(i);
-                        self.drag = Drag::Tab { index: i, start_x: x, moved: false };
+                        self.drag = Drag::Tab { index: i, start: self.chrome.tab_axis(x, y), moved: false };
                     }
                     MouseButton::Right => self.open_tab_menu(i, x, y),
                     _ => {}
@@ -2146,7 +2236,7 @@ impl App {
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> HitArea {
-        if self.tab_bar_hidden() {
+        if self.tab_bar_hidden() || self.menu_open() {
             return HitArea::Client;
         }
         let c = &self.chrome;
@@ -2156,7 +2246,7 @@ impl App {
             HitArea::Maximize
         } else if c.close.contains(x, y) {
             HitArea::Close
-        } else if c.tab_bar.contains(x, y) && !c.plus.contains(x, y) && !c.tabs.iter().any(|t| t.rect.contains(x, y)) {
+        } else if c.caption.contains(x, y) && !c.plus.contains(x, y) && !c.tabs.iter().any(|t| t.rect.contains(x, y)) {
             HitArea::Caption
         } else {
             HitArea::Client
@@ -2244,20 +2334,20 @@ impl App {
             self.title = title.clone();
             self.effects.push(Effect::Title(title));
         }
-        if self.blinking() && !self.blink_armed {
-            self.blink_armed = true;
-            let left = BLINK.saturating_sub(self.blink_since.elapsed()).as_millis().max(16) as u32;
+        self.schedule_timer();
+    }
+
+    pub(crate) fn schedule_timer(&mut self) {
+        let next = [
+            self.blinking().then_some(self.blink_since + BLINK),
+            self.bell.map(|(_, start)| start + BELL_FLASH),
+            self.tab_toast.as_ref().map(|(_, start)| *start + TOAST),
+            self.tabs.iter().filter_map(|t| t.command_watch.deadline()).min(),
+        ].into_iter().flatten().min();
+        if let Some(due) = next.filter(|&due| self.timer_due.is_none_or(|armed| due < armed)) {
+            let left = due.saturating_duration_since(Instant::now()).as_millis().max(1) as u32;
             self.effects.push(Effect::Timer(left));
-        }
-        if let Some((_, t)) = self.bell {
-            let left = BELL_FLASH.saturating_sub(t.elapsed()).as_millis().max(16) as u32;
-            self.effects.push(Effect::Timer(left));
-            self.blink_armed = false;
-        }
-        if let Some((_, t)) = &self.tab_toast {
-            let left = TOAST.saturating_sub(t.elapsed()).as_millis().max(16) as u32;
-            self.effects.push(Effect::Timer(left));
-            self.blink_armed = false;
+            self.timer_due = Some(due);
         }
     }
 

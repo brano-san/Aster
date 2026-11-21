@@ -13,6 +13,8 @@ pub enum Action {
     DuplicateTab,
     NextTab,
     PreviousTab,
+    NextMruTab,
+    PreviousMruTab,
     MoveTabLeft,
     MoveTabRight,
     Tab(u8),
@@ -50,6 +52,7 @@ pub enum Action {
     Search,
     Settings,
     RenameTab,
+    PinTab,
     CloseOtherTabs,
     CloseTabsToRight,
     CloseTabsToLeft,
@@ -74,6 +77,7 @@ pub enum Action {
     DebugCopyState,
     DebugSaveOutput,
     ExportBuffer,
+    NotifyCommand,
     OpenLog,
     OpenConfigFile,
     ToggleTabBar,
@@ -89,6 +93,8 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::DuplicateTab, "duplicate-tab", "Duplicate tab"),
     (Action::NextTab, "next-tab", "Next tab"),
     (Action::PreviousTab, "previous-tab", "Previous tab"),
+    (Action::NextMruTab, "next-mru-tab", "Switch to the recently used tab"),
+    (Action::PreviousMruTab, "previous-mru-tab", "Switch to the recently used tab in reverse order"),
     (Action::MoveTabLeft, "move-tab-left", "Move tab to the left"),
     (Action::MoveTabRight, "move-tab-right", "Move tab to the right"),
     (Action::SplitRight, "split-right", "Split to the right"),
@@ -125,6 +131,7 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::Search, "search", "Search"),
     (Action::Settings, "settings", "Open settings"),
     (Action::RenameTab, "rename-tab", "Rename tab"),
+    (Action::PinTab, "pin-tab", "Pin or unpin the tab"),
     (Action::CloseOtherTabs, "close-other-tabs", "Close other tabs"),
     (Action::CloseTabsToRight, "close-tabs-to-the-right", "Close tabs to the right"),
     (Action::CloseTabsToLeft, "close-tabs-to-the-left", "Close tabs to the left"),
@@ -149,6 +156,7 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::DebugCopyState, "debug-copy-state", "Copy the terminal state for a bug report"),
     (Action::DebugSaveOutput, "debug-save-output", "Save the raw output of the session"),
     (Action::ExportBuffer, "export-buffer", "Save the buffer to a file"),
+    (Action::NotifyCommand, "notify-command", "Notify when the command finishes"),
     (Action::OpenLog, "open-log", "Open the log folder"),
     (Action::OpenConfigFile, "open-config-file", "Open the config file in an editor"),
     (Action::ToggleTabBar, "toggle-tab-bar", "Show or hide the tab bar"),
@@ -159,7 +167,7 @@ impl Action {
         use Action::*;
         matches!(
             self,
-            Tab(_) | NextTab | PreviousTab | MoveTabLeft | MoveTabRight | NewTab | NewWindow | NewAdminTab | CloseTab | ReopenTab | ToggleLastTab | ProfileSelector | CommandSelector | ToggleFullscreen | ToggleTabBar | SelectColorScheme
+            Tab(_) | NextTab | PreviousTab | NextMruTab | PreviousMruTab | MoveTabLeft | MoveTabRight | NewTab | NewWindow | NewAdminTab | CloseTab | PinTab | ReopenTab | ToggleLastTab | ProfileSelector | CommandSelector | ToggleFullscreen | ToggleTabBar | SelectColorScheme
         )
     }
 
@@ -385,9 +393,23 @@ pub struct Keymap {
 
 impl Keymap {
     pub fn new(overrides: &BTreeMap<String, Vec<String>>) -> Self {
+        Self::with_mru(overrides, false)
+    }
+
+    pub fn with_mru(overrides: &BTreeMap<String, Vec<String>>, mru_tabs: bool) -> Self {
         let mut map: BTreeMap<Action, Vec<Binding>> = BTreeMap::new();
         for (action, keys) in defaults() {
             map.insert(action, keys.iter().filter_map(|k| parse_binding(k)).collect());
+        }
+        for (linear, recent, shortcut) in [(Action::NextTab, Action::NextMruTab, "Ctrl-Tab"), (Action::PreviousTab, Action::PreviousMruTab, "Ctrl-Shift-Tab")] {
+            let binding = parse_binding(shortcut).unwrap();
+            let assigned = overrides.iter().any(|(id, keys)| Action::from_id(id).is_some() && keys.iter().filter_map(|key| parse_binding(key)).any(|key| key == binding));
+            if mru_tabs || assigned {
+                map.entry(linear).or_default().retain(|b| *b != binding);
+            }
+            if mru_tabs && !assigned {
+                map.entry(recent).or_default().push(binding);
+            }
         }
         for (id, keys) in overrides {
             if let Some(action) = Action::from_id(id) {
