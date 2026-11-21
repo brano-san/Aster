@@ -32,6 +32,10 @@ pub struct ProfileDefaults {
     pub stream: Option<Stream>,
     pub on_exit: Option<OnExit>,
     pub ssh_options: Option<SshOptions>,
+    pub admin: Option<bool>,
+    pub ssh: Option<String>,
+    pub socket: Option<String>,
+    pub serial: Option<aster_proto::serial::Defaults>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,10 +77,12 @@ pub fn group_path(name: &str, config: &Config) -> String {
 pub fn effective(profile: &Profile, config: &Config) -> Profile {
     let kind = profile.defaults_kind();
     let mut result = profile.clone();
+    let mut serial = aster_proto::serial::Defaults::default();
     if let Some(name) = profile.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
         for group in group_chain(name, config) {
             if let Some(defaults) = kind.and_then(|key| group.defaults.get(key)) {
                 result.inherit(defaults);
+                if let Some(d) = &defaults.serial { serial.inherit(d); }
             }
             fill(&mut result.icon, &group.icon);
             fill(&mut result.color, &group.color);
@@ -84,6 +90,19 @@ pub fn effective(profile: &Profile, config: &Config) -> Profile {
     }
     if let Some(defaults) = kind.and_then(|key| config.profile_defaults.get(key)) {
         result.inherit(defaults);
+        if let Some(d) = &defaults.serial { serial.inherit(d); }
+    }
+    if let Some(spec) = &result.serial {
+        if let Some(resolved) = serial.resolve(spec) { result.serial = Some(resolved); }
+    }
+    if cfg!(windows) && result.is_local() && result.admin == Some(true) {
+        result.elevated = true;
+    }
+    if profile.ssh.as_deref() == Some("") && result.args.is_empty() {
+        if let Some(target) = result.ssh.as_deref().and_then(crate::ssh::parse_target) {
+            if result.command.is_empty() { result.command = "ssh".into(); }
+            result.args = target.args();
+        }
     }
     if result.on_exit == OnExit::Inherit {
         result.on_exit = OnExit::Auto;
@@ -128,6 +147,8 @@ pub(crate) enum ExitDecision {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Profile {
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, toml::Value>,
     pub id: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +181,8 @@ pub struct Profile {
     pub builtin: bool,
     #[serde(skip)]
     pub elevated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin: Option<bool>,
     #[serde(skip)]
     pub hold: bool,
 }
@@ -199,6 +222,10 @@ impl Profile {
     }
 
     fn inherit(&mut self, defaults: &ProfileDefaults) {
+        fill(&mut self.admin, &defaults.admin);
+        for (target, fallback) in [(&mut self.ssh, &defaults.ssh), (&mut self.socket, &defaults.socket)] {
+            if target.as_deref() == Some("") && fallback.is_some() { target.clone_from(fallback); }
+        }
         for (key, value) in &defaults.env {
             self.env.entry(key.clone()).or_insert_with(|| value.clone());
         }

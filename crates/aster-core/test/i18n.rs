@@ -3,7 +3,7 @@ use crate::app::App;
 use crate::config::Config;
 use crate::keymap::Action;
 use crate::menu::Entry;
-use crate::settings::{Control, SettingsPage, FIELDS, PROFILES, SETTINGS, SHORTCUTS};
+use crate::settings::{Control, SettingsPage, PROFILES, SETTINGS, SHORTCUTS};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,6 +26,7 @@ fn source_texts() -> Vec<(PathBuf, String)> {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     sources(&manifest.join("src"), &mut files);
     sources(&manifest.join("../aster-serial/src"), &mut files);
+    files.push(manifest.join("../aster-proto/src/serial.rs"));
     files.into_iter().map(|p| {
         let text = std::fs::read_to_string(&p).expect("readable source");
         (p, text)
@@ -198,7 +199,6 @@ fn the_scanner_handles_escapes_and_char_literals() {
 #[test]
 fn every_label_drawn_from_constants_has_a_russian_entry() {
     let mut texts: Vec<String> = vec![SHORTCUTS.into(), PROFILES.into()];
-    texts.extend(FIELDS.iter().map(|f| f.to_string()));
     texts.extend(crate::paste::BUTTONS.iter().map(|b| b.to_string()));
     for s in SETTINGS {
         texts.extend([s.section, s.label, s.hint].map(str::to_owned));

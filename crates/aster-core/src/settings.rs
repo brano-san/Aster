@@ -3,6 +3,9 @@ use crate::config::Config;
 use crate::i18n::{t, tf};
 use crate::input::{Key, Mods};
 use crate::keymap::{format_binding, Action, Chord};
+use crate::profiles_page::{self, GroupEditor, Header, TreeKind, TreeRow};
+use crate::profiles_page::editor::ProfileEditor;
+use std::collections::BTreeSet;
 use aster_gfx::render::Rect;
 use toml::Value;
 
@@ -67,9 +70,9 @@ const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bot
 const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
 
 pub const SETTINGS: &[Setting] = &[
+    item(PROFILES, "terminal.profile", "Default profile for new tabs", "Shell for new tabs and windows", Control::Profiles),
     item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
     item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
-    item(TERMINAL, "terminal.profile", "Default profile", "Shell for new tabs and windows", Control::Profiles),
     item(TERMINAL, "terminal.identification", "Terminal identification", "Report the Aster name and version to new shells", Control::Choice(IDENTIFICATION)),
     item(TERMINAL, "terminal.recover-tabs", "Restore tabs", "Reopen tabs, splits and their folders on start", Control::Toggle),
     item(TERMINAL, "terminal.confirm-close", "Confirm closing running programs", "Ask before closing a tab, pane or window where a program is still running", Control::Toggle),
@@ -175,7 +178,7 @@ pub fn number_text(v: f64) -> String {
     }
 }
 
-fn found(hay: &str, query: &str) -> bool {
+pub(crate) fn found(hay: &str, query: &str) -> bool {
     let hay = hay.to_lowercase();
     query.to_lowercase().split_whitespace().all(|w| hay.contains(w))
 }
@@ -183,22 +186,11 @@ fn found(hay: &str, query: &str) -> bool {
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
 pub const PROFILES: &str = "Profiles";
 pub const PAGES: [&str; 13] = [SYSTEM, APPEARANCE, COLORS, WINDOW, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, VAULT, SSH, CONFIG_FILE];
-pub const FIELDS: [&str; 9] = ["Name", "Command", "Arguments", "Start folder", "SSH destination", "Serial port", "Telnet or TCP address", "Group", "Color scheme"];
-
-const TEMPLATES: [(&str, &str, usize, &str); 5] = [
-    ("local", "Local shell", 1, ""),
-    ("ssh", "SSH connection", 4, ""),
-    ("serial", "Serial port", 5, ""),
-    ("telnet", "Telnet", 6, "telnet://"),
-    ("tcp", "TCP", 6, "tcp://"),
-];
-
-pub(crate) fn profile_templates() -> Vec<crate::overlay::Pick> {
-    TEMPLATES.iter().map(|(id, name, _, _)| crate::overlay::Pick { value: (*id).to_owned(), label: t(name).to_owned(), ..Default::default() }).collect()
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileRow {
+    pub group: Option<String>,
+    pub badge: String,
+    pub tint: u32,
     pub id: String,
     pub name: String,
     pub detail: String,
@@ -333,15 +325,6 @@ impl std::fmt::Debug for InlineEdit {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ProfileEditor {
-    pub original: Option<String>,
-    pub source: Option<String>,
-    pub fields: [String; 9],
-    pub focus: usize,
-    pub error: Option<String>,
-}
-
 pub fn split_args(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
@@ -371,7 +354,15 @@ pub fn split_args(text: &str) -> Vec<String> {
 }
 
 pub fn join_args(args: &[String]) -> String {
-    args.iter().map(|a| if a.is_empty() || a.contains(char::is_whitespace) { format!("\"{a}\"") } else { a.clone() }).collect::<Vec<_>>().join(" ")
+    args.iter().map(|arg| {
+        if !arg.is_empty() && !arg.contains(['"', '\'']) && !arg.contains(char::is_whitespace) {
+            arg.clone()
+        } else if arg.contains('"') && !arg.contains('\'') {
+            format!("'{arg}'")
+        } else {
+            format!("\"{}\"", arg.replace('"', "\"'\"'\""))
+        }
+    }).collect::<Vec<_>>().join(" ")
 }
 
 fn slug(name: &str) -> String {
@@ -435,7 +426,12 @@ pub struct SettingsPage {
     pub(crate) vault: VaultView,
     confirming_vault: Option<VaultRow>,
     pub schemes: Vec<SchemeRow>,
-    pub editor: Option<ProfileEditor>,
+    pub(crate) editor: Option<ProfileEditor>,
+    pub(crate) group_editor: Option<GroupEditor>,
+    pub(crate) defaults_kind: Option<&'static str>,
+    pub(crate) groups: Vec<crate::profile::ProfileGroup>,
+    pub(crate) collapsed: BTreeSet<Header>,
+    tree: Vec<TreeRow>,
     pub deleting: Option<String>,
     pub page: usize,
 }
@@ -448,6 +444,7 @@ impl SettingsPage {
     }
 
     pub(crate) fn refilter(&mut self) {
+        self.tree = profiles_page::tree(&self.groups, &self.profiles, &self.collapsed, &self.query);
         let base = self.profile_base();
         let mut shown: Vec<_> = (0..SETTINGS.len()).filter(|&i| item_matches(i, &self.query)).collect();
         let vault_rows = (0..).map_while(|k| self.vault.row(k).map(|row| (k, row))).filter_map(|(k, row)| {
@@ -457,11 +454,6 @@ impl SettingsPage {
         });
         let before_vault = shown.iter().position(|&i| SETTINGS[i].section == VAULT).unwrap_or(shown.len());
         shown.splice(before_vault..before_vault, vault_rows);
-        let profiles = (0..self.profiles.len()).filter(|&k| {
-            let p = &self.profiles[k];
-            found(&format!("{PROFILES} {} profile shell {} {} {}", t(PROFILES), p.name, p.detail, p.id), &self.query)
-        });
-        let new_row = found(&format!("{PROFILES} {} new profile add create {}", t(PROFILES), t("New profile")), &self.query).then_some(base + self.profiles.len());
         let shortcuts = (SETTINGS.len()..base).filter(|&i| item_matches(i, &self.query));
         let scheme_base = self.scheme_base();
         let schemes = self.schemes.iter().enumerate().filter(|(_, row)| {
@@ -469,7 +461,8 @@ impl SettingsPage {
         }).map(|(k, _)| scheme_base + k);
         let after_colors = shown.iter().rposition(|&i| SETTINGS.get(i).is_some_and(|s| s.section == COLORS)).map_or(shown.len(), |n| n + 1);
         shown.splice(after_colors..after_colors, schemes);
-        shown.extend(profiles.map(|k| base + k).chain(new_row).chain(shortcuts));
+        shown.extend((base..base + self.tree.len()).chain(shortcuts));
+        self.deleting = None;
         self.shown = if self.query.trim().is_empty() {
             let page = PAGES[self.page.min(PAGES.len() - 1)];
             shown.into_iter().filter(|&i| self.section(i) == page).collect()
@@ -524,15 +517,22 @@ impl SettingsPage {
     }
 
     pub fn profile_at(&self, item: usize) -> Option<&ProfileRow> {
-        item.checked_sub(self.profile_base()).and_then(|k| self.profiles.get(k))
+        match self.tree_at(item)?.kind {
+            TreeKind::Profile(k) => self.profiles.get(k),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn tree_at(&self, item: usize) -> Option<&TreeRow> {
+        self.tree.get(item.checked_sub(self.profile_base())?)
     }
 
     pub fn is_new_profile(&self, item: usize) -> bool {
-        item == self.profile_base() + self.profiles.len()
+        self.tree_at(item).is_some_and(|r| r.kind == TreeKind::NewProfile)
     }
 
     fn scheme_base(&self) -> usize {
-        self.profile_base() + self.profiles.len() + 1
+        self.profile_base() + self.tree.len()
     }
 
     pub fn scheme_at(&self, item: usize) -> Option<&SchemeRow> {
@@ -593,7 +593,7 @@ impl SettingsPage {
             VAULT
         } else if self.scheme_at(item).is_some() {
             COLORS
-        } else if self.profile_at(item).is_some() || self.is_new_profile(item) {
+        } else if self.tree_at(item).is_some() {
             PROFILES
         } else {
             section_of(item)
@@ -610,6 +610,9 @@ impl SettingsPage {
         }
         let last = self.shown.len() as isize - 1;
         self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
+        if self.current_item().and_then(|i| self.tree_at(i)).is_some_and(|r| r.kind == TreeKind::DefaultsHeader) {
+            self.selected = (self.selected as isize + delta.signum()).clamp(0, last) as usize;
+        }
     }
 }
 
@@ -750,8 +753,11 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
             rows.push(Row { kind: RowKind::Section(section), rect: Rect::new(x, y, width, section_h), control: Rect::default() });
             y += section_h;
         }
-        let item_h = page.shortcut_rows.get(&i).map_or(item_h, |r| r.height);
-        let item_h = item_h + page.info_rows.get(&i).map_or(0, |lines| lines.len().saturating_sub(1)) as f32 * (16.0 * s).round();
+        let item_h = match page.tree_at(i).map(|r| &r.kind) {
+            Some(TreeKind::Profile(_)) => (50.0 * s).round(),
+            Some(_) => (38.0 * s).round(),
+            None => page.shortcut_rows.get(&i).map_or(item_h, |r| r.height) + page.info_rows.get(&i).map_or(0, |lines| lines.len().saturating_sub(1)) as f32 * (16.0 * s).round(),
+        };
         let rect = Rect::new(x, y, width, item_h);
         let (cw, ch) = match SETTINGS.get(i).map(|s| s.control) {
             Some(Control::Toggle) => ((control_width(Control::Toggle) * s).round(), (22.0 * s).round()),
@@ -857,7 +863,13 @@ impl App {
         let profiles = self.profile_rows();
         if let Some(page) = self.settings.as_mut() {
             page.profiles = profiles;
+            if let Some(id) = select {
+                profiles_page::reveal_profile(id, &page.groups, &page.profiles, &mut page.collapsed);
+                self.profile_collapsed.clone_from(&page.collapsed);
+            }
             page.editor = None;
+            page.group_editor = None;
+            page.defaults_kind = None;
             page.capture = None;
             page.deleting = None;
             page.show_page(PAGES.iter().position(|p| *p == PROFILES).unwrap_or(0));
@@ -881,7 +893,7 @@ impl App {
             background: rgb(scheme.palette.background),
             colors: scheme.palette.ansi.map(rgb),
         }).collect();
-        let mut page = SettingsPage { profiles: self.profile_rows(), schemes, vault: self.vault.clone(), ..SettingsPage::default() };
+        let mut page = SettingsPage { profiles: self.profile_rows(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes, vault: self.vault.clone(), ..SettingsPage::default() };
         page.refilter();
         page
     }
@@ -937,216 +949,12 @@ impl App {
         self.dirty = true;
     }
 
-    fn profile_rows(&self) -> Vec<ProfileRow> {
-        let default = self.default_profile().map(|p| p.id);
-        self.profiles
-            .iter()
-            .map(|p| ProfileRow {
-                id: p.id.clone(),
-                name: p.name.clone(),
-                detail: match (&p.ssh, &p.serial, &p.socket) {
-                    _ if p.layout.is_some() => t("Layout").to_owned(),
-                    (Some(dest), _, _) => format!("ssh {dest}"),
-                    (None, Some(spec), _) => format!("serial {spec}"),
-                    (None, None, Some(address)) => address.clone(),
-                    (None, None, None) => std::iter::once(p.command.clone())
-                        .chain(p.args.iter().enumerate().map(|(i, a)| if i > 0 && p.args[i - 1].eq_ignore_ascii_case("-EncodedCommand") { "\u{2026}".to_owned() } else { a.clone() }))
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                },
-                custom: self.config.profiles.iter().any(|c| c.id == p.id),
-                default: default.as_deref() == Some(p.id.as_str()),
-                hidden: self.config.profile_hidden(p),
-            })
-            .collect()
-    }
-
-    fn refresh_profiles(&mut self, select: Option<&str>) {
-        let rows = self.profile_rows();
-        let Some(page) = self.settings.as_mut() else { return };
-        page.profiles = rows;
-        let query = page.query.clone();
-        page.refilter();
-        page.query = query;
-        if let Some(id) = select {
-            if let Some(at) = page.shown.iter().position(|&i| page.profile_at(i).is_some_and(|p| p.id == id)) {
-                page.selected = at;
-            }
-        }
-        self.reveal_selected();
-    }
-
-    fn open_editor(&mut self, item: usize) {
-        let Some(page) = self.settings.as_ref() else { return };
-        if page.is_new_profile(item) {
-            return self.open_overlay(crate::overlay::OverlayKind::ProfileTemplates);
-        }
-        let editor = if let Some(row) = page.profile_at(item) {
-            let Some(p) = self.profiles.iter().find(|p| p.id == row.id) else { return };
-            ProfileEditor {
-                original: row.custom.then(|| p.id.clone()),
-                source: Some(p.id.clone()),
-                fields: [
-                    if row.custom { p.name.clone() } else { tf("{name} (copy)", &[("name", &p.name)]) },
-                    p.command.clone(),
-                    join_args(&p.args),
-                    p.cwd.clone().unwrap_or_default(),
-                    p.ssh.clone().unwrap_or_default(),
-                    p.serial.clone().unwrap_or_default(),
-                    p.socket.clone().unwrap_or_default(),
-                    p.group.clone().unwrap_or_default(),
-                    p.scheme.clone().unwrap_or_default(),
-                ],
-                focus: 0,
-                error: None,
-            }
-        } else {
-            return;
-        };
-        if let Some(page) = self.settings.as_mut() {
-            page.editor = Some(editor);
-        }
-        self.dirty = true;
-    }
-
-    pub(crate) fn edit_profile_template(&mut self, id: &str) {
-        let Some(&(_, name, focus, prefix)) = TEMPLATES.iter().find(|&&(key, _, _, _)| key == id) else { return };
-        let mut editor = ProfileEditor { focus, ..Default::default() };
-        editor.fields[0] = t(name).to_owned();
-        editor.fields[focus] = prefix.to_owned();
-        if id == "local" {
-            if let Some(shell) = self.profiles.iter().find(|p| p.builtin && p.is_local() && !p.command.is_empty() && !p.elevated) {
-                editor.fields[1] = shell.command.clone();
-                editor.fields[2] = join_args(&shell.args);
-                editor.source = Some(shell.id.clone());
-            }
-        }
-        if let Some(page) = self.settings.as_mut() {
-            page.editor = Some(editor);
-        }
-    }
-
     pub(crate) fn custom_profile_id(&self, name: &str) -> String {
         let base = format!("custom:{}", slug(name));
         if self.profiles.iter().any(|p| p.id == base) {
             (2..).map(|n| format!("{base}-{n}")).find(|id| self.profiles.iter().all(|p| &p.id != id)).unwrap_or(base)
         } else {
             base
-        }
-    }
-
-    fn save_editor(&mut self) {
-        let Some(editor) = self.settings.as_ref().and_then(|p| p.editor.clone()) else { return };
-        let [name, command, args, cwd, ssh, serial, socket, group, scheme] = editor.fields.map(|f| f.trim().to_owned());
-        let fail = |app: &mut App, error: &str| {
-            if let Some(e) = app.settings.as_mut().and_then(|p| p.editor.as_mut()) {
-                e.error = Some(error.to_owned());
-            }
-            app.dirty = true;
-        };
-        if name.is_empty() {
-            return fail(self, t("The profile needs a name"));
-        }
-        let source = editor.source.as_ref().and_then(|id| self.profiles.iter().find(|p| &p.id == id));
-        if command.is_empty() && ssh.is_empty() && serial.is_empty() && socket.is_empty() && source.is_none_or(|p| p.layout.is_none()) {
-            return fail(self, t("Give a command to run, an SSH destination, a serial port or a network address"));
-        }
-        let socket = match (!socket.is_empty()).then(|| aster_proto::address::parse(&socket)) {
-            None => None,
-            Some(Ok(address)) => Some(address.display()),
-            Some(Err(_)) => return fail(self, t("The network address should look like telnet://host:23 or tcp://host:port")),
-        };
-        let scheme = if scheme.is_empty() {
-            None
-        } else if let Some(name) = self.scheme_names().into_iter().find(|name| name.eq_ignore_ascii_case(&scheme)) {
-            Some(name)
-        } else {
-            return fail(self, t("There is no color scheme with this name"));
-        };
-        let id = editor.original.clone().unwrap_or_else(|| self.custom_profile_id(&name));
-        let ssh = (!ssh.is_empty()).then_some(ssh);
-        let (command, args) = match (&ssh, command.is_empty()) {
-            (Some(dest), true) => ("ssh".to_owned(), vec![dest.clone()]),
-            _ => (command, split_args(&args)),
-        };
-        let mut profile = crate::profile::Profile { id: id.clone(), name, command, args, cwd: (!cwd.is_empty()).then_some(cwd), ssh: ssh.clone(), serial: (!serial.is_empty()).then_some(serial), socket, group: (!group.is_empty()).then_some(group), scheme, builtin: false, hold: false, elevated: false, ..source.cloned().unwrap_or_default() };
-        if ssh.is_some() && profile.icon.is_none() && profile.group.is_none() {
-            profile.icon = Some("ssh".into());
-        }
-        let mut config = self.config.clone();
-        match config.profiles.iter_mut().find(|p| p.id == id) {
-            Some(existing) => *existing = profile,
-            None => config.profiles.push(profile),
-        }
-        self.set_config(config);
-        self.push_save_config();
-        if let Some(page) = self.settings.as_mut() {
-            page.editor = None;
-        }
-        self.refresh_profiles(Some(&id));
-    }
-
-    fn make_default(&mut self, id: &str) {
-        let mut config = self.config.clone();
-        config.terminal.profile = id.to_owned();
-        if config != self.config {
-            self.set_config(config);
-            self.push_save_config();
-        }
-        self.refresh_profiles(Some(id));
-    }
-
-    fn toggle_profile_hidden(&mut self, row: ProfileRow) {
-        let mut config = self.config.clone();
-        if row.custom {
-            let Some(profile) = config.profiles.iter_mut().find(|p| p.id == row.id) else { return };
-            profile.hidden = !row.hidden;
-        } else if row.hidden {
-            config.hidden_profiles.retain(|id| id != &row.id);
-        } else {
-            config.hidden_profiles.push(row.id.clone());
-        }
-        self.set_config(config);
-        self.push_save_config();
-    }
-
-    fn delete_profile(&mut self, id: &str) {
-        let mut config = self.config.clone();
-        config.profiles.retain(|p| p.id != id);
-        if config.terminal.profile == id {
-            config.terminal.profile.clear();
-        }
-        self.set_config(config);
-        self.push_save_config();
-        self.refresh_profiles(None);
-    }
-
-    fn editor_key(&mut self, key: Key, mods: Mods) {
-        let Some(editor) = self.settings.as_mut().and_then(|p| p.editor.as_mut()) else { return };
-        self.dirty = true;
-        let last = FIELDS.len() - 1;
-        match key {
-            Key::Escape => {
-                if let Some(p) = self.settings.as_mut() {
-                    p.editor = None;
-                }
-            }
-            Key::Enter if mods.ctrl || editor.focus == last => self.save_editor(),
-            Key::Char('S') if mods.ctrl => self.save_editor(),
-            Key::Enter | Key::Down => editor.focus = (editor.focus + 1).min(last),
-            Key::Tab if mods.shift => editor.focus = editor.focus.saturating_sub(1),
-            Key::Tab => editor.focus = (editor.focus + 1) % FIELDS.len(),
-            Key::Up => editor.focus = editor.focus.saturating_sub(1),
-            Key::Backspace => {
-                let field = &mut editor.fields[editor.focus];
-                if mods.ctrl {
-                    field.clear();
-                } else {
-                    field.pop();
-                }
-            }
-            Key::Char('V') if mods.ctrl => self.push(Effect::RequestPaste),
-            _ => {}
         }
     }
 
@@ -1168,7 +976,11 @@ impl App {
         match control {
             Control::Choice(list) | Control::Segments(list) => list.iter().map(|(v, l)| ((*v).to_owned(), t(l).to_owned())).collect(),
             Control::Schemes => self.scheme_names().into_iter().map(|n| (n.clone(), n)).collect(),
-            Control::Profiles => std::iter::once((String::new(), t("First available").to_owned())).chain(self.profiles.iter().map(|p| (p.id.clone(), p.name.clone()))).collect(),
+            Control::Profiles => {
+                let fallback;
+                let rows = if let Some(page) = &self.settings { &page.profiles } else { fallback = self.profile_rows(); &fallback };
+                std::iter::once((String::new(), t("First available").into())).chain(rows.iter().map(|p| (p.id.clone(), p.name.clone()))).collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -1450,7 +1262,7 @@ impl App {
         }
     }
 
-    fn reveal_selected(&mut self) {
+    pub(crate) fn reveal_selected(&mut self) {
         let Some(geo) = self.settings_geometry() else { return };
         let Some(page) = self.settings.as_mut() else { return };
         let Some(row) = geo.rows.iter().find(|r| r.kind == RowKind::Item(page.selected)) else { return };
@@ -1470,8 +1282,8 @@ impl App {
         if page.capture.is_some() {
             return self.capture_key(key, mods);
         }
-        if page.editor.is_some() {
-            return self.editor_key(key, mods);
+        if page.editor.is_some() || page.group_editor.is_some() {
+            return self.profile_modal_key(key, mods);
         }
         if matches!(page.editing, Some(InlineEdit::Interrupted | InlineEdit::Waiting)) {
             if matches!(key, Key::Escape | Key::Tab) || key == Key::Enter && matches!(page.editing, Some(InlineEdit::Interrupted)) {
@@ -1489,36 +1301,10 @@ impl App {
             }
             page.confirming_vault = None;
         }
-        if let Some(item) = page.current_item() {
-            let row = page.profile_at(item).cloned();
-            if row.is_some() || page.is_new_profile(item) {
-                if key != Key::Delete {
-                    page.deleting = None;
-                }
-                match (key, row) {
-                    (Key::Char('H'), Some(r)) if mods == Mods::NONE => {
-                        self.swallow_chord = Some(key);
-                        return self.toggle_profile_hidden(r);
-                    }
-                    (Key::Enter, Some(r)) if mods.ctrl => return self.make_default(&r.id),
-                    (Key::Enter, _) => return self.open_editor(item),
-                    (Key::Delete, Some(r)) if r.custom => {
-                        if page.deleting.as_deref() == Some(r.id.as_str()) {
-                            page.deleting = None;
-                            return self.delete_profile(&r.id);
-                        }
-                        page.notice = Some(tf("Press Del again to delete {name}", &[("name", &r.name)]));
-                        page.deleting = Some(r.id);
-                        return;
-                    }
-                    (Key::Delete, Some(_)) => {
-                        page.notice = Some(t("Detected profiles cannot be deleted; copy one with Enter instead").to_owned());
-                        return;
-                    }
-                    _ => {}
-                }
-            }
+        if !page.editing() && page.current_item().and_then(|i| page.tree_at(i)).is_some() && self.profile_tree_key(key, mods) {
+            return;
         }
+        let Some(page) = self.settings.as_mut() else { return };
         if key != Key::Other {
             page.notice = None;
         }
@@ -1623,7 +1409,15 @@ impl App {
             return;
         }
         if let Some(editor) = page.editor.as_mut() {
-            editor.fields[editor.focus].push_str(&clean);
+            editor.insert(&clean);
+            self.dirty = true;
+            return;
+        }
+        if let Some(group) = page.group_editor.as_mut() {
+            if matches!(group.focus, 0 | 2 | 3) {
+                group.fields[group.focus].push_str(&clean);
+                group.error.clear();
+            }
             self.dirty = true;
             return;
         }
@@ -1646,6 +1440,7 @@ impl App {
     pub(crate) fn settings_click(&mut self, x: f32, y: f32) {
         let Some(geo) = self.settings_geometry() else { return };
         self.dirty = true;
+        if self.profile_modal_click(geo.page, x, y) { return; }
         if let Some(page) = self.settings.as_mut() {
             page.capture = None;
             if page.confirming_vault.is_some() && !geo.rows.iter().any(|row| row.kind == RowKind::Item(page.selected) && row.rect.contains(x, y)) {
@@ -1694,8 +1489,9 @@ impl App {
             let name = scheme.name.clone();
             return self.apply_scheme(name);
         }
-        if page.profile_at(item).is_some() || page.is_new_profile(item) {
-            return self.open_editor(item);
+        if page.tree_at(item).is_some() {
+            page.deleting = None;
+            return self.profile_tree_click(item, row.rect, x, y);
         }
         if let Some(action) = shortcut(page.shown[n]) {
             page.capture = Some((action, false));
@@ -1721,6 +1517,7 @@ impl App {
     }
 
     pub(crate) fn settings_wheel(&mut self, dy: f32) {
+        if self.profile_modal_wheel(dy) { return; }
         let Some(geo) = self.settings_geometry() else { return };
         let step = 60.0 * self.ui();
         let Some(page) = self.settings.as_mut() else { return };

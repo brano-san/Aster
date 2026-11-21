@@ -163,11 +163,17 @@ fn a_malformed_frame_is_rejected() {
         "COM3,8N",
         "COM3,8N1X",
         "COM3,",
-        "COM3,fast",
+        "COM3,quick",
     ] {
         let error = parse(spec).unwrap_err();
         assert!(error.contains("Invalid frame"), "{spec:?}: {error}");
     }
+}
+
+#[test]
+fn fast_explicitly_turns_slow_sending_off() {
+    assert!(!parse("COM3,fast").unwrap().slow);
+    assert!(parse("COM3,8N1,slow").unwrap().slow);
 }
 
 #[test]
