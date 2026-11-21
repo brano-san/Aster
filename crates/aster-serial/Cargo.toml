@@ -7,5 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+aster-proto.workspace = true
 crossbeam-channel.workspace = true
 serialport.workspace = true

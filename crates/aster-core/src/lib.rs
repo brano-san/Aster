@@ -15,6 +15,7 @@ pub mod panes;
 pub mod paste;
 pub mod picker;
 pub mod profile;
+mod profiles_page;
 pub mod search;
 pub mod session;
 pub mod settings;

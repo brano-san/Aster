@@ -253,6 +253,8 @@ pub struct App {
     pub(crate) tab_toast: Option<(String, Instant)>,
     pub(crate) monospace_fonts: Vec<String>,
     pub(crate) all_fonts: Vec<String>,
+    pub(crate) background_launches: Vec<PaneId>,
+    pub(crate) profile_collapsed: std::collections::BTreeSet<crate::profiles_page::Header>,
     pub(crate) settings_stash: Option<crate::settings::SettingsPage>,
     pub(crate) shown_progress: Option<Progress>,
     swallow_control: bool,
@@ -347,6 +349,8 @@ impl App {
             monospace_fonts: Vec::new(),
             all_fonts: Vec::new(),
             settings_stash: None,
+            background_launches: Vec::new(),
+            profile_collapsed: Default::default(),
             shown_progress: None,
             swallow_control: false,
             blink_on: true,
@@ -607,12 +611,7 @@ impl App {
     pub fn set_config(&mut self, config: Config) {
         let mut profiles = self.detected.clone();
         profiles.extend(config.profiles.iter().cloned());
-        if let Some(page) = self.settings.as_mut().or(self.settings_stash.as_mut()) {
-            let hidden: std::collections::HashSet<_> = profiles.iter().filter(|p| config.profile_hidden(p)).map(|p| p.id.as_str()).collect();
-            for row in &mut page.profiles {
-                row.hidden = hidden.contains(row.id.as_str());
-            }
-        }
+        let profiles_changed = self.config.groups != config.groups || self.config.profiles != config.profiles || self.config.hidden_profiles != config.hidden_profiles || self.config.terminal.profile != config.terminal.profile;
         self.profiles = profiles;
         self.keymap = Keymap::with_mru(&config.hotkeys, config.appearance.mru_tabs);
         self.mru.cancel();
@@ -620,6 +619,7 @@ impl App {
             self.effects.push(Effect::Surface(config.appearance.backdrop));
         }
         self.config = config;
+        if profiles_changed { self.sync_profile_page(); }
         if !self.config.appearance.animations {
             self.bell = None;
             self.tab_toast = None;
@@ -733,19 +733,19 @@ impl App {
 
     pub(crate) fn prompt_pending_serial(&mut self) {
         let focus = self.focused_pane();
+        let settings = focus == Some(SETTINGS_PANE);
         if let Some(OverlayKind::SerialSpeed(pane)) = self.overlay.as_ref().map(|o| o.kind) {
-            if focus != Some(pane) || self.panes.get(&pane).is_none_or(|p| p.exited.is_some()) {
+            if (focus != Some(pane) && !(settings && self.background_launches.contains(&pane))) || self.panes.get(&pane).is_none_or(|p| p.exited.is_some()) {
                 self.overlay = None;
             }
         }
         if self.overlay.is_some() || self.close_confirm.is_some() {
             return;
         }
-        if let Some(id) = focus {
-            if self.panes.get(&id).and_then(|p| p.pending.as_ref()).and_then(Launch::baud_placeholder).is_some() {
-                self.open_overlay(OverlayKind::SerialSpeed(id));
-            }
-        }
+        let pending = focus.into_iter().chain(self.background_launches.iter().copied().filter(|_| settings)).find(|id| {
+            self.panes.get(id).and_then(|p| p.pending.as_ref()).and_then(Launch::baud_placeholder).is_some()
+        });
+        if let Some(id) = pending { self.open_overlay(OverlayKind::SerialSpeed(id)); }
     }
 
     pub fn focused_terminal(&self) -> Option<Shared> {
@@ -1369,7 +1369,7 @@ impl App {
                 .map(|a| Pick { label: a.label(), hint: self.keymap.bindings_of(a).next().map(crate::keymap::format_binding).unwrap_or_default(), value: a.id(), ..Pick::default() })
                 .collect(),
             OverlayKind::Profiles => self.profile_picks(),
-            OverlayKind::ProfileTemplates => crate::settings::profile_templates(),
+            OverlayKind::ProfileTemplates => crate::profiles_page::profile_templates(),
             OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), value: n, ..Pick::default() }).collect(),
             OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string(), ..Pick::default() }).collect(),
             OverlayKind::SerialSpeed(pane) => {
@@ -1806,7 +1806,10 @@ impl App {
                 self.swallow_char = true;
                 return self.settings_key(key, mods);
             }
-            let editing = page.editing() || page.editor.is_some();
+            if page.editor.is_some() || page.group_editor.is_some() {
+                return self.settings_key(key, mods);
+            }
+            let editing = page.editing();
             if !editing && page.current_shortcut().is_some() && crate::settings::shortcut_edit_key(key, mods) {
                 self.keymap.reset();
                 return self.settings_key(key, mods);

@@ -444,6 +444,18 @@ fn ctrl(k: Key) -> Event {
     Event::Key { key: k, mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true }
 }
 
+fn focus_field(a: &mut App, tab: &str, label: &str) {
+    let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
+    let index = editor.tabs.iter().position(|t| t.label == tab).expect("editor tab");
+    let steps = (index + editor.tabs.len() - editor.tab) % editor.tabs.len();
+    for _ in 0..steps { a.on_event(ctrl(Key::Tab)); }
+    let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
+    let fields = &editor.tabs[editor.tab].fields;
+    let index = fields.iter().position(|f| f.label == label).expect("editor field");
+    let steps = (index + fields.len() - editor.focus) % fields.len();
+    for _ in 0..steps { key(a, Key::Tab); }
+}
+
 fn choose_template(a: &mut App, name: &str) {
     select_profile(a, "");
     key(a, Key::Enter);
@@ -454,13 +466,13 @@ fn choose_template(a: &mut App, name: &str) {
 #[test]
 fn new_profile_templates_prefill_the_editor_and_focus_the_connection_field() {
     let mut a = app();
-    for (name, focus, initial) in [("Local shell", 1, "a.exe"), ("SSH connection", 4, ""), ("Serial port", 5, ""), ("Telnet", 6, "telnet://"), ("TCP", 6, "tcp://")] {
+    for (name, tab, initial) in [("Local shell", "Command", "a.exe"), ("SSH connection", "SSH", ""), ("Serial port", "Serial", ""), ("Telnet", "Network", "telnet://"), ("TCP", "Network", "tcp://")] {
         choose_template(&mut a, name);
         let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
-        assert_eq!((editor.focus, &*editor.fields[focus], &*editor.fields[0]), (focus, initial, name));
-        if focus != 1 {
-            assert!(editor.fields[1].is_empty());
-        }
+        let active = &editor.tabs[editor.tab];
+        assert_eq!((editor.focus, active.label.as_str(), active.fields[editor.focus].value.as_str()), (0, tab, initial));
+        assert_eq!(editor.tabs[0].fields[0].value, name);
+        if tab != "Command" { assert!(editor.tabs.iter().all(|t| t.label != "Command")); }
         key(&mut a, Key::Escape);
     }
     select_profile(&mut a, "");
@@ -526,6 +538,8 @@ fn editing_a_layout_preserves_its_tree_and_config_only_fields() {
 fn arguments_split_on_spaces_and_respect_quotes() {
     assert_eq!(split_args(r#"-NoLogo -File "C:\My Scripts\a.ps1" ''"#), ["-NoLogo", "-File", r"C:\My Scripts\a.ps1", ""]);
     assert_eq!(join_args(&["-d".into(), "My Distro".into()]), r#"-d "My Distro""#);
+    let mixed = [r#"a'b"c"#, "two words", "", r"C:\tail\", r#"it's "a b"\"#].map(str::to_owned);
+    assert_eq!(split_args(&join_args(&mixed)), mixed);
 }
 
 #[test]
@@ -534,11 +548,10 @@ fn a_detected_profile_is_copied_into_an_editable_custom_one() {
     select_profile(&mut a, "Alpha");
     key(&mut a, Key::Enter);
     let editor = a.settings.as_ref().unwrap().editor.clone().expect("editor");
-    assert_eq!(editor.fields[0], "Alpha (copy)");
+    assert_eq!(editor.tabs[0].fields[0].value, "Alpha (copy)");
     assert_eq!(editor.original, None);
-    key(&mut a, Key::Tab);
-    key(&mut a, Key::Tab);
-    typed(&mut a, r#"-l "two words""#);
+    focus_field(&mut a, "Command", "Command line");
+    typed(&mut a, r#" -l "two words""#);
     key(&mut a, Key::Tab);
     typed(&mut a, r"D:\work");
     a.on_event(ctrl(Key::Enter));
@@ -557,16 +570,12 @@ fn a_detected_profile_is_copied_into_an_editable_custom_one() {
 fn a_new_ssh_profile_needs_only_a_name_and_a_destination() {
     let mut a = app();
     choose_template(&mut a, "SSH connection");
-    for _ in 0..4 {
-        key(&mut a, Key::Up);
-    }
+    focus_field(&mut a, "General", "Name");
     a.on_event(ctrl(Key::Backspace));
     a.on_event(ctrl(Key::Enter));
     assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "a nameless profile is refused");
     typed(&mut a, "Prod");
-    for _ in 0..4 {
-        key(&mut a, Key::Tab);
-    }
+    focus_field(&mut a, "SSH", "SSH destination");
     typed(&mut a, "deploy@prod");
     a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
@@ -585,7 +594,7 @@ fn ctrl_enter_makes_a_profile_the_default_and_custom_ones_delete_after_a_second_
     assert!(a.settings.as_ref().unwrap().notice.as_deref().is_some_and(|n| n.contains("cannot be deleted")));
 
     choose_template(&mut a, "Local shell");
-    key(&mut a, Key::Up);
+    focus_field(&mut a, "General", "Name");
     a.on_event(ctrl(Key::Backspace));
     typed(&mut a, "Mine");
     a.on_event(ctrl(Key::Enter));
@@ -604,7 +613,15 @@ fn ctrl_enter_makes_a_profile_the_default_and_custom_ones_delete_after_a_second_
 fn a_serial_profile_needs_only_a_name_and_a_port() {
     let mut a = app();
     choose_template(&mut a, "Serial port");
-    typed(&mut a, "COM3:9600,8N1");
+    typed(&mut a, "COM3");
+    focus_field(&mut a, "Serial", "Speed");
+    typed(&mut a, "9600");
+    focus_field(&mut a, "Serial", "Data bits");
+    key(&mut a, Key::Left);
+    focus_field(&mut a, "Serial", "Parity");
+    key(&mut a, Key::Right);
+    focus_field(&mut a, "Serial", "Stop bits");
+    key(&mut a, Key::Right);
     a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
     let p = config.profiles.iter().find(|p| p.name == "Serial port").unwrap();
@@ -635,16 +652,17 @@ fn switching_the_language_setting_translates_the_interface_at_once() {
 #[test]
 fn a_network_profile_stores_a_normalized_address() {
     let mut a = app();
+    let mut config = a.config().clone();
+    config.groups.push(crate::profile::ProfileGroup { name: "Network".into(), ..Default::default() });
+    a.set_config(config);
     choose_template(&mut a, "TCP");
     typed(&mut a, "switch");
     a.on_event(ctrl(Key::Enter));
     assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "TCP needs a port");
-    for _ in 0..12 {
-        key(&mut a, Key::Backspace);
-    }
+    a.on_event(ctrl(Key::Backspace));
     typed(&mut a, "switch.lan");
-    key(&mut a, Key::Tab);
-    typed(&mut a, "Network");
+    focus_field(&mut a, "General", "Group");
+    key(&mut a, Key::Right);
     a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
     let p = config.profiles.iter().find(|p| p.name == "TCP").unwrap();
@@ -675,18 +693,15 @@ fn the_profile_editor_validates_and_canonicalizes_the_color_scheme() {
     let mut a = app();
     let scheme = a.scheme_names().into_iter().find(|name| *name != name.to_ascii_lowercase()).unwrap();
     choose_template(&mut a, "Local shell");
-    for _ in 1..8 {
-        key(&mut a, Key::Tab);
-    }
+    focus_field(&mut a, "General", "Color scheme");
     typed(&mut a, &scheme.to_ascii_lowercase());
     a.on_event(ctrl(Key::Enter));
     assert_eq!(saved(&mut a).unwrap().profiles[0].scheme.as_deref(), Some(scheme.as_str()));
 
     key(&mut a, Key::Enter);
-    assert_eq!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().fields[8], scheme);
-    for _ in 0..8 {
-        key(&mut a, Key::Tab);
-    }
+    focus_field(&mut a, "General", "Color scheme");
+    let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
+    assert_eq!(editor.tabs[editor.tab].fields[editor.focus].value, scheme);
     a.on_event(ctrl(Key::Backspace));
     typed(&mut a, "unknown scheme");
     a.on_event(ctrl(Key::Enter));
@@ -983,4 +998,101 @@ fn a_failed_unlock_keeps_focus_on_the_masked_retry_field() {
     }
     a.vault_state(unlocked_vault());
     assert!(a.settings.as_ref().unwrap().query.is_empty());
+}
+
+fn select_tree_row(a: &mut App, kind: crate::profiles_page::TreeKind) {
+    let page = a.settings.as_mut().unwrap();
+    page.selected = page.shown.iter().position(|&i| page.tree_at(i).is_some_and(|r| r.kind == kind)).expect("visible profile tree row");
+}
+
+#[test]
+fn group_modal_creates_edits_cancels_and_confirms_deletion() {
+    use crate::profiles_page::{Header, TreeKind};
+    let mut a = app();
+    let mut c = a.config.clone();
+    c.groups.push(crate::profile::ProfileGroup { id: "p".into(), name: "Parent".into(), ..Default::default() });
+    a.set_config(c);
+    a.open_profile_settings();
+    select_tree_row(&mut a, TreeKind::NewGroup);
+    key(&mut a, Key::Enter);
+    typed(&mut a, "East");
+    key(&mut a, Key::Tab);
+    key(&mut a, Key::Right);
+    key(&mut a, Key::Tab);
+    typed(&mut a, "#345678");
+    key(&mut a, Key::Tab);
+    typed(&mut a, "E");
+    a.on_event(ctrl(Key::Enter));
+    let mut config = saved(&mut a).unwrap();
+    let g = &config.groups[1];
+    assert_eq!((g.name.as_str(), g.parent.as_deref(), g.color.as_deref(), g.icon.as_deref()), ("East", Some("p"), Some("#345678"), Some("E")));
+    let header = TreeKind::Header(Header::Group(g.id.clone()));
+    config.profiles.push(Profile { id: "custom:east".into(), name: "Build".into(), group: Some("East".into()), ..Default::default() });
+    a.set_config(config);
+    select_tree_row(&mut a, header.clone());
+    key(&mut a, Key::Char('E'));
+    a.on_event(ctrl(Key::Backspace));
+    typed(&mut a, "West");
+    key(&mut a, Key::Escape);
+    assert_eq!(a.config.groups[1].name, "East");
+    key(&mut a, Key::Char('E'));
+    a.on_event(ctrl(Key::Backspace));
+    typed(&mut a, "West");
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(saved(&mut a).unwrap().profiles[0].group.as_deref(), Some("West"));
+    select_tree_row(&mut a, header);
+    key(&mut a, Key::Delete);
+    assert!(saved(&mut a).is_none());
+    key(&mut a, Key::Delete);
+    let config = saved(&mut a).unwrap();
+    assert_eq!(config.groups.len(), 1);
+    assert_eq!(config.profiles[0].group, None);
+}
+
+#[test]
+fn type_and_group_defaults_save_reset_and_reach_the_pending_launch() {
+    use crate::profiles_page::{Header, TreeKind};
+    let mut a = app();
+    let mut config = a.config.clone();
+    config.groups.push(crate::profile::ProfileGroup { id: "lab".into(), name: "Lab".into(), ..Default::default() });
+    let source = Profile { id: "custom:host".into(), name: "Host".into(), ssh: Some("lab.internal".into()), group: Some("Lab".into()), ..Profile::default() };
+    config.profiles.push(source.clone());
+    a.set_config(config);
+    a.open_profile_settings();
+    select_tree_row(&mut a, TreeKind::Defaults("ssh"));
+    key(&mut a, Key::Enter);
+    focus_field(&mut a, "SSH", "User");
+    typed(&mut a, "operator");
+    a.on_event(ctrl(Key::Enter));
+    let config = saved(&mut a).unwrap();
+    assert_eq!(config.profile_defaults["ssh"].ssh_options.as_ref().unwrap().user.as_deref(), Some("operator"));
+    let group_row = TreeKind::Header(Header::Group("lab".into()));
+    select_tree_row(&mut a, group_row.clone());
+    key(&mut a, Key::Char('E'));
+    for _ in 0..5 { key(&mut a, Key::Tab); }
+    key(&mut a, Key::Enter);
+    focus_field(&mut a, "SSH", "Port");
+    typed(&mut a, "2222");
+    a.on_event(ctrl(Key::Enter));
+    assert!(saved(&mut a).is_none());
+    a.on_event(ctrl(Key::Enter));
+    let config = saved(&mut a).unwrap();
+    assert_eq!(config.groups[0].defaults["ssh"].ssh_options.as_ref().unwrap().port, Some(2222));
+    let pane = a.new_pane_in(source, None);
+    let ssh = a.panes[&pane].pending.as_ref().unwrap().ssh_options.as_ref().unwrap();
+    assert_eq!((ssh.user.as_deref(), ssh.port), (Some("operator"), Some(2222)));
+
+    select_tree_row(&mut a, group_row);
+    key(&mut a, Key::Char('E'));
+    for _ in 0..5 { key(&mut a, Key::Tab); }
+    key(&mut a, Key::Delete);
+    assert!(a.settings.as_ref().unwrap().group_editor.as_ref().unwrap().defaults.contains_key("ssh"));
+    key(&mut a, Key::Delete);
+    a.on_event(ctrl(Key::Enter));
+    assert!(saved(&mut a).unwrap().groups[0].defaults.is_empty());
+    select_tree_row(&mut a, TreeKind::Defaults("ssh"));
+    key(&mut a, Key::Delete);
+    assert!(saved(&mut a).is_none());
+    key(&mut a, Key::Delete);
+    assert!(saved(&mut a).unwrap().profile_defaults.is_empty());
 }

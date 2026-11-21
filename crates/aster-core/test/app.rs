@@ -1155,3 +1155,28 @@ fn panes_use_the_profile_color_scheme_or_the_window_palette() {
     assert_eq!(a.pane_palette(a.tabs[1].focus).background, a.palette.background);
     assert_eq!(a.pane_palette(a.tabs[2].focus).background, a.palette.background);
 }
+
+#[test]
+fn launching_a_settings_profile_by_keyboard_or_mouse_starts_it_in_the_background() {
+    let (mut a, mut gfx) = app();
+    a.frame(&mut gfx, false);
+    a.select_profile_settings("local:b");
+    a.frame(&mut gfx, false);
+    for mouse in [false, true] {
+        if mouse {
+            let page = a.settings.as_ref().unwrap();
+            let row = a.settings_geometry().unwrap().rows.into_iter().find(|r| r.kind == crate::settings::RowKind::Item(page.selected)).unwrap();
+            let button = crate::profiles_page::layout::row_action(row.rect, a.ui());
+            a.on_event(Event::MouseDown { x: button.x + button.w / 2.0, y: button.y + button.h / 2.0, button: MouseButton::Left, clicks: 1 });
+        } else {
+            a.on_event(Event::Key { key: Key::F(5), mods: Mods::NONE, pressed: true });
+        }
+        a.frame(&mut gfx, false);
+        let launched = spawns(&a.take_effects());
+        assert_eq!(launched.len(), 1, "mouse launch = {mouse}");
+        assert_eq!(a.panes[&launched[0].0].source_profile.id, "local:b");
+        assert!(launched[0].1.cols > 2);
+        assert_eq!(a.focused_pane(), Some(SETTINGS_PANE));
+        assert!(a.settings_open());
+    }
+}
