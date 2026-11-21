@@ -256,7 +256,9 @@ pub(crate) fn map_key(physical: PhysicalKey, unmodified: &WinitKey) -> Key {
             NamedKey::Tab => Some(Key::Tab),
             NamedKey::ContextMenu => Some(Key::Apps),
             NamedKey::Control => Some(Key::Control),
-            NamedKey::Shift | NamedKey::Alt | NamedKey::Meta | NamedKey::AltGraph => Some(Key::Other),
+            NamedKey::Shift => Some(Key::Shift),
+            NamedKey::Alt | NamedKey::AltGraph => Some(Key::Alt),
+            NamedKey::Meta => Some(Key::Meta),
             other => function_key(other),
         };
         if let Some(k) = key {
@@ -590,7 +592,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
                 let key = map_key(event.physical_key, &event.key_without_modifiers);
                 let m = mods(held);
                 handler.event(w, Event::Key { key, mods: m, pressed });
-                if pressed {
+                if pressed && !key.is_modifier() {
                     for ev in chars_for(key, m, event.text.as_deref()) {
                         handler.event(w, ev);
                     }

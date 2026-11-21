@@ -318,7 +318,7 @@ impl App {
             }
             let x = mark.right() + 10.0 * s;
             let mut right = row.right() - 10.0 * s;
-            if let Some(hint) = self.keymap.bindings_of(action).next().map(format_binding) {
+            if let Some(hint) = self.keymap.bindings_of(&action).next().map(format_binding) {
                 let w = g.measure(&hint, small);
                 if right - x - w >= 90.0 * s {
                     let y = baseline(g, row, small);
@@ -1036,7 +1036,7 @@ impl App {
                 g.dl.round_rect(*r, theme.accent.alpha(0x38), (4.0 * s).round());
             }
             let ink = if *enabled { theme.text } else { theme.text_dim.alpha(0x80) };
-            let hint = self.keymap.bindings_of(*action).next().map(crate::keymap::format_binding).unwrap_or_default();
+            let hint = self.keymap.bindings_of(action).next().map(crate::keymap::format_binding).unwrap_or_default();
             let hint_w = if hint.is_empty() { 0.0 } else { g.measure(&hint, small) };
             let pad = (12.0 * s).round();
             let y = baseline(g, *r, ui);
@@ -1448,10 +1448,10 @@ impl App {
         page.info_rows = info_rows;
         page.shortcut_rows.clear();
         for (n, &index) in page.shown.iter().enumerate() {
-            if let Some(action) = crate::settings::shortcut(index) {
-                let mut bindings: Vec<_> = self.keymap.bindings_of(action).map(crate::keymap::format_binding).collect();
-                if page.capture.is_some_and(|(a, _)| a == action) {
-                    bindings = vec![t("Press the new shortcut").to_owned()];
+            if let Some(action) = page.shortcut(index) {
+                let mut bindings: Vec<_> = self.keymap.bindings_of(&action).map(crate::keymap::format_binding).collect();
+                if page.capture.as_ref().is_some_and(|(a, _)| *a == action) {
+                    bindings = vec![t("Press a key, click, scroll or release modifiers").to_owned()];
                 } else if bindings.is_empty() {
                     bindings.push(t("None").to_owned());
                 }
@@ -1536,11 +1536,11 @@ impl App {
                     } else if card.contains(mx, my) {
                         g.dl.round_rect(card, theme.button_hover, radius);
                     }
-                    if let Some(action) = crate::settings::shortcut(page.shown[n]) {
+                    if let Some(action) = page.shortcut(page.shown[n]) {
                         let tx = row.rect.x + (14.0 * s).round();
                         let layout = &page.shortcut_rows[&page.shown[n]];
-                        let capturing = page.capture.is_some_and(|(a, _)| a == action);
-                        g.text(tx, row.rect.y + (24.0 * s).round(), &action.label(), ui, theme.text, layout.label_width);
+                        let capturing = page.capture.as_ref().is_some_and(|(a, _)| *a == action);
+                        g.text(tx, row.rect.y + (24.0 * s).round(), &action.label_for(page.shortcut_name(page.shown[n])), ui, theme.text, layout.label_width);
                         for (lines, local) in &layout.chips {
                             let c = Rect::new(row.rect.x + local.x, row.rect.y + local.y, local.w, local.h);
                             g.dl.round_rect(c, theme.overlay, radius);
@@ -1679,10 +1679,10 @@ impl App {
                             centered(g, c, t("Open"), ui, theme.text);
                         }
                         control => {
-                            let editing = selected && page.editing() && matches!(control, Control::Text | Control::Font { .. } | Control::Number { .. });
+                            let editing = selected && page.editing() && matches!(control, Control::Text | Control::StringList | Control::Font { .. } | Control::Number { .. });
                             g.dl.round_rect(c, theme.overlay, radius);
                             g.dl.outline(c, if editing { theme.accent } else { theme.overlay_border }, radius, line);
-                            let stepper = !matches!(control, Control::Text | Control::Font { .. });
+                            let stepper = !matches!(control, Control::Text | Control::StringList | Control::Font { .. });
                             let edge = if stepper { (30.0 * s).round() } else { (10.0 * s).round() };
                             let inner = Rect::new(c.x + edge, c.y, (c.w - 2.0 * edge).max(0.0), c.h);
                             if stepper {

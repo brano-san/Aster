@@ -20,7 +20,7 @@ fn keys_map_by_us_position_so_hotkeys_work_on_any_layout() {
     assert_eq!(k, Key::Char('T'));
     assert_eq!(map_key(PhysicalKey::Code(KeyCode::Equal), &WinitKey::Character("=".into())), Key::Char('='));
     assert_eq!(map_key(PhysicalKey::Code(KeyCode::F11), &WinitKey::Named(NamedKey::F11)), Key::F(11));
-    assert_eq!(map_key(PhysicalKey::Code(KeyCode::ShiftLeft), &WinitKey::Named(NamedKey::Shift)), Key::Other);
+    assert_eq!(map_key(PhysicalKey::Code(KeyCode::ShiftLeft), &WinitKey::Named(NamedKey::Shift)), Key::Shift);
     assert_eq!(map_key(PhysicalKey::Code(KeyCode::ControlRight), &WinitKey::Named(NamedKey::Control)), Key::Control);
 }
 

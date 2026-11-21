@@ -70,3 +70,11 @@ fn paste_normalizes_newlines_trims_and_brackets() {
     assert_eq!(paste_bytes("a\nb\n", TermMode::empty(), true), b"a\rb", "multi-line text keeps its inner lines");
     assert_eq!(paste_bytes("x\x1b[201~y", TermMode::BRACKETED_PASTE, false), b"\x1b[200~xy\x1b[201~");
 }
+
+#[test]
+fn extended_mouse_buttons_and_horizontal_wheel_are_reported_in_sgr_mode() {
+    let mode = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
+    assert_eq!(encode_mouse(MouseAction::Press(MouseButton::Back), 0, 0, Mods::NONE, mode).unwrap(), b"\x1b[<128;1;1M");
+    assert_eq!(encode_mouse(MouseAction::Release(MouseButton::Forward), 0, 0, Mods::NONE, mode).unwrap(), b"\x1b[<129;1;1m");
+    assert_eq!(encode_mouse(MouseAction::WheelLeft, 0, 0, Mods::NONE, mode).unwrap(), b"\x1b[<66;1;1M");
+}

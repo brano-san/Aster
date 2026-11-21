@@ -106,6 +106,7 @@ pub trait Window {
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;
     fn close(&self);
+    fn request_quit(&self) {}
     fn activate(&self);
     fn open_window(&self, opts: WindowOptions);
     fn placement(&self) -> Placement;

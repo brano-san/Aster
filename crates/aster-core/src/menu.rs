@@ -58,7 +58,7 @@ impl Menu {
 
     pub fn action(&self, i: usize) -> Option<Action> {
         match self.entries.get(i) {
-            Some(Entry::Item { action, enabled: true, .. }) => Some(*action),
+            Some(Entry::Item { action, enabled: true, .. }) => Some(action.clone()),
             _ => None,
         }
     }
@@ -117,17 +117,22 @@ impl App {
             return;
         }
         self.activate(index);
+        self.open_menu(self.tab_menu_entries(index), x, y);
+    }
+
+    pub(crate) fn tab_menu_entries(&self, index: usize) -> Vec<Entry> {
+        let tab = self.tabs.get(index);
         let n = self.tabs.len();
-        let left = self.tabs[..index].iter().any(|t| !t.pinned);
-        let right = self.tabs[index + 1..].iter().any(|t| !t.pinned);
+        let left = self.tabs.get(..index).is_some_and(|tabs| tabs.iter().any(|t| !t.pinned));
+        let right = self.tabs.get(index + 1..).is_some_and(|tabs| tabs.iter().any(|t| !t.pinned));
         let mut entries = vec![
             item("New tab", Action::NewTab, true),
             item("Duplicate", Action::DuplicateTab, true),
             item("Duplicate as administrator", Action::DuplicateAsAdmin, self.can_elevate() && self.focused_pane().and_then(|p| self.panes.get(&p)).is_some_and(|p| p.profile.is_local())),
             item("Rename", Action::RenameTab, true),
-            item(if self.tabs[index].pinned { "Unpin tab" } else { "Pin tab" }, Action::PinTab, true),
+            item(if tab.is_some_and(|t| t.pinned) { "Unpin tab" } else { "Pin tab" }, Action::PinTab, true),
             item("Color", Action::SetTabColor, true),
-            item(if self.tabs[index].command_watch.armed() { "Cancel command notification" } else { "Notify when the command finishes" }, Action::NotifyCommand, self.can_watch_command(index)),
+            item(if tab.is_some_and(|t| t.command_watch.armed()) { "Cancel command notification" } else { "Notify when the command finishes" }, Action::NotifyCommand, tab.is_some() && self.can_watch_command(index)),
         ];
         if self.focused_pane().is_some_and(|id| self.panes.contains_key(&id)) {
             entries.push(item("Save as a profile", Action::SaveAsProfile, true));
@@ -139,7 +144,7 @@ impl App {
             Entry::Separator,
             item("Move left", Action::MoveTabLeft, index > 0 && self.can_move_tab(index, index - 1)),
             item("Move right", Action::MoveTabRight, self.can_move_tab(index, index + 1)),
-            item("Panes to separate tabs", Action::ExplodeTab, self.tabs.get(index).is_some_and(|t| t.root.panes().len() > 1)),
+            item("Panes to separate tabs", Action::ExplodeTab, tab.is_some_and(|t| t.root.panes().len() > 1)),
             item("Combine all tabs", Action::CombineTabs, n > 1),
             Entry::Separator,
             item("Close", Action::CloseTab, true),
@@ -148,10 +153,14 @@ impl App {
             item("Close tabs to the left", Action::CloseTabsToLeft, left),
             item("Reopen closed tab", Action::ReopenTab, !self.closed_tabs.is_empty()),
         ]);
-        self.open_menu(entries, x, y);
+        entries
     }
 
     pub(crate) fn open_terminal_menu(&mut self, x: f32, y: f32) {
+        self.open_menu(self.terminal_menu_entries(), x, y);
+    }
+
+    pub(crate) fn terminal_menu_entries(&self) -> Vec<Entry> {
         let selection = self.focused_terminal().is_some_and(|t| t.lock().has_selection());
         let mut entries = vec![
             item("Copy", Action::Copy, selection),
@@ -174,7 +183,7 @@ impl App {
                 item("Send a break on the serial line", Action::SerialBreak, true),
             ]);
         }
-        self.open_menu(entries, x, y);
+        entries
     }
 
     pub(crate) fn close_menu(&mut self) {

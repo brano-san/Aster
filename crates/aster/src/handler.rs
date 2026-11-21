@@ -518,6 +518,7 @@ impl<P: Platform> Handler<P> {
             Effect::Title(t) => window.set_title(&t),
             Effect::Cursor(c) => window.set_cursor(c),
             Effect::Minimize => window.minimize(),
+            Effect::Quit => window.request_quit(),
             Effect::ToggleMaximize => window.toggle_maximize(),
             Effect::ToggleFullscreen => {
                 window.toggle_fullscreen();

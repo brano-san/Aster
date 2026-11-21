@@ -18,8 +18,9 @@ pub enum Control {
     Profiles,
     Number { min: f64, max: f64, step: f64 },
     Text,
+    StringList,
     Font { monospace: bool },
-    Run(Action),
+    Run(&'static Action),
     ReadOnly(Info),
 }
 
@@ -64,13 +65,16 @@ const TAB_BARS: &[(&str, &str)] = &[("always", "Always"), ("auto", "With two or 
 const TAB_WIDTHS: &[(&str, &str)] = &[("fit", "Fit"), ("fixed", "Fixed")];
 const TAB_POSITIONS: &[(&str, &str)] = &[("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
 const BACKDROPS: &[(&str, &str)] = &[("none", "None"), ("acrylic", "Acrylic"), ("mica", "Mica")];
+const QUICK_CONNECT: &[(&str, &str)] = &[("ssh", "SSH"), ("telnet", "Telnet"), ("tcp", "TCP"), ("serial", "Serial port")];
 const SSH_CLIENTS: &[(&str, &str)] = &[("native", "Built in"), ("system", "System OpenSSH")];
 const LANGUAGES: &[(&str, &str)] = &[("auto", "Automatic"), ("en", "English"), ("ru", "Russian")];
 const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
 const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
 
 pub const SETTINGS: &[Setting] = &[
+    item(SHORTCUTS, "palette.hidden-commands", "Hidden palette commands", "Comma-separated action IDs to hide from the command palette", Control::StringList),
     item(PROFILES, "terminal.profile", "Default profile for new tabs", "Shell for new tabs and windows", Control::Profiles),
+    item(PROFILES, "picker.quick-connect", "Default quick connect provider", "Protocol used when an address has no prefix", Control::Choice(QUICK_CONNECT)),
     item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
     item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
     item(TERMINAL, "terminal.identification", "Terminal identification", "Report the Aster name and version to new shells", Control::Choice(IDENTIFICATION)),
@@ -136,19 +140,19 @@ pub const SETTINGS: &[Setting] = &[
     item(SSH, "ssh.share-connections", "Share connections", "New tabs to a host that is already open reuse its login", Control::Toggle),
     item(SSH, "ssh.clear-after-connect", "Clear after login", "Clear connection messages before the remote shell starts", Control::Toggle),
     item(SSH, "ssh.x11-display", "Local X11 display", "For X11 forwarding. Leave empty to use DISPLAY", Control::Text),
-    item(SYSTEM, "action.whats-new", "What's new", "Read the notes for this version", Control::Run(Action::WhatsNew)),
-    item(SYSTEM, "action.check-for-updates", "Check for updates", "Look for a new version now", Control::Run(Action::CheckForUpdates)),
+    item(SYSTEM, "action.whats-new", "What's new", "Read the notes for this version", Control::Run(&Action::WhatsNew)),
+    item(SYSTEM, "action.check-for-updates", "Check for updates", "Look for a new version now", Control::Run(&Action::CheckForUpdates)),
     item(SYSTEM, "updates.check-automatically", "Check for updates automatically", "Look for a new version each time Aster starts", Control::Toggle),
-    item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run(Action::OpenLog)),
-    item(SYSTEM, "action.open-config-file", "Config file", "Open the config file in the system editor", Control::Run(Action::OpenConfigFile)),
+    item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run(&Action::OpenLog)),
+    item(SYSTEM, "action.open-config-file", "Config file", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
     item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
     item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add \"Open in Aster\" to the folder menu of Windows Explorer", Control::Toggle),
-    item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run(Action::ReportProblem)),
+    item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run(&Action::ReportProblem)),
     item(CONFIG_FILE, "info.config-path", "File path", "Location of the active configuration", Control::ReadOnly(Info::ConfigPath)),
-    item(CONFIG_FILE, "action.edit-config", "Open in the editor", "Open the config file in the system editor", Control::Run(Action::OpenConfigFile)),
-    item(CONFIG_FILE, "action.open-config-folder", "Open the folder", "Open the folder containing the config file", Control::Run(Action::OpenConfigFolder)),
+    item(CONFIG_FILE, "action.edit-config", "Open in the editor", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
+    item(CONFIG_FILE, "action.open-config-folder", "Open the folder", "Open the folder containing the config file", Control::Run(&Action::OpenConfigFolder)),
     item(CONFIG_FILE, "info.config-status", "File status", "Check the configuration on disk", Control::ReadOnly(Info::ConfigStatus)),
-    item(CONFIG_FILE, "action.show-default-config", "Show the defaults", "Open a copy of the default settings", Control::Run(Action::ShowDefaultConfig)),
+    item(CONFIG_FILE, "action.show-default-config", "Show the defaults", "Open a copy of the default settings", Control::Run(&Action::ShowDefaultConfig)),
 ];
 
 pub fn get(config: &Config, key: &str) -> Option<Value> {
@@ -420,6 +424,7 @@ pub struct SettingsPage {
     pub(crate) segment_widths: std::collections::BTreeMap<&'static str, f32>,
     editing: Option<InlineEdit>,
     pub capture: Option<(Action, bool)>,
+    pub(crate) profile_actions: Vec<crate::picker::ProfileAction>,
     pub(crate) shortcut_rows: std::collections::BTreeMap<usize, ShortcutLayout>,
     pub(crate) info_rows: std::collections::BTreeMap<usize, Vec<String>>,
     pub notice: Option<String>,
@@ -455,7 +460,15 @@ impl SettingsPage {
         });
         let before_vault = shown.iter().position(|&i| SETTINGS[i].section == VAULT).unwrap_or(shown.len());
         shown.splice(before_vault..before_vault, vault_rows);
-        let shortcuts = (SETTINGS.len()..base).filter(|&i| item_matches(i, &self.query));
+        let shortcuts = (SETTINGS.len()..base).filter(|&i| {
+            if let Some(entry) = self.profile_action(i) {
+                let action = &entry.action;
+                let name = entry.name.as_deref();
+                found(&format!("{SHORTCUTS} {} {PROFILES} {} {} {} {}", t(SHORTCUTS), t(PROFILES), action.source_label_for(name), action.label_for(name), action.id()), &self.query)
+            } else {
+                item_matches(i, &self.query)
+            }
+        });
         let scheme_base = self.scheme_base();
         let schemes = self.schemes.iter().enumerate().filter(|(_, row)| {
             self.query.is_empty() || found(&row.name, &self.query)
@@ -466,7 +479,7 @@ impl SettingsPage {
         self.deleting = None;
         self.shown = if self.query.trim().is_empty() {
             let page = PAGES[self.page.min(PAGES.len() - 1)];
-            shown.into_iter().filter(|&i| self.section(i) == page).collect()
+            shown.into_iter().filter(|&i| if self.profile_action(i).is_some() { page == SHORTCUTS } else { self.section(i) == page }).collect()
         } else {
             shown
         };
@@ -510,11 +523,23 @@ impl SettingsPage {
     }
 
     pub fn current_shortcut(&self) -> Option<Action> {
-        self.shown.get(self.selected).and_then(|&i| shortcut(i))
+        self.shown.get(self.selected).and_then(|&i| self.shortcut(i))
+    }
+
+    fn profile_action(&self, item: usize) -> Option<&crate::picker::ProfileAction> {
+        self.profile_actions.get(item.checked_sub(SETTINGS.len() + Action::all().count())?)
+    }
+
+    pub(crate) fn shortcut(&self, item: usize) -> Option<Action> {
+        shortcut(item).or_else(|| self.profile_action(item).map(|entry| entry.action.clone()))
+    }
+
+    pub(crate) fn shortcut_name(&self, item: usize) -> Option<&str> {
+        self.profile_action(item)?.name.as_deref()
     }
 
     fn profile_base(&self) -> usize {
-        SETTINGS.len() + Action::all().count()
+        SETTINGS.len() + Action::all().count() + self.profile_actions.len()
     }
 
     pub fn profile_at(&self, item: usize) -> Option<&ProfileRow> {
@@ -594,7 +619,7 @@ impl SettingsPage {
             VAULT
         } else if self.scheme_at(item).is_some() {
             COLORS
-        } else if self.tree_at(item).is_some() {
+        } else if self.tree_at(item).is_some() || self.profile_action(item).is_some() {
             PROFILES
         } else {
             section_of(item)
@@ -656,7 +681,7 @@ pub fn control_width(control: Control) -> f32 {
         Control::Toggle => 40.0,
         Control::Number { .. } => 132.0,
         Control::Choice(_) | Control::Schemes | Control::Profiles => 220.0,
-        Control::Text | Control::Font { .. } => 260.0,
+        Control::Text | Control::StringList | Control::Font { .. } => 260.0,
         Control::Run(_) => 120.0,
         Control::ReadOnly(_) => 0.0,
     }
@@ -894,7 +919,7 @@ impl App {
             background: rgb(scheme.palette.background),
             colors: scheme.palette.ansi.map(rgb),
         }).collect();
-        let mut page = SettingsPage { profiles: self.profile_rows(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes, vault: self.vault.clone(), ..SettingsPage::default() };
+        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.profile_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes, vault: self.vault.clone(), ..SettingsPage::default() };
         page.refilter();
         page
     }
@@ -1004,6 +1029,7 @@ impl App {
             (Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles, Some(Value::String(v))) => {
                 self.setting_options(setting.control).into_iter().find(|(o, _)| o.eq_ignore_ascii_case(v)).map(|(_, l)| l).unwrap_or_else(|| v.clone())
             }
+            (Control::StringList, Some(Value::Array(items))) => items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
             (_, Some(Value::String(v))) => v.clone(),
             (_, Some(Value::Boolean(b))) => b.to_string(),
             _ => String::new(),
@@ -1015,7 +1041,7 @@ impl App {
     }
 
     pub fn shortcut_text(&self, action: Action) -> String {
-        let all: Vec<String> = self.keymap.bindings_of(action).map(format_binding).collect();
+        let all: Vec<String> = self.keymap.bindings_of(&action).map(format_binding).collect();
         if all.is_empty() {
             t("None").to_owned()
         } else {
@@ -1043,14 +1069,14 @@ impl App {
         let text = chord.to_string();
         let mut taken = Vec::new();
         let mut config = self.config.clone();
-        for other in Action::all().filter(|o| *o != action) {
+        for other in self.keymap.actions_for_chord(chord).filter(|o| **o != action).collect::<BTreeSet<_>>() {
             let current: Vec<String> = self.keymap.bindings_of(other).map(format_binding).collect();
             if current.contains(&text) {
                 config.hotkeys.insert(other.id(), current.into_iter().filter(|b| *b != text).collect());
                 taken.push(other.label());
             }
         }
-        let mut bindings: Vec<String> = if append { self.keymap.bindings_of(action).map(format_binding).collect() } else { Vec::new() };
+        let mut bindings: Vec<String> = if append { self.keymap.bindings_of(&action).map(format_binding).collect() } else { Vec::new() };
         if !bindings.contains(&text) {
             bindings.push(text.clone());
             config.hotkeys.insert(action.id(), bindings);
@@ -1066,7 +1092,7 @@ impl App {
     }
 
     fn capture_key(&mut self, key: Key, mods: Mods) {
-        let Some((action, append)) = self.settings.as_ref().and_then(|p| p.capture) else { return };
+        let Some((action, append)) = self.settings.as_ref().and_then(|p| p.capture.clone()) else { return };
         match key {
             Key::Escape if mods == Mods::NONE => {
                 if let Some(p) = self.settings.as_mut() {
@@ -1122,8 +1148,8 @@ impl App {
                 };
                 self.set_number(setting, now + step * delta as f64);
             }
-            Control::Text | Control::Font { .. } => self.begin_edit(),
-            Control::Run(action) => self.run(action),
+            Control::Text | Control::StringList | Control::Font { .. } => self.begin_edit(),
+            Control::Run(action) => self.run(action.clone()),
             Control::ReadOnly(_) => {}
         }
     }
@@ -1141,7 +1167,7 @@ impl App {
     fn begin_edit(&mut self) {
         let Some(setting) = self.settings.as_ref().and_then(|p| p.current()) else { return };
         let text = match setting.control {
-            Control::Number { .. } | Control::Text | Control::Font { .. } => self.setting_text(setting),
+            Control::Number { .. } | Control::Text | Control::StringList | Control::Font { .. } => self.setting_text(setting),
             _ => return,
         };
         if let Some(p) = self.settings.as_mut() {
@@ -1190,6 +1216,10 @@ impl App {
         let Some(setting) = page.current() else { return };
         match setting.control {
             Control::Text | Control::Font { .. } => self.apply_setting(setting.key, Value::String(text.trim().to_owned())),
+            Control::StringList => {
+                let values = text.split(',').map(str::trim).filter(|value| !value.is_empty()).map(|value| Value::String(value.to_owned())).collect();
+                self.apply_setting(setting.key, Value::Array(values));
+            }
             Control::Number { .. } => {
                 if let Ok(v) = text.trim().replace(',', ".").parse::<f64>() {
                     self.set_number(setting, v);
@@ -1494,7 +1524,7 @@ impl App {
             page.deleting = None;
             return self.profile_tree_click(item, row.rect, x, y);
         }
-        if let Some(action) = shortcut(page.shown[n]) {
+        if let Some(action) = page.shortcut(page.shown[n]) {
             page.capture = Some((action, false));
             return;
         }
@@ -1531,8 +1561,10 @@ pub fn explorer_label() -> &'static str {
     t("Open in Aster")
 }
 
+pub(crate) const TRAY_MENU: [(&str, Action); 2] = [("New window", Action::NewWindow), ("Quit", Action::Quit)];
+
 pub fn tray_menu_labels() -> [&'static str; 2] {
-    [t("New window"), t("Quit")]
+    TRAY_MENU.map(|(label, _)| t(label))
 }
 
 #[cfg(test)]

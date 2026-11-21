@@ -1,8 +1,9 @@
-use crate::input::{Key, Mods};
+use crate::input::{Key, Mods, MouseButton, WheelDirection};
+use crate::picker::ProfileSection;
 use std::collections::BTreeMap;
 use std::fmt;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Action {
     CommandSelector,
     ProfileSelector,
@@ -87,6 +88,15 @@ pub enum Action {
     WhatsNew,
     CheckForUpdates,
     ToggleTabBar,
+    ManageProfiles,
+    ClearRecentProfiles,
+    MinimizeWindow,
+    ToggleMaximize,
+    CloseWindow,
+    Quit,
+    OpenProfile(String),
+    SelectProfileSection(ProfileSection),
+    SelectProfileGroup(String),
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -172,24 +182,37 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::WhatsNew, "whats-new", "What's new"),
     (Action::CheckForUpdates, "check-for-updates", "Check for updates"),
     (Action::ToggleTabBar, "toggle-tab-bar", "Show or hide the tab bar"),
+    (Action::ManageProfiles, "manage-profiles", "Manage profiles"),
+    (Action::ClearRecentProfiles, "clear-recent-profiles", "Clear recent profiles"),
+    (Action::MinimizeWindow, "minimize-window", "Minimize window"),
+    (Action::ToggleMaximize, "toggle-maximize", "Maximize or restore window"),
+    (Action::CloseWindow, "close-window", "Close window"),
+    (Action::Quit, "quit", "Quit"),
 ];
 
 impl Action {
-    pub fn works_beside_settings(self) -> bool {
+    pub fn works_beside_settings(&self) -> bool {
         use Action::*;
         matches!(
             self,
-            Tab(_) | NextTab | PreviousTab | NextMruTab | PreviousMruTab | MoveTabLeft | MoveTabRight | NewTab | NewWindow | NewAdminTab | CloseTab | PinTab | ReopenTab | ToggleLastTab | ProfileSelector | CommandSelector | ToggleFullscreen | ToggleTabBar | SelectColorScheme
+            Tab(_) | NextTab | PreviousTab | NextMruTab | PreviousMruTab | MoveTabLeft | MoveTabRight | NewTab | NewWindow | NewAdminTab | CloseTab | PinTab | ReopenTab | ToggleLastTab | ProfileSelector | CommandSelector | ToggleFullscreen | ToggleTabBar | SelectColorScheme | OpenProfile(_) | SelectProfileSection(_) | SelectProfileGroup(_) | ManageProfiles | ClearRecentProfiles | MinimizeWindow | ToggleMaximize | CloseWindow | Quit
         )
     }
 
     pub fn all() -> impl Iterator<Item = Action> {
-        NAMED.iter().map(|(a, _, _)| *a).chain((1..=10).map(Action::Tab))
+        NAMED.iter().map(|(a, _, _)| a).filter(|a| a.available()).cloned().chain((1..=20).map(Action::Tab))
+    }
+
+    fn available(&self) -> bool {
+        cfg!(windows) || *self != Self::Quit
     }
 
     pub fn id(&self) -> String {
         match self {
             Action::Tab(n) => format!("tab-{n}"),
+            Action::OpenProfile(id) => format!("profile.{id}"),
+            Action::SelectProfileSection(section) => format!("profile-selector.{}", section.id()),
+            Action::SelectProfileGroup(id) => format!("group-selector.{id}"),
             a => NAMED.iter().find(|(x, _, _)| x == a).map_or("", |(_, id, _)| id).to_owned(),
         }
     }
@@ -197,30 +220,56 @@ impl Action {
     fn label_template(&self) -> &'static str {
         match self {
             Action::Tab(_) => "Switch to tab {n}",
+            Action::OpenProfile(_) => "Open profile {n}",
+            Action::SelectProfileSection(_) | Action::SelectProfileGroup(_) => "Show profiles in {n}",
             a => NAMED.iter().find(|(x, _, _)| x == a).map_or("", |(_, _, l)| l),
         }
     }
 
-    fn label_number(&self) -> String {
+    fn label_argument(&self, name: Option<&str>, translated: bool) -> String {
         match self {
             Action::Tab(n) => n.to_string(),
+            Action::OpenProfile(id) | Action::SelectProfileGroup(id) => name.unwrap_or(id).to_owned(),
+            Action::SelectProfileSection(section) => {
+                let label = section.source_label();
+                if translated { crate::i18n::t(label) } else { label }.to_owned()
+            }
             _ => String::new(),
         }
     }
 
     pub fn label(&self) -> String {
-        crate::i18n::tf(self.label_template(), &[("n", &self.label_number())])
+        self.label_for(None)
     }
 
     pub fn source_label(&self) -> String {
-        self.label_template().replace("{n}", &self.label_number())
+        self.source_label_for(None)
+    }
+
+    pub(crate) fn label_for(&self, name: Option<&str>) -> String {
+        crate::i18n::tf(self.label_template(), &[("n", &self.label_argument(name, true))])
+    }
+
+    pub(crate) fn source_label_for(&self, name: Option<&str>) -> String {
+        self.label_template().replace("{n}", &self.label_argument(name, false))
     }
 
     pub fn from_id(id: &str) -> Option<Action> {
+        if let Some((kind, target)) = id.split_once('.') {
+            if target.trim().is_empty() {
+                return None;
+            }
+            return match kind {
+                "profile" => Some(Action::OpenProfile(target.to_owned())),
+                "profile-selector" => ProfileSection::from_id(target).map(Action::SelectProfileSection),
+                "group-selector" => Some(Action::SelectProfileGroup(target.to_owned())),
+                _ => None,
+            };
+        }
         if let Some(n) = id.strip_prefix("tab-").and_then(|n| n.parse::<u8>().ok()) {
             return (1..=20).contains(&n).then_some(Action::Tab(n));
         }
-        NAMED.iter().find(|(_, x, _)| *x == id).map(|(a, _, _)| *a)
+        NAMED.iter().find(|(a, x, _)| *x == id && a.available()).map(|(a, _, _)| a.clone())
     }
 }
 
@@ -247,6 +296,15 @@ fn key_name(name: &str) -> Option<Key> {
         "insert" | "ins" => Key::Insert,
         "tab" => Key::Tab,
         "space" => Key::Space,
+        "mouseleft" => Key::Mouse(MouseButton::Left),
+        "mouseright" => Key::Mouse(MouseButton::Right),
+        "mousemiddle" => Key::Mouse(MouseButton::Middle),
+        "mouseback" => Key::Mouse(MouseButton::Back),
+        "mouseforward" => Key::Mouse(MouseButton::Forward),
+        "wheelup" => Key::Wheel(WheelDirection::Up),
+        "wheeldown" => Key::Wheel(WheelDirection::Down),
+        "wheelleft" => Key::Wheel(WheelDirection::Left),
+        "wheelright" => Key::Wheel(WheelDirection::Right),
         "plus" => Key::Char('='),
         "minus" => Key::Char('-'),
         f if f.len() > 1 && f.starts_with('f') && f[1..].parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)) => Key::F(f[1..].parse().ok()?),
@@ -262,20 +320,11 @@ fn key_name(name: &str) -> Option<Key> {
     Some(key)
 }
 
-impl Chord {
-    pub fn parse(text: &str) -> Option<Chord> {
-        let text = text.trim();
-        let (mods_part, key_part) = match text.strip_suffix("--") {
-            Some(rest) => (rest, "-"),
-            None if text == "-" => ("", "-"),
-            None => match text.rsplit_once('-') {
-                Some((m, k)) => (m, k),
-                None => ("", text),
-            },
-        };
-        let mut mods = Mods::NONE;
-        for m in mods_part.split('-').filter(|m| !m.is_empty()) {
-            match m.to_ascii_lowercase().as_str() {
+fn modifiers(text: &str) -> Option<Mods> {
+    let mut mods = Mods::NONE;
+    if !text.is_empty() {
+        for name in text.split(['-', '+']) {
+            match name.to_ascii_lowercase().as_str() {
                 "ctrl" | "control" => mods.ctrl = true,
                 "shift" => mods.shift = true,
                 "alt" | "option" | "⌥" => mods.alt = true,
@@ -283,18 +332,43 @@ impl Chord {
                 _ => return None,
             }
         }
-        Some(Chord { key: key_name(key_part)?, mods })
+    }
+    Some(mods)
+}
+
+impl Chord {
+    pub fn parse(text: &str) -> Option<Chord> {
+        let text = text.trim();
+        if let Some(mods) = modifiers(text).filter(Mods::any) {
+            return Some(Chord { key: Key::ModifiersOnly, mods });
+        }
+        let (prefix, key) = if matches!(text, "-" | "+") {
+            ("", text)
+        } else if let Some(prefix) = text.strip_suffix("--").or_else(|| text.strip_suffix("+-")) {
+            (prefix, "-")
+        } else if let Some(prefix) = text.strip_suffix("++").or_else(|| text.strip_suffix("-+")) {
+            (prefix, "+")
+        } else {
+            text.rsplit_once(['-', '+']).unwrap_or(("", text))
+        };
+        Some(Chord { key: key_name(key)?, mods: modifiers(prefix)? })
     }
 }
 
 impl fmt::Display for Chord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let m = self.mods;
+        let mut separator = "";
         for (on, name) in [(m.ctrl, "Ctrl"), (m.meta, "Meta"), (m.alt, "Alt"), (m.shift, "Shift")] {
             if on {
-                write!(f, "{name}-")?;
+                write!(f, "{separator}{name}")?;
+                separator = "-";
             }
         }
+        if self.key == Key::ModifiersOnly {
+            return Ok(());
+        }
+        write!(f, "{separator}")?;
         match self.key {
             Key::Up => write!(f, "Up"),
             Key::Down => write!(f, "Down"),
@@ -312,6 +386,8 @@ impl fmt::Display for Chord {
             Key::Tab => write!(f, "Tab"),
             Key::Space => write!(f, "Space"),
             Key::F(n) => write!(f, "F{n}"),
+            Key::Mouse(button) => write!(f, "Mouse{button:?}"),
+            Key::Wheel(direction) => write!(f, "Wheel{direction:?}"),
             Key::Char(c) => write!(f, "{c}"),
             other => write!(f, "{other:?}"),
         }
@@ -330,8 +406,12 @@ pub fn format_binding(b: &Binding) -> String {
 }
 
 pub fn defaults() -> Vec<(Action, &'static [&'static str])> {
+    defaults_for(cfg!(windows))
+}
+
+fn defaults_for(windows: bool) -> Vec<(Action, &'static [&'static str])> {
     use Action::*;
-    vec![
+    let common: &[(Action, &[&str])] = &[
         (CommandSelector, &["Ctrl-Shift-P"]),
         (ProfileSelector, &["Ctrl-Shift-E"]),
         (ToggleFullscreen, &["F11", "Alt-Enter"]),
@@ -354,10 +434,6 @@ pub fn defaults() -> Vec<(Action, &'static [&'static str])> {
         (Tab(10), &["Alt-0"]),
         (SplitRight, &["Ctrl-Shift-S"]),
         (SplitBottom, &["Ctrl-Shift-D"]),
-        (PaneNavUp, &["Ctrl-Alt-Up"]),
-        (PaneNavDown, &["Ctrl-Alt-Down"]),
-        (PaneNavLeft, &["Ctrl-Alt-Left"]),
-        (PaneNavRight, &["Ctrl-Alt-Right"]),
         (PaneNavPrevious, &["Ctrl-Alt-["]),
         (PaneNavNext, &["Ctrl-Alt-]"]),
         (PaneMaximize, &["Ctrl-Alt-Enter"]),
@@ -367,7 +443,6 @@ pub fn defaults() -> Vec<(Action, &'static [&'static str])> {
         (PaneResizeDown, &["Alt-Shift-Down"]),
         (CtrlC, &["Ctrl-C"]),
         (Copy, &["Ctrl-Shift-C"]),
-        (Paste, &["Ctrl-Shift-V", "Shift-Insert"]),
         (SelectAll, &["Ctrl-Shift-A"]),
         (ZoomIn, &["Ctrl-=", "Ctrl-Shift-="]),
         (ZoomOut, &["Ctrl--", "Ctrl-Shift--"]),
@@ -387,7 +462,25 @@ pub fn defaults() -> Vec<(Action, &'static [&'static str])> {
         (ToggleTabBar, &["Ctrl-Shift-B"]),
         (OpenFiles, &["Ctrl-Shift-O"]),
         (FillPassword, &["Ctrl-Shift-Enter"]),
-    ]
+    ];
+    let platform: &[(Action, &[&str])] = if windows {
+        &[
+            (PaneNavUp, &["Ctrl-Alt-Up"]),
+            (PaneNavDown, &["Ctrl-Alt-Down"]),
+            (PaneNavLeft, &["Ctrl-Alt-Left"]),
+            (PaneNavRight, &["Ctrl-Alt-Right"]),
+            (Paste, &["Ctrl-Shift-V", "Shift-Insert"]),
+        ]
+    } else {
+        &[
+            (PaneNavUp, &["Alt-Shift-K"]),
+            (PaneNavDown, &["Alt-Shift-J"]),
+            (PaneNavLeft, &["Alt-Shift-H"]),
+            (PaneNavRight, &["Alt-Shift-L"]),
+            (Paste, &["Ctrl-Shift-V"]),
+        ]
+    };
+    common.iter().chain(platform).cloned().collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,8 +502,12 @@ impl Keymap {
     }
 
     pub fn with_mru(overrides: &BTreeMap<String, Vec<String>>, mru_tabs: bool) -> Self {
+        Self::for_platform(overrides, mru_tabs, cfg!(windows))
+    }
+
+    fn for_platform(overrides: &BTreeMap<String, Vec<String>>, mru_tabs: bool, windows: bool) -> Self {
         let mut map: BTreeMap<Action, Vec<Binding>> = BTreeMap::new();
-        for (action, keys) in defaults() {
+        for (action, keys) in defaults_for(windows) {
             map.insert(action, keys.iter().filter_map(|k| parse_binding(k)).collect());
         }
         for (linear, recent, shortcut) in [(Action::NextTab, Action::NextMruTab, "Ctrl-Tab"), (Action::PreviousTab, Action::PreviousMruTab, "Ctrl-Shift-Tab")] {
@@ -423,17 +520,23 @@ impl Keymap {
                 map.entry(recent).or_default().push(binding);
             }
         }
+        let mut custom = BTreeMap::new();
         for (id, keys) in overrides {
             if let Some(action) = Action::from_id(id) {
-                map.insert(action, keys.iter().filter_map(|k| parse_binding(k)).collect());
+                map.remove(&action);
+                custom.insert(action, keys.iter().filter_map(|k| parse_binding(k)).collect::<Vec<_>>());
             }
         }
-        let bindings = map.into_iter().flat_map(|(a, bs)| bs.into_iter().map(move |b| (b, a))).collect();
+        let bindings = custom.into_iter().chain(map).flat_map(|(a, bs)| bs.into_iter().map(move |b| (b, a.clone()))).collect();
         Self { bindings, pending: Vec::new() }
     }
 
-    pub fn bindings_of(&self, action: Action) -> impl Iterator<Item = &Binding> {
-        self.bindings.iter().filter(move |(_, a)| *a == action).map(|(b, _)| b)
+    pub fn bindings_of<'a>(&'a self, action: &'a Action) -> impl Iterator<Item = &'a Binding> {
+        self.bindings.iter().filter(move |(_, a)| a == action).map(|(b, _)| b)
+    }
+
+    pub(crate) fn actions_for_chord(&self, chord: Chord) -> impl Iterator<Item = &Action> {
+        self.bindings.iter().filter(move |(binding, _)| binding.as_slice() == [chord]).map(|(_, action)| action)
     }
 
     pub fn is_pending(&self) -> bool {
@@ -444,10 +547,17 @@ impl Keymap {
         self.pending.clear();
     }
 
+    pub(crate) fn accepts(&self, chord: Chord) -> bool {
+        self.bindings.iter().any(|(binding, _)| {
+            binding.first() == Some(&chord)
+                || binding.get(self.pending.len()) == Some(&chord) && binding.starts_with(&self.pending)
+        })
+    }
+
     pub fn press(&mut self, chord: Chord) -> Outcome {
         self.pending.push(chord);
         if let Some((_, a)) = self.bindings.iter().find(|(b, _)| *b == self.pending) {
-            let a = *a;
+            let a = a.clone();
             self.pending.clear();
             return Outcome::Action(a);
         }

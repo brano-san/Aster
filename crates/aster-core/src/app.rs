@@ -103,6 +103,7 @@ pub enum Effect {
     ToggleMaximize,
     ToggleFullscreen,
     Close,
+    Quit,
     NewWindow,
     Timer(u32),
     Attention,
@@ -242,6 +243,7 @@ pub struct App {
     swallow_char: bool,
     pub(crate) swallow_chord: Option<Key>,
     mouse_mods: Mods,
+    modifier_gesture: shortcut_input::ModifierGesture,
     pub(crate) closed_tabs: Vec<crate::session::TabState>,
     last_tab: Option<PaneId>,
     pub(crate) mru: crate::tabs::MruTabs,
@@ -338,6 +340,7 @@ impl App {
             swallow_char: false,
             swallow_chord: None,
             mouse_mods: Mods::NONE,
+            modifier_gesture: Default::default(),
             closed_tabs: Vec::new(),
             last_tab: None,
             mru: crate::tabs::MruTabs::default(),
@@ -1196,6 +1199,9 @@ impl App {
         match action {
             CommandSelector => self.open_overlay(OverlayKind::Commands),
             ProfileSelector => self.open_overlay(OverlayKind::Profiles),
+            OpenProfile(id) => self.open_profile_by_id(&id),
+            SelectProfileSection(section) => self.open_filtered_profiles(crate::picker::ProfileFilter::Section(section)),
+            SelectProfileGroup(id) => self.open_filtered_profiles(crate::picker::ProfileFilter::Group(&id)),
             Search => self.open_search(),
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             SetTabColor => self.open_overlay(OverlayKind::TabColors),
@@ -1242,6 +1248,12 @@ impl App {
                 self.dirty = true;
             }
             Settings => self.open_settings(),
+            ManageProfiles => self.open_profile_settings(),
+            ClearRecentProfiles => self.clear_recent(),
+            MinimizeWindow => self.effects.push(Effect::Minimize),
+            ToggleMaximize => self.effects.push(Effect::ToggleMaximize),
+            CloseWindow => self.request_close(crate::close::CloseTarget::Window),
+            Quit => self.effects.push(Effect::Quit),
             RenameTab => self.start_rename(self.active),
             PinTab => self.toggle_pin(),
             SaveAsProfile => self.save_as_profile(false),
@@ -1363,14 +1375,14 @@ impl App {
         self.dirty = true;
     }
 
+    fn open_filtered_profiles(&mut self, filter: crate::picker::ProfileFilter<'_>) {
+        self.overlay = Some(Overlay::new(OverlayKind::Profiles, self.filtered_profile_picks(filter)).with_quick_connect(None, self.ssh.is_some()));
+        self.dirty = true;
+    }
+
     pub(crate) fn open_overlay(&mut self, kind: OverlayKind) {
         let items = match kind {
-            OverlayKind::Commands => Action::all()
-                .filter(|a| !matches!(a, Action::SerialSpeed | Action::SerialBreak) || self.serial_pane().is_some())
-                .filter(|a| *a != Action::SaveLayout || self.can_save_layout())
-                .filter(|a| *a != Action::SaveAsProfile || self.focused_pane().is_some_and(|id| self.panes.contains_key(&id)))
-                .map(|a| Pick { label: a.label(), hint: self.keymap.bindings_of(a).next().map(crate::keymap::format_binding).unwrap_or_default(), value: a.id(), ..Pick::default() })
-                .collect(),
+            OverlayKind::Commands => self.command_picks(),
             OverlayKind::Profiles => self.profile_picks(),
             OverlayKind::ProfileTemplates => crate::profiles_page::profile_templates(),
             OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), value: n, ..Pick::default() }).collect(),
@@ -1382,8 +1394,8 @@ impl App {
             }
         };
         let mut overlay = Overlay::new(kind, items);
-        if kind == OverlayKind::Profiles && self.ssh.is_some() {
-            overlay = overlay.with_quick_connect();
+        if kind == OverlayKind::Profiles {
+            overlay = overlay.with_quick_connect(Some(self.config.picker.quick_connect), self.ssh.is_some());
         }
         if kind == OverlayKind::Schemes {
             let current = self.current_scheme();
@@ -1418,20 +1430,17 @@ impl App {
             }
             OverlayKind::Profiles if value.starts_with(crate::overlay::QUICK) => {
                 let text = &value[crate::overlay::QUICK.len()..];
-                if let Some(address) = aster_proto::address::parse_url(text) {
-                    self.open_tab(crate::ssh::socket_profile(&address));
-                } else if let (Some(t), Some(ssh)) = (crate::ssh::parse_target(text), self.ssh.clone()) {
-                    self.open_tab(t.profile(&ssh));
+                use crate::quick_connect::QuickTarget;
+                if let Some((target, _)) = QuickTarget::parse(text, None, self.ssh.is_some()) {
+                    if let Some(profile) = target.profile(self.ssh.as_deref()) {
+                        self.open_tab(profile);
+                    }
                 }
             }
-            OverlayKind::Profiles if value == crate::overlay::MANAGE => self.open_profile_settings(),
-            OverlayKind::Profiles if value == crate::overlay::CLEAR_RECENT => self.clear_recent(),
+            OverlayKind::Profiles if value == crate::overlay::MANAGE => self.run(Action::ManageProfiles),
+            OverlayKind::Profiles if value == crate::overlay::CLEAR_RECENT => self.run(Action::ClearRecentProfiles),
             OverlayKind::Profiles => {
-                let id = value.strip_prefix(crate::picker::RECENT).unwrap_or(&value).to_owned();
-                if let Some(p) = self.profiles.iter().find(|p| p.id == id).cloned() {
-                    self.note_recent(&id);
-                    self.open_tab(p);
-                }
+                self.open_profile_by_id(value.strip_prefix(crate::picker::RECENT).unwrap_or(&value));
             }
             OverlayKind::TabColors => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -1476,9 +1485,8 @@ impl App {
             Key::PageUp => o.step(-8),
             Key::PageDown => o.step(8),
             Key::Backspace if o.kind == OverlayKind::Profiles && o.query_text().is_empty() => {
-                let id = o.selected_value().unwrap_or_default();
-                let id = id.strip_prefix(crate::picker::RECENT).unwrap_or(&id);
-                let address = self.profiles.iter().find(|p| p.id == id).and_then(|p| p.ssh.clone().or_else(|| p.socket.clone()));
+                let provider = o.quick_provider();
+                let address = o.selected_value().and_then(|value| self.profile_edit_address(&value, provider));
                 if let (Some(address), Some(o)) = (address, self.overlay.as_mut()) {
                     o.set_query(&address);
                 }
@@ -1680,11 +1688,20 @@ impl App {
                 self.dirty = true;
             }
             Event::Key { key: Key::Control, mods, pressed: false } if !mods.ctrl => self.finish_mru(),
-            Event::Key { key: Key::Control, .. } => {}
-            Event::Key { key, mods, pressed: true } => self.on_key(key, mods),
+            Event::Key { key, .. } if key.is_modifier() => {}
+            Event::Key { key, mods, pressed: true } => {
+                self.modifier_gesture.cancel();
+                self.on_key(key, mods);
+            }
             Event::Key { .. } => {}
-            Event::Char(c) => self.on_char(c, false),
-            Event::AltChar(c) => self.on_char(c, true),
+            Event::Char(c) => {
+                self.modifier_gesture.cancel();
+                self.on_char(c, false);
+            }
+            Event::AltChar(c) => {
+                self.modifier_gesture.cancel();
+                self.on_char(c, true);
+            }
             Event::Pasted(t) => self.paste(t),
             Event::VaultPasted { input, text } => self.paste_vault(input, text),
             Event::Preedit(p) => {
@@ -1697,6 +1714,8 @@ impl App {
                     self.dirty = true;
                 }
                 self.focused = f;
+                self.mouse_mods = Mods::NONE;
+                self.modifier_gesture = Default::default();
                 self.keymap.reset();
                 self.reset_blink();
                 for p in self.panes.values() {
@@ -1716,6 +1735,7 @@ impl App {
                     self.mru.cancel();
                     self.dirty = true;
                 }
+                self.modifier_gesture.cancel();
                 self.on_down(x, y, button, clicks);
             }
             Event::MouseUp { x, y, button } => self.on_up(x, y, button),
@@ -1724,8 +1744,17 @@ impl App {
                     self.finish_mru();
                 }
                 self.mouse_mods = mods;
+                if let Some(mods) = self.modifier_gesture.change(mods) {
+                    let chord = Chord { key: Key::ModifiersOnly, mods };
+                    if !self.capture_shortcut(chord) {
+                        self.non_keyboard_shortcut(chord);
+                    }
+                }
             }
-            Event::Wheel { dy, .. } => self.on_wheel(dy),
+            Event::Wheel { dx, dy } => {
+                self.modifier_gesture.cancel();
+                self.on_wheel(dx, dy);
+            }
             Event::MouseLeave => {
                 self.mouse = (-1.0, -1.0);
                 self.hover = HitArea::Client;
@@ -1946,7 +1975,7 @@ impl App {
     fn report(&mut self, pane: PaneId, rect: Rect, action: MouseAction, x: f32, y: f32, mods: Mods) -> bool {
         let Some(p) = self.panes.get(&pane) else { return false };
         let mode = p.terminal.lock().mode();
-        if mods.shift || !mode.intersects(TermMode::MOUSE_MODE) {
+        if !mode.intersects(TermMode::MOUSE_MODE) {
             return false;
         }
         let (line, col, _) = self.cell_at(pane, rect, x, y);
@@ -2118,6 +2147,10 @@ impl App {
     fn on_down(&mut self, x: f32, y: f32, button: MouseButton, clicks: u8) {
         self.mouse = (x, y);
         self.dirty = true;
+        let chord = Chord { key: Key::Mouse(button), mods: self.mouse_mods };
+        if self.capture_shortcut(chord) {
+            return;
+        }
         if let Some(o) = self.overlay.as_ref() {
             match view::overlay_hit(self, o, x, y) {
                 Some(Some(i)) => {
@@ -2163,6 +2196,8 @@ impl App {
         if self.settings.is_some() && self.chrome.content.contains(x, y) {
             if button == MouseButton::Left {
                 self.settings_click(x, y);
+            } else {
+                self.non_keyboard_shortcut(chord);
             }
             return;
         }
@@ -2173,6 +2208,8 @@ impl App {
                     self.start_selected = i;
                     self.launch_start_entry(page.entries[i]);
                 }
+            } else {
+                self.non_keyboard_shortcut(chord);
             }
             return;
         }
@@ -2199,7 +2236,7 @@ impl App {
                         self.drag = Drag::Tab { index: i, start: self.chrome.tab_axis(x, y), moved: false };
                     }
                     MouseButton::Right => self.open_tab_menu(i, x, y),
-                    _ => {}
+                    _ => { self.non_keyboard_shortcut(chord); }
                 }
             }
             return;
@@ -2208,7 +2245,10 @@ impl App {
             self.drag = Drag::Splitter { path: s.path.clone(), axis: s.axis, span: s.span };
             return;
         }
-        let Some((pane, rect)) = self.pane_at(x, y) else { return };
+        let Some((pane, rect)) = self.pane_at(x, y) else {
+            self.non_keyboard_shortcut(chord);
+            return;
+        };
         if self.broadcast.is_some() && self.broadcast_targets().contains(&pane) && y >= rect.bottom() - view::hint_height(self.ui()) {
             self.broadcast = None;
             self.dirty = true;
@@ -2216,8 +2256,12 @@ impl App {
         }
         self.focus_pane(pane);
         let held = self.mouse_mods;
-        if !held.shift && self.report(pane, rect, MouseAction::Press(button), x, y, Mods { shift: false, ..held }) {
+        if !held.shift && self.report(pane, rect, MouseAction::Press(button), x, y, held) {
             self.drag = Drag::Report { pane, button };
+            return;
+        }
+        let shift_selection = held.shift && self.panes.get(&pane).is_some_and(|p| p.terminal.lock().mode().intersects(TermMode::MOUSE_MODE));
+        if !shift_selection && self.non_keyboard_shortcut(chord) {
             return;
         }
         match button {
@@ -2291,10 +2335,10 @@ impl App {
                     self.report(pane, rect, MouseAction::Release(button), x, y, Mods::NONE);
                 }
             }
-            Drag::Button(area) if self.hit_test(x, y) == area => self.effects.push(match area {
-                HitArea::Minimize => Effect::Minimize,
-                HitArea::Maximize => Effect::ToggleMaximize,
-                _ => Effect::Close,
+            Drag::Button(area) if self.hit_test(x, y) == area => self.run(match area {
+                HitArea::Minimize => Action::MinimizeWindow,
+                HitArea::Maximize => Action::ToggleMaximize,
+                _ => Action::CloseWindow,
             }),
             Drag::TabClose(i) if self.chrome.tabs.get(i).is_some_and(|t| t.close.contains(x, y)) => self.close_tab_asking(i),
             Drag::Plus if self.chrome.plus.contains(x, y) => self.open_default_tab(),
@@ -2302,28 +2346,55 @@ impl App {
         }
     }
 
-    fn on_wheel(&mut self, dy: f32) {
-        let (x, y) = self.mouse;
+    fn on_wheel(&mut self, dx: f32, dy: f32) {
+        use crate::input::WheelDirection;
+        let Some(direction) = WheelDirection::from_delta(dx, dy) else { return };
+        let chord = Chord { key: Key::Wheel(direction), mods: self.mouse_mods };
+        if self.capture_shortcut(chord) {
+            return;
+        }
+        let vertical = matches!(direction, WheelDirection::Up | WheelDirection::Down);
         if self.menu.is_some() {
             return self.close_menu();
         }
-        if self.update_wheel(dy) {
+        if vertical && self.update_wheel(dy) {
             return;
         }
         if let Some(o) = self.overlay.as_mut() {
-            o.step(if dy > 0.0 { -3 } else { 3 });
-            self.dirty = true;
+            if vertical {
+                o.step(if dy > 0.0 { -3 } else { 3 });
+                self.dirty = true;
+            }
             return;
         }
         if self.files.is_some() {
-            return self.files_wheel(dy);
+            if vertical {
+                self.files_wheel(dy);
+            }
+            return;
         }
         if self.settings.is_some() {
-            return self.settings_wheel(dy);
+            if !self.non_keyboard_shortcut(chord) && vertical {
+                self.settings_wheel(dy);
+            }
+            return;
         }
-        let Some((pane, rect)) = self.pane_at(x, y) else { return };
-        let action = if dy > 0.0 { MouseAction::WheelUp } else { MouseAction::WheelDown };
-        if self.report(pane, rect, action, x, y, Mods::NONE) {
+        let (x, y) = self.mouse;
+        let Some((pane, rect)) = self.pane_at(x, y) else {
+            self.non_keyboard_shortcut(chord);
+            return;
+        };
+        let action = match direction {
+            WheelDirection::Up => MouseAction::WheelUp,
+            WheelDirection::Down => MouseAction::WheelDown,
+            WheelDirection::Left => MouseAction::WheelLeft,
+            WheelDirection::Right => MouseAction::WheelRight,
+        };
+        if chord.mods.any() && self.non_keyboard_shortcut(chord)
+            || self.report(pane, rect, action, x, y, chord.mods)
+            || !chord.mods.any() && self.non_keyboard_shortcut(chord)
+            || !vertical
+        {
             return;
         }
         let Some(p) = self.panes.get_mut(&pane) else { return };
@@ -2576,6 +2647,9 @@ pub fn inherit_cwd(profile: &Profile, inherited: Option<String>, home: Option<St
     }
     (args, Some(dir))
 }
+
+#[path = "shortcut_input.rs"]
+mod shortcut_input;
 
 #[cfg(test)]
 #[path = "../test/app.rs"]

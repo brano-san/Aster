@@ -321,6 +321,10 @@ impl Window for Win32Window {
         self.post(WM_DESTROY_REQUEST, 0);
     }
 
+    fn request_quit(&self) {
+        self.queue.post(HubEvent::ContinueQuit);
+    }
+
     fn placement(&self) -> Placement {
         let mut wp = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
         match self.restore.get() {
@@ -1052,6 +1056,9 @@ fn map_key(vk: u16) -> Key {
         VK_INSERT => Key::Insert,
         VK_TAB => Key::Tab,
         VK_CONTROL | VK_LCONTROL | VK_RCONTROL => Key::Control,
+        VK_SHIFT | VK_LSHIFT | VK_RSHIFT => Key::Shift,
+        VK_MENU | VK_LMENU | VK_RMENU => Key::Alt,
+        VK_LWIN | VK_RWIN => Key::Meta,
         VK_SPACE => Key::Space,
         VK_APPS => Key::Apps,
         VK_OEM_1 => Key::Char(';'),
@@ -1276,6 +1283,9 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
         }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
             let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as f32 / WHEEL_DELTA as f32;
+            let (x, y) = screen_xy();
+            s.send(Event::MouseMove { x, y });
+            s.send(Event::Modifiers(mods()));
             s.send(if msg == WM_MOUSEWHEEL { Event::Wheel { dx: 0.0, dy: delta } } else { Event::Wheel { dx: delta, dy: 0.0 } });
             Some(LRESULT(0))
         }
@@ -1286,7 +1296,12 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
                 return None;
             }
             let pressed = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN);
-            s.send(Event::Key { key: map_key(vk), mods: mods(), pressed });
+            let key = map_key(vk);
+            let held = mods();
+            if key.is_modifier() {
+                s.send(Event::Modifiers(held));
+            }
+            s.send(Event::Key { key, mods: held, pressed });
             Some(LRESULT(0))
         }
         WM_CHAR => {

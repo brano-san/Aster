@@ -37,6 +37,7 @@ fn every_setting_points_at_a_config_value_of_the_matching_type() {
             Control::Toggle => value.is_bool(),
             Control::Number { .. } => value.is_integer() || value.is_float(),
             Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles | Control::Text | Control::Font { .. } => value.is_str(),
+            Control::StringList => value.is_array(),
             Control::Run(_) | Control::ReadOnly(_) => unreachable!(),
         };
         assert!(fits, "{} holds {value:?}", s.key);
@@ -191,10 +192,10 @@ fn config_page_reports_disk_status_and_runs_file_actions() {
     a.set_config_status(Some("line 3, column 9: invalid key".into()));
     assert_eq!(a.setting_text(rows[3]), "line 3, column 9: invalid key");
     for (at, expected) in [(1, Action::OpenConfigFile), (2, Action::OpenConfigFolder), (4, Action::ShowDefaultConfig)] {
-        assert_eq!(rows[at].control, Control::Run(expected));
+        assert!(matches!(rows[at].control, Control::Run(action) if action == &expected));
         a.settings.as_mut().unwrap().selected = at;
         key(&mut a, Key::Enter);
-        assert!(a.take_effects().iter().any(|e| matches!((e, expected),
+        assert!(a.take_effects().iter().any(|e| matches!((e, &expected),
             (Effect::OpenConfigFile, Action::OpenConfigFile) | (Effect::OpenConfigFolder, Action::OpenConfigFolder) | (Effect::ShowDefaultConfig, Action::ShowDefaultConfig))));
     }
 }
@@ -1100,4 +1101,38 @@ fn type_and_group_defaults_save_reset_and_reach_the_pending_launch() {
     assert!(saved(&mut a).is_none());
     key(&mut a, Key::Delete);
     assert!(saved(&mut a).unwrap().profile_defaults.is_empty());
+}
+
+#[test]
+fn shortcut_capture_accepts_buttons_wheels_and_released_modifiers() {
+    let mut a = app();
+    select_shortcut(&mut a, "new tab");
+    key(&mut a, Key::Enter);
+    a.on_event(Event::MouseDown { x: 210.0, y: 120.0, button: crate::input::MouseButton::Middle, clicks: 1 });
+    assert_eq!(a.shortcut_text(Action::NewTab), "MouseMiddle");
+
+    key(&mut a, Key::Insert);
+    a.on_event(Event::Modifiers(Mods { ctrl: true, ..Mods::NONE }));
+    a.on_event(Event::Wheel { dx: 0.0, dy: 1.0 });
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert_eq!(a.shortcut_text(Action::NewTab), "MouseMiddle, Ctrl-WheelUp");
+
+    key(&mut a, Key::Insert);
+    a.on_event(Event::Modifiers(ctrl_shift('A')));
+    a.on_event(Event::Modifiers(Mods { ctrl: true, ..Mods::NONE }));
+    assert!(a.settings.as_ref().unwrap().capture.is_some());
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert_eq!(a.shortcut_text(Action::NewTab), "MouseMiddle, Ctrl-WheelUp, Ctrl-Shift");
+}
+
+#[test]
+fn hidden_palette_commands_can_be_edited_and_saved_as_an_action_id_list() {
+    let mut a = app();
+    a.run(Action::Settings);
+    typed(&mut a, "hidden palette commands");
+    assert_eq!(a.settings.as_ref().unwrap().current().unwrap().key, "palette.hidden-commands");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "close-other-tabs, profile.shell");
+    key(&mut a, Key::Enter);
+    assert_eq!(saved(&mut a).unwrap().palette.hidden_commands, ["close-other-tabs", "profile.shell"]);
 }

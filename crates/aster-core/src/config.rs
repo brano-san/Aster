@@ -321,9 +321,23 @@ impl Default for Vault {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Picker {
+    pub quick_connect: crate::quick_connect::Provider,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Palette {
+    pub hidden_commands: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
+    pub picker: Picker,
+    pub palette: Palette,
     pub terminal: Terminal,
     pub appearance: Appearance,
     pub vault: Vault,

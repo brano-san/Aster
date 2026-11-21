@@ -50,7 +50,7 @@ pub struct ProfileGroup {
     pub defaults: BTreeMap<String, ProfileDefaults>,
 }
 
-fn group_chain<'a>(name: &str, config: &'a Config) -> Vec<&'a ProfileGroup> {
+pub(crate) fn group_chain<'a>(name: &str, config: &'a Config) -> Vec<&'a ProfileGroup> {
     let groups = &config.groups;
     let mut group = groups.iter().find(|g| g.name == name);
     let mut chain: Vec<&ProfileGroup> = Vec::new();

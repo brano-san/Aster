@@ -1,6 +1,7 @@
 use crate::fuzzy::fuzzy;
 use crate::i18n::{t, tf};
 use crate::panes::PaneId;
+use crate::quick_connect::{Provider, QuickTarget};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +17,7 @@ pub enum OverlayKind {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pick {
     pub label: String,
+    pub(crate) source_label: String,
     pub hint: String,
     pub value: String,
     pub group: String,
@@ -32,7 +34,8 @@ pub struct Overlay {
     pub shown: Vec<(usize, Vec<Range<usize>>)>,
     pub selected: usize,
     pub scroll: usize,
-    pub quick: bool,
+    quick_provider: Option<Provider>,
+    quick_ssh: bool,
     base: usize,
 }
 
@@ -56,15 +59,20 @@ fn quick_pick(label: String, kind: &str, value: String) -> Pick {
 impl Overlay {
     pub fn new(kind: OverlayKind, items: Vec<Pick>) -> Self {
         let base = items.len();
-        let mut o = Self { kind, items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0, quick: false, base };
+        let mut o = Self { kind, items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0, quick_provider: None, quick_ssh: false, base };
         o.refilter();
         o
     }
 
-    pub fn with_quick_connect(mut self) -> Self {
-        self.quick = true;
+    pub fn with_quick_connect(mut self, provider: Option<Provider>, ssh_available: bool) -> Self {
+        self.quick_provider = provider;
+        self.quick_ssh = ssh_available;
         self.refilter();
         self
+    }
+
+    pub(crate) fn quick_provider(&self) -> Option<Provider> {
+        self.quick_provider
     }
 
     pub fn serial_speed(pane: PaneId) -> Self {
@@ -90,7 +98,15 @@ impl Overlay {
         }
         let commands = matches!(self.kind, OverlayKind::Commands);
         let profiles = matches!(self.kind, OverlayKind::Profiles);
-        let english = |p: &Pick| commands.then(|| crate::keymap::Action::from_id(&p.value)).flatten().map(|a| a.source_label()).filter(|e| *e != p.label);
+        let english = |p: &Pick| {
+            if !commands {
+                return None;
+            }
+            if !p.source_label.is_empty() {
+                return (p.source_label != p.label).then(|| p.source_label.clone());
+            }
+            crate::keymap::Action::from_id(&p.value).map(|a| a.source_label()).filter(|e| *e != p.label)
+        };
         let extra = |p: &Pick| profiles.then(|| fuzzy(&self.query, &p.hint).or_else(|| fuzzy(&self.query, &p.group))).flatten().map(|m| m.score - 20);
         let mut scored: Vec<(i32, usize, Vec<Range<usize>>)> = self
             .items
@@ -109,17 +125,12 @@ impl Overlay {
             scored.sort_by(|a, b| items[a.1].rank.cmp(&items[b.1].rank).then(b.0.cmp(&a.0)).then(a.1.cmp(&b.1)));
         }
         self.shown = scored.into_iter().map(|(_, i, r)| (i, r)).collect();
-        if let Some(address) = profiles.then(|| aster_proto::address::parse_url(&self.query)).flatten() {
-            let kind = match address.protocol {
-                aster_proto::address::Protocol::Telnet => "Telnet",
-                aster_proto::address::Protocol::Raw => "TCP",
-            };
-            self.items.push(quick_pick(tf("Connect to {target}", &[("target", &address.display())]), kind, format!("{QUICK}{}", address.display())));
-            self.shown.insert(0, (self.items.len() - 1, Vec::new()));
-        } else if let Some(target) = self.quick.then(|| crate::ssh::parse_target(&self.query)).flatten() {
-            self.items.push(quick_pick(tf("Connect to {target}", &[("target", &target.display())]), "SSH", format!("{QUICK}{}", self.query.trim())));
-            let at = if self.query.contains('@') || self.shown.is_empty() { 0 } else { self.shown.len() };
-            self.shown.insert(at, (self.items.len() - 1, Vec::new()));
+        if profiles {
+            if let Some((target, explicit)) = QuickTarget::parse(&self.query, self.quick_provider, self.quick_ssh) {
+                self.items.push(quick_pick(tf("Connect to {target}", &[("target", &target.label())]), target.provider_label(), format!("{QUICK}{}", target.value())));
+                let at = if explicit { 0 } else { self.shown.len() };
+                self.shown.insert(at, (self.items.len() - 1, Vec::new()));
+            }
         }
         self.selected = 0;
         self.scroll = 0;

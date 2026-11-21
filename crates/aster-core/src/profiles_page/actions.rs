@@ -59,12 +59,14 @@ impl App {
     pub(crate) fn sync_profile_page(&mut self) {
         if self.settings.is_none() && self.settings_stash.is_none() { return; }
         let rows = self.profile_rows();
+        let profile_actions = self.profile_actions();
         let Some(page) = self.settings.as_mut().or(self.settings_stash.as_mut()) else { return };
         let item = page.current_item();
         let profile = item.and_then(|i| page.profile_at(i)).map(|r| r.id.clone());
         let kind = item.and_then(|i| page.tree_at(i)).map(|r| r.kind.clone());
         let (selected, scroll) = (page.selected, page.scroll);
         page.profiles = rows;
+        page.profile_actions = profile_actions;
         page.groups.clone_from(&self.config.groups);
         page.refilter();
         page.selected = selected.min(page.shown.len().saturating_sub(1));

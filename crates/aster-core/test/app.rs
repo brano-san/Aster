@@ -1180,3 +1180,75 @@ fn launching_a_settings_profile_by_keyboard_or_mouse_starts_it_in_the_background
         assert!(a.settings_open());
     }
 }
+
+#[test]
+fn mouse_reporting_wins_except_for_bound_modified_wheel_chords() {
+    let (mut a, mut g) = app();
+    let mut config = a.config().clone();
+    config.hotkeys.insert("zoom-in".to_owned(), vec!["MouseMiddle".to_owned(), "WheelDown".to_owned(), "Ctrl+WheelUp".to_owned()]);
+    a.set_config(config);
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let pane = a.focused_pane().unwrap();
+    let (_, rect) = a.layout.panes[0];
+    let x = rect.x + 10.0;
+    let y = rect.y + 10.0;
+    let click = Event::MouseDown { x, y, button: MouseButton::Middle, clicks: 1 };
+    let up = Event::MouseUp { x, y, button: MouseButton::Middle };
+    a.on_event(click.clone());
+    a.on_event(up.clone());
+    let zoomed = a.zoom;
+    a.panes[&pane].terminal.lock().feed(b"\x1b[?1000h\x1b[?1006h");
+    a.take_effects();
+
+    a.on_event(click);
+    a.on_event(up);
+    a.on_event(Event::Wheel { dx: 0.0, dy: -1.0 });
+    assert_eq!(a.zoom, zoomed);
+    let effects = a.take_effects();
+    assert!(effects.iter().any(|e| matches!(e, Effect::Write { bytes, .. } if bytes.starts_with(b"\x1b[<1;"))));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Write { bytes, .. } if bytes.starts_with(b"\x1b[<65;"))));
+
+    a.on_event(Event::Modifiers(Mods { ctrl: true, ..Mods::NONE }));
+    a.on_event(Event::Wheel { dx: 0.0, dy: 1.0 });
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert!(a.zoom > zoomed);
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Write { .. })));
+}
+
+#[test]
+fn modifier_only_shortcut_does_not_fire_after_typing_or_focus_loss() {
+    let (mut a, _) = app();
+    let mut config = a.config().clone();
+    config.hotkeys.insert("new-tab".to_owned(), vec!["Ctrl-Shift".to_owned()]);
+    a.set_config(config);
+    a.open_default_tab();
+    let mods = Mods { ctrl: true, shift: true, ..Mods::NONE };
+    a.on_event(Event::Modifiers(mods));
+    a.on_event(Event::Key { key: Key::Char('X'), mods, pressed: true });
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert_eq!(a.tabs.len(), 1);
+    a.on_event(Event::Modifiers(mods));
+    a.on_event(Event::Focus(false));
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert_eq!(a.tabs.len(), 1);
+    a.on_event(Event::Focus(true));
+    a.on_event(Event::Modifiers(mods));
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert_eq!(a.tabs.len(), 2);
+}
+
+#[test]
+fn released_modifier_binding_commits_an_mru_switch_immediately() {
+    let (mut a, _) = app();
+    let mut config = a.config().clone();
+    config.hotkeys.insert("next-mru-tab".to_owned(), vec!["Ctrl-Shift".to_owned()]);
+    a.set_config(config);
+    a.open_default_tab();
+    a.open_default_tab();
+    assert_eq!(a.active, 1);
+    a.on_event(Event::Modifiers(Mods { ctrl: true, shift: true, ..Mods::NONE }));
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert_eq!(a.active, 0);
+    assert!(a.mru.selection().is_none());
+}

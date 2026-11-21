@@ -461,7 +461,7 @@ fn mru_shortcuts_can_be_cleared_and_restored_in_settings() {
     page.selected = page.shown.iter().position(|&i| crate::settings::shortcut(i) == Some(Action::NextMruTab)).unwrap();
     assert_eq!(a.shortcut_text(Action::NextMruTab), "Ctrl-Tab");
     key(&mut a, Key::Delete, Mods::NONE);
-    assert_eq!(a.keymap.bindings_of(Action::NextMruTab).count(), 0);
+    assert_eq!(a.keymap.bindings_of(&Action::NextMruTab).count(), 0);
     key(&mut a, Key::Delete, Mods { shift: true, ..Mods::NONE });
     assert_eq!(a.shortcut_text(Action::NextMruTab), "Ctrl-Tab");
     assert_eq!(a.shortcut_text(Action::NextTab), "Ctrl-Shift-Right");

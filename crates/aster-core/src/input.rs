@@ -1,10 +1,30 @@
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum MouseButton {
     Left,
     Right,
     Middle,
     Back,
     Forward,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum WheelDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl WheelDirection {
+    pub(crate) fn from_delta(dx: f32, dy: f32) -> Option<Self> {
+        if dx.abs() > dy.abs() {
+            Some(if dx > 0.0 { Self::Right } else { Self::Left })
+        } else if dy != 0.0 {
+            Some(if dy > 0.0 { Self::Up } else { Self::Down })
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -48,7 +68,19 @@ pub enum Key {
     NumSlash,
     Apps,
     Control,
+    Shift,
+    Alt,
+    Meta,
+    Mouse(MouseButton),
+    Wheel(WheelDirection),
+    ModifiersOnly,
     Other,
+}
+
+impl Key {
+    pub fn is_modifier(self) -> bool {
+        matches!(self, Self::Control | Self::Shift | Self::Alt | Self::Meta)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

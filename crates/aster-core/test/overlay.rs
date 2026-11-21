@@ -61,13 +61,13 @@ fn serial_speed_accepts_exact_custom_values_and_rejects_invalid_input() {
 
 #[test]
 fn quick_connect_offers_an_ssh_target_typed_into_the_selector() {
-    let mut o = Overlay::new(OverlayKind::Profiles, items()).with_quick_connect();
+    let mut o = Overlay::new(OverlayKind::Profiles, items()).with_quick_connect(Some(Provider::Ssh), true);
     o.insert("root@db1:2222");
-    assert_eq!(o.selected_value().as_deref(), Some("quick:root@db1:2222"));
+    assert_eq!(o.selected_value().as_deref(), Some("quick:ssh://root@db1:2222"));
     o.backspace(true);
     o.insert("split");
-    assert_ne!(o.selected_value().as_deref(), Some("quick:split"), "a plain word keeps profiles first");
-    assert!(o.shown.iter().any(|(i, _)| o.items[*i].value == "quick:split"));
+    assert_ne!(o.selected_value().as_deref(), Some("quick:ssh://split"), "a plain word keeps profiles first");
+    assert!(o.shown.iter().any(|(i, _)| o.items[*i].value == "quick:ssh://split"));
     o.backspace(true);
     o.insert("two words");
     assert!(o.items.iter().all(|p| !p.value.starts_with(QUICK)));

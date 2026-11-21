@@ -54,6 +54,7 @@ fn hidden_profiles_leave_both_picker_sections_but_remain_addressable() {
     assert!(!picks.iter().any(|p| p.group == "Recent" || matches!(p.value.as_str(), "work" | "local:pwsh")));
     assert_eq!(a.find_profile("Work").unwrap().id, "work");
     assert!(a.find_profile("local:pwsh").is_some());
+    assert!(!a.profile_actions().iter().any(|entry| matches!(entry.action.id().as_str(), "profile.work" | "profile.local:pwsh")));
 }
 
 #[test]
@@ -138,4 +139,68 @@ fn ctrl_enter_opens_the_chosen_profile_in_a_split() {
     assert_eq!(panes.len(), 2);
     assert_eq!(a.panes[&a.tabs[0].focus].profile.id, "serial:COM3");
     assert_eq!(a.recent.first().map(String::as_str), Some("serial:COM3"));
+}
+
+#[test]
+fn dynamic_actions_find_profiles_and_filter_sections_and_nested_groups() {
+    let config = Config::parse("[[groups]]\nid='team'\nname='Team'\n[[groups]]\nid='qa'\nname='QA'\nparent='team'\n[[profiles]]\nid='qa-shell'\nname='QA shell'\ngroup='QA'\ncommand='shell'").unwrap();
+    let mut a = App::new(config, profiles(), true, None, Arc::new(|| {}));
+    for (id, expected) in [
+        ("profile-selector.own", "qa-shell"),
+        ("profile-selector.built-in", "local:pwsh"),
+        ("profile-selector.ssh-config", "ssh:db"),
+        ("profile-selector.serial-ports", "serial:COM3"),
+        ("group-selector.team", "qa-shell"),
+    ] {
+        a.run(Action::from_id(id).unwrap());
+        assert_eq!(a.overlay.as_ref().unwrap().items.iter().map(|p| p.value.as_str()).collect::<Vec<_>>(), [expected]);
+    }
+    a.run(Action::CommandSelector);
+    assert!(a.overlay.as_ref().unwrap().items.iter().any(|p| p.value == "profile.qa-shell" && p.label.contains("QA shell")));
+    a.run(Action::from_id("profile.qa-shell").unwrap());
+    assert_eq!(a.panes[&a.focused_pane().unwrap()].profile.id, "qa-shell");
+    assert_eq!(a.recent, ["qa-shell"]);
+    a.run(Action::Settings);
+    let page = a.settings.as_mut().unwrap();
+    page.show_page(crate::settings::PAGES.iter().position(|p| *p == crate::settings::SHORTCUTS).unwrap());
+    assert!(page.shown.iter().any(|&i| page.shortcut(i) == Action::from_id("profile.qa-shell") && page.section(i) == crate::settings::PROFILES));
+}
+
+#[test]
+fn accepting_quick_connect_opens_a_serial_tab_without_saving_a_profile() {
+    let mut a = app(Vec::new());
+    a.run(Action::ProfileSelector);
+    let overlay = a.overlay.as_mut().unwrap();
+    overlay.set_query("COM3@9600");
+    assert_eq!(overlay.selected_value().as_deref(), Some("quick:serial:COM3:9600"));
+    a.on_event(crate::input::Event::Key { key: crate::input::Key::Enter, mods: crate::input::Mods::NONE, pressed: true });
+    assert_eq!(a.panes[&a.focused_pane().unwrap()].profile.serial.as_deref(), Some("COM3:9600"));
+    assert!(a.config.profiles.is_empty());
+}
+
+#[test]
+fn page_keys_move_through_filtered_profiles_and_clamp_at_the_ends() {
+    use crate::input::{Event, Key, Mods};
+    let custom = (0..21).map(|i| Profile { id: format!("test-{i}"), name: format!("Test {i}"), ..Profile::default() }).collect();
+    let mut a = app(custom);
+    a.run(Action::SelectProfileSection(ProfileSection::Own));
+    for (key, expected) in [(Key::PageUp, 0), (Key::PageDown, 8), (Key::PageDown, 16), (Key::PageDown, 20), (Key::PageUp, 12)] {
+        a.on_event(Event::Key { key, mods: Mods::NONE, pressed: true });
+        let picker = a.overlay.as_ref().unwrap();
+        assert_eq!(picker.selected, expected);
+        assert_eq!(picker.selected_value().as_deref(), Some(format!("test-{expected}").as_str()));
+        assert!((picker.scroll..picker.scroll + crate::overlay::VISIBLE).contains(&picker.selected));
+    }
+}
+
+#[test]
+fn backspace_edits_the_selected_serial_profile_in_a_filtered_picker() {
+    use crate::input::{Event, Key, Mods};
+    let mut a = app(Vec::new());
+    a.run(Action::SelectProfileSection(ProfileSection::SerialPorts));
+    a.on_event(Event::Key { key: Key::Backspace, mods: Mods::NONE, pressed: true });
+    let overlay = a.overlay.as_ref().unwrap();
+    assert!(overlay.query_text().starts_with("serial:COM3:115200"));
+    assert!(overlay.selected_value().unwrap().starts_with("quick:serial:COM3:115200"));
+    assert!(overlay.items.iter().all(|p| p.value == "serial:COM3" || p.value.starts_with("quick:serial:")));
 }

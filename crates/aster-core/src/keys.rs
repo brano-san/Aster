@@ -108,6 +108,8 @@ pub enum MouseAction {
     Motion(Option<MouseButton>),
     WheelUp,
     WheelDown,
+    WheelLeft,
+    WheelRight,
 }
 
 pub fn encode_mouse(action: MouseAction, col: usize, line: usize, m: Mods, mode: TermMode) -> Option<Vec<u8>> {
@@ -120,18 +122,21 @@ pub fn encode_mouse(action: MouseAction, col: usize, line: usize, m: Mods, mode:
         return None;
     }
     let button = |b: MouseButton| match b {
-        MouseButton::Left => Some(0u8),
-        MouseButton::Middle => Some(1),
-        MouseButton::Right => Some(2),
-        _ => None,
+        MouseButton::Left => 0u8,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        MouseButton::Back => 128,
+        MouseButton::Forward => 129,
     };
     let sgr = mode.contains(TermMode::SGR_MOUSE);
     let (mut code, pressed) = match action {
-        MouseAction::Press(b) => (button(b)?, true),
-        MouseAction::Release(b) => (if sgr { button(b)? } else { 3 }, false),
-        MouseAction::Motion(b) => (b.and_then(button).unwrap_or(3) + 32, true),
+        MouseAction::Press(b) => (button(b), true),
+        MouseAction::Release(b) => (if sgr { button(b) } else { 3 }, false),
+        MouseAction::Motion(b) => (b.map(button).unwrap_or(3) + 32, true),
         MouseAction::WheelUp => (64, true),
         MouseAction::WheelDown => (65, true),
+        MouseAction::WheelLeft => (66, true),
+        MouseAction::WheelRight => (67, true),
     };
     code += 4 * u8::from(m.shift) + 8 * u8::from(m.alt) + 16 * u8::from(m.ctrl);
     let (x, y) = (col + 1, line + 1);
