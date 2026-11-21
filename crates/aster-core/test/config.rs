@@ -7,6 +7,9 @@ fn an_empty_file_gives_the_defaults() {
     assert_eq!(c.terminal.scrollback_lines, 25_000);
     assert_eq!(c.terminal.right_click, RightClick::Clipboard);
     assert!(c.terminal.copy_on_select);
+    assert!(c.terminal.alt_is_meta && c.terminal.bell_attention && c.terminal.open_on_start);
+    assert_eq!(c.terminal.link_modifier, LinkModifier::None);
+    assert!(!c.terminal.paste_newlines_as_spaces);
 }
 
 #[test]

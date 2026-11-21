@@ -33,6 +33,19 @@ fn a_single_line_pastes_at_once() {
 }
 
 #[test]
+fn paste_replaces_each_line_break_before_warning_trimming_and_bracketing() {
+    let mut a = app();
+    a.set_config(Config::parse("[terminal]\npaste-newlines-as-spaces = true\ntrim-whitespace-on-paste = false").unwrap());
+    a.on_event(Event::Pasted(" a\r\n\n b\rc\n".into()));
+    assert!(a.paste_confirm().is_none());
+    assert_eq!(writes(&mut a), [b" a   b c ".to_vec()]);
+    a.focused_terminal().unwrap().lock().feed(b"\x1b[?2004h");
+    a.set_config(Config::parse("[terminal]\npaste-newlines-as-spaces = true").unwrap());
+    a.on_event(Event::Pasted(" a\r\n\n b\rc\n".into()));
+    assert_eq!(writes(&mut a), [b"\x1b[200~a   b c\x1b[201~".to_vec()]);
+}
+
+#[test]
 fn several_lines_wait_for_confirmation() {
     let mut a = app();
     a.paste("rm a\r\nrm b\n".into());
@@ -107,6 +120,21 @@ fn audible_bell_with_animations_off_requests_attention_if_sound_is_unavailable()
         assert!(effects.iter().any(|e| matches!(e, Effect::Beep)));
         assert_eq!(effects.iter().filter(|e| matches!(e, Effect::Attention)).count(), 1);
         assert!(!a.bell_flash(pane));
+    }
+}
+
+#[test]
+fn background_bell_attention_can_be_disabled_independently_of_sound() {
+    let mut a = app();
+    a.on_event(Event::Focus(false));
+    for enabled in [false, true] {
+        a.set_config(Config::parse(&format!("[terminal]\nbell = 'audible'\nbell-attention = {enabled}")).unwrap());
+        a.last_bell_reset();
+        a.focused_terminal().unwrap().lock().feed(b"\x07");
+        a.woken();
+        let effects = a.take_effects();
+        assert!(effects.iter().any(|e| matches!(e, Effect::Beep)));
+        assert_eq!(effects.iter().any(|e| matches!(e, Effect::Attention)), enabled);
     }
 }
 

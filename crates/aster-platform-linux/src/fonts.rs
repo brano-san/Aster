@@ -215,6 +215,8 @@ const FILE: &str = "file\0";
 const INDEX: &str = "index\0";
 const WEIGHT: &str = "weight\0";
 const SLANT: &str = "slant\0";
+const SPACING: &str = "spacing\0";
+const FC_MONO: c_int = 100;
 const OUTLINE: &str = "outline\0";
 const COLOR: &str = "color\0";
 const FONTFORMAT: &str = "fontformat\0";
@@ -327,7 +329,7 @@ impl Fontconfig {
     }
 
     fn patterns(&self, set: *mut FcFontSet) -> impl Iterator<Item = *mut c_void> + '_ {
-        let fonts: &[*mut c_void] = if set.is_null() {
+        let fonts: &[*mut c_void] = if set.is_null() || unsafe { (*set).nfont <= 0 } {
             &[]
         } else {
             unsafe { std::slice::from_raw_parts((*set).fonts, (*set).nfont.max(0) as usize) }
@@ -335,11 +337,14 @@ impl Fontconfig {
         fonts.iter().copied()
     }
 
-    pub fn families(&self) -> Vec<String> {
+    pub fn families(&self, monospace: bool) -> Vec<String> {
         let p = Pattern(&self.api, unsafe { (self.api.pattern_create)() });
         let os = unsafe { (self.api.object_set_create)() };
         unsafe {
             (self.api.add_bool)(p.1, key(OUTLINE), 1);
+            if monospace {
+                (self.api.add_integer)(p.1, key(SPACING), FC_MONO);
+            }
             (self.api.object_set_add)(os, key(FAMILY));
             (self.api.object_set_add)(os, key(FAMILYLANG));
             (self.api.object_set_add)(os, key(FONTFORMAT));
@@ -350,10 +355,16 @@ impl Fontconfig {
             if !matches!(self.string(pat, FONTFORMAT, 0), Some(b"TrueType" | b"CFF")) {
                 continue;
             }
+            let before = out.len();
             for n in 0.. {
                 let Some(name) = self.string(pat, FAMILY, n) else { break };
                 let lang = self.string(pat, FAMILYLANG, n);
                 if lang.is_none_or(|l| l == b"en") {
+                    out.push(String::from_utf8_lossy(name).into_owned());
+                }
+            }
+            if out.len() == before {
+                if let Some(name) = self.string(pat, FAMILY, 0) {
                     out.push(String::from_utf8_lossy(name).into_owned());
                 }
             }

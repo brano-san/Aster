@@ -31,19 +31,137 @@ fn saved(a: &mut App) -> Option<Config> {
 #[test]
 fn every_setting_points_at_a_config_value_of_the_matching_type() {
     let config = Config::default();
-    for s in SETTINGS.iter().filter(|s| !matches!(s.control, Control::Run(_))) {
+    for s in SETTINGS.iter().filter(|s| !matches!(s.control, Control::Run(_) | Control::ReadOnly(_))) {
         let value = get(&config, s.key).unwrap_or_else(|| panic!("{} is missing", s.key));
         let fits = match s.control {
             Control::Toggle => value.is_bool(),
             Control::Number { .. } => value.is_integer() || value.is_float(),
-            Control::Choice(_) | Control::Schemes | Control::Profiles | Control::Text => value.is_str(),
-            Control::Run(_) => true,
+            Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles | Control::Text | Control::Font { .. } => value.is_str(),
+            Control::Run(_) | Control::ReadOnly(_) => unreachable!(),
         };
         assert!(fits, "{} holds {value:?}", s.key);
-        if let Control::Choice(options) = s.control {
+        if let Control::Choice(options) | Control::Segments(options) = s.control {
             assert!(options.iter().any(|(v, _)| Some(*v) == value.as_str()), "{} default is not an option", s.key);
         }
     }
+}
+
+#[test]
+fn window_and_appearance_list_their_own_settings() {
+    let keys = |name: &str| SETTINGS.iter().filter(|s| s.section == name).map(|s| s.key).collect::<Vec<_>>();
+    assert_eq!(keys("Window"), ["appearance.opacity", "appearance.backdrop", "appearance.density", "appearance.tab-bar", "appearance.tab-index", "appearance.tab-close-buttons", "appearance.tabs-in-fullscreen", "appearance.tab-width", "appearance.tab-bar-position", "appearance.mru-tabs", "appearance.cycle-tabs", "appearance.animations", "appearance.last-tab-closes-window", "appearance.tray"]);
+    for key in ["terminal.font", "terminal.font-size", "terminal.line-padding", "terminal.padding", "terminal.cursor", "terminal.cursor-blink", "terminal.fallback-font", "appearance.ui-font"] {
+        assert!(keys(APPEARANCE).contains(&key));
+    }
+    assert!(PAGES.windows(2).any(|p| p == [COLORS, "Window"]));
+}
+
+#[test]
+fn clicking_a_segment_selects_its_value_without_cycling() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    a.run(Action::Settings);
+    typed(&mut a, "cursor shape");
+    let row = a.settings_geometry().unwrap().rows.into_iter().find(|r| matches!(r.kind, RowKind::Item(0))).unwrap();
+    a.settings_click(row.control.right() - 2.0, row.control.y + 5.0);
+    assert_eq!(saved(&mut a).unwrap().terminal.cursor, crate::config::CursorStyle::Underline);
+    key(&mut a, Key::Left);
+    assert_eq!(saved(&mut a).unwrap().terminal.cursor, crate::config::CursorStyle::Beam);
+}
+
+#[test]
+fn shortcut_capture_adds_without_duplicates_and_replaces_chords() {
+    let mut a = app();
+    let mut config = a.config().clone();
+    config.hotkeys.insert("new-tab".into(), vec!["Ctrl-K Ctrl-C".into()]);
+    a.set_config(config);
+    select_shortcut(&mut a, "new tab");
+    for _ in 0..2 {
+        key(&mut a, Key::Insert);
+        a.on_event(ctrl(Key::Char('J')));
+    }
+    assert_eq!(a.shortcut_text(Action::NewTab), "Ctrl-K Ctrl-C, Ctrl-J");
+    key(&mut a, Key::Enter);
+    a.on_event(ctrl(Key::Char('U')));
+    assert_eq!(saved(&mut a).unwrap().hotkeys["new-tab"], ["Ctrl-U"]);
+}
+
+#[test]
+fn shortcut_chips_wrap_and_keep_the_hint_below_all_bindings() {
+    let bindings = vec!["Ctrl-K Ctrl-C".into(), "Ctrl-Shift-J".into(), "Ctrl-Alt-Shift-F2".into(), "Ctrl-U".into()];
+    let hint = "Enter replace · Insert add · Del clear · Shift+Del restore";
+    let row = ShortcutLayout::new(240.0, 1.0, bindings.clone(), hint, |s| s.len() as f32 * 7.0);
+    assert_eq!(row.chips.iter().map(|(lines, _)| lines.join(" ")).collect::<Vec<_>>(), bindings);
+    assert!(row.chips.windows(2).any(|chips| chips[1].1.y > chips[0].1.y));
+    assert!(row.chips.iter().all(|(_, r)| r.right() <= 240.0 && r.bottom() < row.hint_top));
+    assert_eq!(row.hint_lines.join(" "), hint);
+    assert!(row.height > row.hint_top + 16.0);
+}
+
+#[test]
+fn shortcut_editing_keys_work_when_assigned_and_ignore_captured_text() {
+    let mut a = app();
+    let mut config = a.config().clone();
+    config.hotkeys.insert("new-window".into(), vec!["Insert".into()]);
+    a.set_config(config);
+    select_shortcut(&mut a, "new tab");
+    key(&mut a, Key::Insert);
+    key(&mut a, Key::Space);
+    a.on_event(Event::Char(' '));
+    assert_eq!(a.settings.as_ref().unwrap().query, "new tab");
+    assert_eq!(a.shortcut_text(Action::NewTab), "Ctrl-Shift-T, Space");
+}
+
+#[test]
+fn font_suggestions_filter_by_family_and_accept_keyboard_or_click() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    let mono: Vec<_> = ["Cascadia Code", "Cascadia Mono PL"].map(str::to_owned).into();
+    let mut all = mono.clone();
+    all.push("Book Caslon".into());
+    a.set_font_families(mono, all);
+    a.run(Action::Settings);
+    a.show_settings_page(PAGES.iter().position(|p| *p == APPEARANCE).unwrap());
+    key(&mut a, Key::Enter);
+    typed(&mut a, "CAS");
+    assert_eq!(a.settings.as_ref().unwrap().font_matches, ["Cascadia Code", "Cascadia Mono PL"]);
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Enter);
+    assert_eq!(saved(&mut a).unwrap().terminal.font, "Cascadia Mono PL");
+    typed(&mut a, "interface font");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "casl");
+    let r = a.settings_geometry().unwrap().suggestions[0].1;
+    a.settings_click(r.x + 2.0, r.y + 2.0);
+    assert_eq!(saved(&mut a).unwrap().appearance.ui_font, "Book Caslon");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "custom family");
+    key(&mut a, Key::Enter);
+    assert_eq!(a.config().appearance.ui_font, "custom family");
+}
+
+#[test]
+fn font_suggestions_limit_matches_and_keep_the_last_choice_visible() {
+    let mut a = app();
+    a.set_viewport(520, 290, 1.0);
+    a.chrome = a.tab_chrome();
+    let mono = (0..13).map(|i| format!("Example Mono {i}")).collect();
+    a.set_font_families(mono, Vec::new());
+    a.run(Action::Settings);
+    typed(&mut a, "terminal.fallback-font");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "EXample");
+    for _ in 0..10 {
+        key(&mut a, Key::Down);
+    }
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!((page.font_matches.len(), page.font_index), (8, 7));
+    let geo = a.settings_geometry().unwrap();
+    let &(index, last) = geo.suggestions.last().unwrap();
+    assert_eq!(index, 7);
+    assert!(last.bottom() <= geo.list.bottom());
+    a.settings_click(last.x + 1.0, last.y + 1.0);
+    assert_eq!(saved(&mut a).unwrap().terminal.fallback_font, "Example Mono 7");
 }
 
 #[test]
@@ -52,6 +170,48 @@ fn setting_keys_are_unique() {
     keys.sort();
     keys.dedup();
     assert_eq!(keys.len(), SETTINGS.len());
+}
+
+#[test]
+fn config_page_reports_disk_status_and_runs_file_actions() {
+    let mut a = app();
+    a.set_config_path(Some("data/config.toml".to_owned()));
+    a.run(Action::Settings);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::CheckConfigFile)));
+    a.on_event(ctrl(Key::PageUp));
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!(PAGES[page.page], "Config file");
+    let rows: Vec<_> = page.shown.iter().map(|&i| &SETTINGS[i]).collect();
+    assert_eq!(rows.iter().map(|s| s.label).collect::<Vec<_>>(), ["File path", "Open in the editor", "Open the folder", "File status", "Show the defaults"]);
+    assert_eq!(a.setting_text(rows[0]), "data/config.toml");
+    key(&mut a, Key::Enter);
+    assert!(!a.settings.as_ref().unwrap().editing());
+    a.set_config_status(None);
+    assert_eq!(a.setting_text(rows[3]), t("The config file is valid"));
+    a.set_config_status(Some("line 3, column 9: invalid key".into()));
+    assert_eq!(a.setting_text(rows[3]), "line 3, column 9: invalid key");
+    for (at, expected) in [(1, Action::OpenConfigFile), (2, Action::OpenConfigFolder), (4, Action::ShowDefaultConfig)] {
+        assert_eq!(rows[at].control, Control::Run(expected));
+        a.settings.as_mut().unwrap().selected = at;
+        key(&mut a, Key::Enter);
+        assert!(a.take_effects().iter().any(|e| matches!((e, expected),
+            (Effect::OpenConfigFile, Action::OpenConfigFile) | (Effect::OpenConfigFolder, Action::OpenConfigFolder) | (Effect::ShowDefaultConfig, Action::ShowDefaultConfig))));
+    }
+}
+
+#[test]
+fn application_page_opens_versioned_and_latest_releases() {
+    let mut a = app();
+    a.run(Action::Settings);
+    let page = a.settings.as_ref().unwrap();
+    let rows: Vec<_> = page.shown.iter().map(|&i| &SETTINGS[i]).collect();
+    assert_eq!(rows[..4].iter().map(|s| s.key).collect::<Vec<_>>(), ["action.whats-new", "action.check-for-updates", "action.open-log", "action.open-config-file"]);
+    for (at, suffix) in [(0, concat!("tag/v", env!("CARGO_PKG_VERSION"))), (1, "latest")] {
+        a.settings.as_mut().unwrap().selected = at;
+        key(&mut a, Key::Enter);
+        let url = format!("https://github.com/brano-san/Aster/releases/{suffix}");
+        assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Open(target) if target == &url)));
+    }
 }
 
 #[test]

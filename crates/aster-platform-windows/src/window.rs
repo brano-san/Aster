@@ -779,6 +779,8 @@ fn capture_key(text: &str) -> Event {
         "Tab" => Key::Tab,
         "Space" => Key::Space,
         "Backspace" => Key::Backspace,
+        "Insert" => Key::Insert,
+        "Delete" => Key::Delete,
         "PageUp" => Key::PageUp,
         "PageDown" => Key::PageDown,
         f if f.len() > 1 && f.starts_with('F') && f[1..].parse::<u8>().is_ok() => Key::F(f[1..].parse().unwrap_or(1)),

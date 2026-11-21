@@ -7,6 +7,7 @@ use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::slice::from_raw_parts;
 use windows::core::{w, Interface, PCWSTR};
+use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows_core::{implement, ComObject, IUnknown, Ref, BOOL};
 
@@ -85,6 +86,39 @@ struct Fallback {
     symbol: Option<IDWriteFont>,
 }
 
+fn system_font_collection(factory: &IDWriteFactory2) -> Result<IDWriteFontCollection, PlatformError> {
+    let mut collection = None;
+    unsafe { factory.GetSystemFontCollection(&mut collection, false) }.map_err(err)?;
+    collection.ok_or_else(|| PlatformError::new(-1, "no system font collection"))
+}
+
+pub fn font_families(monospace: bool) -> Result<Vec<String>, PlatformError> {
+    let factory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.map_err(err)?;
+    let collection = system_font_collection(&factory)?;
+    let mut locale = [0u16; 85];
+    let locale = if unsafe { GetUserDefaultLocaleName(&mut locale) } > 0 { PCWSTR(locale.as_ptr()) } else { w!("en-us") };
+    Ok(collection_families(&collection, monospace, locale))
+}
+
+fn collection_families(collection: &IDWriteFontCollection, monospace: bool, locale: PCWSTR) -> Vec<String> {
+    let mut names = Vec::new();
+    for i in 0..unsafe { collection.GetFontFamilyCount() } {
+        let Ok(family) = (unsafe { collection.GetFontFamily(i) }) else { continue };
+        if monospace {
+            let normal = unsafe { family.GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL) };
+            if !normal.and_then(|f| f.cast::<IDWriteFont1>()).is_ok_and(|f| unsafe { f.IsMonospacedFont() }.as_bool()) {
+                continue;
+            }
+        }
+        if let Some(name) = DWriteText::family_name(&family, locale).filter(|s| !s.is_empty()) {
+            names.push(name);
+        }
+    }
+    names.sort_by_cached_key(|s| s.to_lowercase());
+    names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    names
+}
+
 pub struct DWriteText {
     factory: IDWriteFactory2,
     collection: IDWriteFontCollection,
@@ -109,9 +143,7 @@ impl DWriteText {
     pub fn new() -> Result<Self, PlatformError> {
         unsafe {
             let factory: IDWriteFactory2 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).map_err(err)?;
-            let mut collection = None;
-            factory.GetSystemFontCollection(&mut collection, false).map_err(err)?;
-            let collection = collection.ok_or_else(|| PlatformError::new(-1, "no system font collection"))?;
+            let collection = system_font_collection(&factory)?;
             let has = |name: PCWSTR| {
                 let (mut i, mut exists) = (0u32, BOOL(0));
                 collection.FindFamilyName(name, &mut i, &mut exists).is_ok() && exists.as_bool()
@@ -207,11 +239,13 @@ impl DWriteText {
         Ok(())
     }
 
-    fn family_name(family: &IDWriteFontFamily) -> Option<String> {
+    fn family_name(family: &IDWriteFontFamily, locale: PCWSTR) -> Option<String> {
         unsafe {
             let names = family.GetFamilyNames().ok()?;
             let (mut i, mut exists) = (0u32, BOOL(0));
-            let _ = names.FindLocaleName(w!("en-us"), &mut i, &mut exists);
+            if names.FindLocaleName(locale, &mut i, &mut exists).is_err() || !exists.as_bool() {
+                let _ = names.FindLocaleName(w!("en-us"), &mut i, &mut exists);
+            }
             let i = if exists.as_bool() { i } else { 0 };
             let len = names.GetStringLength(i).ok()? as usize;
             let mut buf = vec![0u16; len + 1];
@@ -305,11 +339,7 @@ impl TextBackend for DWriteText {
     }
 
     fn families(&mut self) -> Vec<String> {
-        let n = unsafe { self.collection.GetFontFamilyCount() };
-        let mut out: Vec<String> = (0..n).filter_map(|i| unsafe { self.collection.GetFontFamily(i) }.ok()).filter_map(|f| Self::family_name(&f)).filter(|s| !s.is_empty()).collect();
-        out.sort_by_key(|s| s.to_lowercase());
-        out.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
-        out
+        collection_families(&self.collection, false, w!("en-us"))
     }
 
     fn set_fallback_family(&mut self, name: &str) -> bool {

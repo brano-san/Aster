@@ -1,12 +1,21 @@
 use super::*;
 
+#[test]
+fn system_font_families_filter_proportional_faces() {
+    let all = font_families(false).unwrap();
+    let monospace = font_families(true).unwrap();
+    assert!(all.iter().any(|name| name == "Arial"));
+    assert!(monospace.iter().any(|name| name == "Consolas"));
+    assert!(monospace.iter().all(|name| name != "Arial" && all.contains(name)));
+}
+
 fn family_for(text: &mut DWriteText, style: FontStyle, s: &str) -> String {
     let mut shaped = ShapedText::default();
     text.shape(s, style, &mut shaped);
     assert_ne!(shaped.glyphs[0].id, 0, "missing glyph for {s}");
     let face = &text.faces[shaped.glyphs[0].font as usize];
     let font = unsafe { text.collection.GetFontFromFontFace(face).unwrap() };
-    DWriteText::family_name(&unsafe { font.GetFontFamily().unwrap() }).unwrap()
+    DWriteText::family_name(&unsafe { font.GetFontFamily().unwrap() }, w!("en-us")).unwrap()
 }
 
 #[test]

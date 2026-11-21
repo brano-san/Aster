@@ -2,6 +2,32 @@ use super::*;
 use crate::cli::{Command, Request};
 
 #[test]
+fn open_on_start_only_controls_the_first_window_without_a_restored_session() {
+    let new_app = |open: bool| App::new(
+        Config::parse(&format!("[terminal]\nopen-on-start = {open}")).unwrap(),
+        vec![Profile::new("local:a", "A", "shell", &[])], true, None, Arc::new(|| {}),
+    );
+    let mut initial = new_app(true);
+    initialize_tabs(&mut initial, None, true, None);
+    assert_eq!(initial.tab_count(), 1);
+    let saved = initial.session_snapshot();
+    let mut start = new_app(false);
+    initialize_tabs(&mut start, None, true, None);
+    assert_eq!(start.tab_count(), 0);
+    initialize_tabs(&mut start, Some(saved), true, None);
+    assert_eq!(start.tab_count(), 1);
+    let mut next = new_app(false);
+    initialize_tabs(&mut next, None, false, None);
+    assert_eq!(next.tab_count(), 1);
+    let mut paste = new_app(false);
+    initialize_tabs(&mut paste, None, true, Some(&Command::Paste { text: "a".into() }));
+    assert_eq!(paste.tab_count(), 1);
+    let mut explicit = new_app(true);
+    initialize_tabs(&mut explicit, None, true, Some(&Command::Profile { name: "A".into() }));
+    assert_eq!(explicit.tab_count(), 0);
+}
+
+#[test]
 fn background_wakes_preserve_the_first_request_and_queue_one_window() {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut startup = None;

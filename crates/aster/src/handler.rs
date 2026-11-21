@@ -33,9 +33,12 @@ struct State<P: Platform> {
 }
 
 enum StoreEvent {
+    FontFamilies { monospace: Vec<String>, all: Vec<String> },
     CommandProbe { window: WindowId, request: u64, busy: bool },
     Vault(VaultUpdate),
-    Config(u64, Option<SystemTime>, Box<Config>),
+    Config(u64, Option<SystemTime>, Result<Box<Config>, String>),
+    ConfigStatus(u64, Option<String>),
+    DefaultConfig(WindowId, std::io::Result<PathBuf>),
     Known { window: WindowId, pane: PaneId, key: String, line: usize, known: bool },
     Fill { window: WindowId, pane: PaneId, key: String, request: u64, secret: Option<String> },
 }
@@ -55,6 +58,7 @@ impl<W: Waker> StoreEvents<W> {
 }
 
 pub struct Handler<P: Platform> {
+    font_families: Option<(Vec<String>, Vec<String>)>,
     config: Config,
     profiles: Vec<Profile>,
     waker: <P::Windows as WindowSystem>::Waker,
@@ -109,6 +113,21 @@ fn queue_background_request(startup: &mut Option<crate::cli::Request>, requests:
     startup.is_some()
 }
 
+fn initialize_tabs(app: &mut App, saved: Option<WindowState>, first: bool, command: Option<&crate::cli::Command>) {
+    use crate::cli::Command;
+    if saved.is_some_and(|state| app.restore(&state)) {
+        return;
+    }
+    let open_default = match command {
+        Some(Command::Paste { .. }) => true,
+        Some(Command::Window) | None => !first || app.config().terminal.open_on_start,
+        _ => false,
+    };
+    if open_default {
+        app.open_default_tab();
+    }
+}
+
 fn load_session<P: Platform>() -> SessionState {
     if capturing() {
         return SessionState::default();
@@ -132,6 +151,12 @@ impl<P: Platform> Handler<P> {
         let path = config_path.clone();
         let (tx, store_rx) = unbounded();
         let store_events = StoreEvents { tx, waker: waker.clone() };
+        let fonts = store_events.clone();
+        if let Err(e) = std::thread::Builder::new().name("aster-font-families".into()).spawn(move || {
+            fonts.post(StoreEvent::FontFamilies { monospace: P::font_families(true), all: P::font_families(false) });
+        }) {
+            tracing::warn!("font family worker: {e}");
+        }
         let events = store_events.clone();
         let vault_view = VaultView { configured: !config.vault.sealed.is_empty(), ..VaultView::default() };
         let (secrets, worker) = Secrets::start(Arc::new(System::<P>::default()), config.vault.sealed.clone(), config.vault.remember_minutes, move |expected, sealed| {
@@ -147,7 +172,7 @@ impl<P: Platform> Handler<P> {
         let saved = load_session::<P>();
         let recent = saved.recent;
         let pending = if config.terminal.recover_tabs { saved.windows } else { Vec::new() };
-        Ok((Self { config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent }, worker))
+        Ok((Self { font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent }, worker))
     }
 
     pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
@@ -201,16 +226,31 @@ impl<P: Platform> Handler<P> {
         config.vault.sealed.clone_from(&self.config.vault.sealed);
         self.settings_revision += 1;
         self.apply_config(config.clone());
+        let events = self.store_events.clone();
+        let revision = self.settings_revision;
         let path = self.config_path.clone();
         self.secrets.sync_config(move |sealed| {
             if let Some(path) = path {
                 match crate::config_file::save_settings(&path, &mut config, sealed) {
-                    Ok(()) => return Some((config.vault.sealed, config.vault.remember_minutes)),
-                    Err(e) => tracing::error!("{}: {e}", path.display()),
+                    Ok(()) => {
+                        events.post(StoreEvent::ConfigStatus(revision, None));
+                        return Some((config.vault.sealed, config.vault.remember_minutes));
+                    }
+                    Err(e) => {
+                        tracing::error!("{}: {e}", path.display());
+                        let error = crate::config_file::load(&path).err().map(|error| error.to_string());
+                        events.post(StoreEvent::ConfigStatus(revision, error));
+                    }
                 }
             }
             Some((sealed.to_owned(), config.vault.remember_minutes))
         });
+    }
+
+    fn show_config_status(&mut self, error: Option<String>) {
+        for state in self.windows.values_mut() {
+            state.app.set_config_status(error.clone());
+        }
     }
 
     fn apply_config(&mut self, config: Config) {
@@ -236,24 +276,25 @@ impl<P: Platform> Handler<P> {
         }
     }
 
-    fn reload_config(&mut self) {
+    fn reload_config(&mut self, force: bool) {
         let Some(path) = self.config_path.clone() else { return };
         let events = self.store_events.clone();
         let revision = self.settings_revision;
         let previous = self.config_stamp;
         self.secrets.sync_config(move |_| {
             let stamp = std::fs::metadata(&path).and_then(|metadata| metadata.modified()).ok();
-            if stamp.is_some() && stamp == previous {
+            if !force && stamp.is_some() && stamp == previous {
                 return None;
             }
-            match crate::config_file::read(&path) {
+            match crate::config_file::load(&path) {
                 Ok(config) => {
                     let vault = (config.vault.sealed.clone(), config.vault.remember_minutes);
-                    events.post(StoreEvent::Config(revision, stamp, Box::new(config)));
+                    events.post(StoreEvent::Config(revision, stamp, Ok(Box::new(config))));
                     Some(vault)
                 }
                 Err(e) => {
-                    tracing::error!("{}: {e}", path.display());
+                    tracing::error!("could not load {}: {}", path.display(), e.kind());
+                    events.post(StoreEvent::Config(revision, stamp, Err(e.to_string())));
                     None
                 }
             }
@@ -450,13 +491,23 @@ impl<P: Platform> Handler<P> {
                 self.recent = recent;
             }
             Effect::OpenConfigFile => {
-                if let Some(path) = crate::config_path::<P>() {
+                if let Some(path) = &self.config_path {
                     P::open(&path.to_string_lossy());
                 }
             }
-            Effect::OpenLog => {
-                if let Some(dir) = crate::config_dir::<P>() {
+            Effect::OpenLog | Effect::OpenConfigFolder => {
+                if let Some(dir) = self.config_path.as_deref().and_then(|p| p.parent()) {
                     P::open(&dir.to_string_lossy());
+                }
+            }
+            Effect::CheckConfigFile => self.reload_config(true),
+            Effect::ShowDefaultConfig => {
+                if let Some(dir) = self.config_path.as_deref().and_then(|p| p.parent()).map(ToOwned::to_owned) {
+                    let events = self.store_events.clone();
+                    self.secrets.sync_config(move |_| {
+                        events.post(StoreEvent::DefaultConfig(id, crate::config_file::write_defaults(&dir)));
+                        None
+                    });
                 }
             }
             Effect::Title(t) => window.set_title(&t),
@@ -663,14 +714,37 @@ impl<P: Platform> Handler<P> {
                     }
                     self.show_vault(update.view);
                 }
+                StoreEvent::FontFamilies { monospace, all } => {
+                    for state in self.windows.values_mut() {
+                        state.app.set_font_families(monospace.clone(), all.clone());
+                    }
+                    self.font_families = Some((monospace, all));
+                }
                 StoreEvent::Config(revision, stamp, config) => {
                     if self.settings_revision == revision {
                         self.config_stamp = stamp;
-                        if *config != self.config {
-                            self.apply_config(*config);
+                        self.show_config_status(config.as_ref().err().cloned());
+                        if let Ok(config) = config {
+                            if *config != self.config {
+                                self.apply_config(*config);
+                            }
                         }
                     }
                 }
+                StoreEvent::ConfigStatus(revision, error) => {
+                    if self.settings_revision == revision {
+                        self.show_config_status(error);
+                    }
+                }
+                StoreEvent::DefaultConfig(window, result) => match result {
+                    Ok(path) => P::open(&path.to_string_lossy()),
+                    Err(e) => {
+                        tracing::error!("defaults.toml: {e}");
+                        if let Some(s) = self.windows.get_mut(&window) {
+                            s.app.settings_file_error(&e.to_string());
+                        }
+                    }
+                },
                 StoreEvent::Known { window, pane, key, line, known } => {
                     if let Some(s) = self.windows.get_mut(&window) {
                         if s.app.password_prompt(pane).is_some_and(|p| p.key == key && p.line == line) {
@@ -791,21 +865,23 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let flow = crate::session::OutputFlow::new(move || waker.wake());
         text.set_font_waker(flow.wake.clone());
         let mut app = App::new(self.config.clone(), self.profiles.clone(), window.is_dark_mode(), home, flow.wake.clone());
+        if let Some((monospace, all)) = &self.font_families {
+            app.set_font_families(monospace.clone(), all.clone());
+        }
         let (w, h) = window.size();
         app.set_viewport(w, h, window.scale());
         app.set_ssh(self.ssh.clone());
+        app.set_config_path(self.config_path.as_ref().map(|p| p.to_string_lossy().into_owned()));
         app.set_system_language(&P::ui_language());
         app.vault_state(self.vault_view.clone());
         app.set_cwd_probe(Arc::new(P::process_cwd));
         app.set_children_probe(Arc::new(P::child_processes));
         app.set_can_elevate(P::can_elevate());
         app.set_recent(self.recent.clone());
-        let restored = (!self.pending.is_empty()).then(|| self.pending.remove(0)).is_some_and(|state| app.restore(&state));
+        let first = self.windows.is_empty();
+        let saved = (!self.pending.is_empty()).then(|| self.pending.remove(0));
         let startup = self.startup.take().filter(|r| r.command != crate::cli::Command::Window);
-        let opens_tab = startup.as_ref().is_some_and(|r| !matches!(r.command, crate::cli::Command::Paste { .. }));
-        if !restored && !opens_tab {
-            app.open_default_tab();
-        }
+        initialize_tabs(&mut app, saved, first, startup.as_ref().map(|r| &r.command));
         if let Some(request) = startup {
             Self::serve_request(&mut app, request);
         }
@@ -813,7 +889,6 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: app.is_dark() });
         }
         window.set_dark(app.is_dark());
-        let first = self.windows.is_empty();
         self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx: Gfx::new(text, ATLAS), renderer: None });
         if first {
             self.applied = None;
@@ -829,7 +904,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     fn event(&mut self, window: &Win<P>, event: Event) {
         if matches!(event, Event::Focus(true)) {
             self.last_focused = Some(window.id());
-            self.reload_config();
+            self.reload_config(false);
             if self.windows.keys().min() == Some(&window.id()) {
                 self.apply_window_prefs(window);
             }

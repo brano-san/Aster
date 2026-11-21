@@ -10,11 +10,20 @@ use toml::Value;
 pub enum Control {
     Toggle,
     Choice(&'static [(&'static str, &'static str)]),
+    Segments(&'static [(&'static str, &'static str)]),
     Schemes,
     Profiles,
     Number { min: f64, max: f64, step: f64 },
     Text,
+    Font { monospace: bool },
     Run(Action),
+    ReadOnly(Info),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Info {
+    ConfigPath,
+    ConfigStatus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,13 +43,16 @@ const TERMINAL: &str = "Terminal";
 const INPUT: &str = "Clipboard and mouse";
 const SEARCH: &str = "Search";
 const APPEARANCE: &str = "Appearance";
+const WINDOW: &str = "Window";
 const COLORS: &str = "Color scheme";
 const DOCK: &str = "Docked window";
 const VAULT: &str = "Vault";
 const SSH: &str = "SSH";
-const SYSTEM: &str = "Application";
+pub(crate) const SYSTEM: &str = "Application";
+const CONFIG_FILE: &str = "Config file";
 
 const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("underline", "Underline")];
+const LINK_MODIFIERS: &[(&str, &str)] = &[("none", "None"), ("ctrl", "Ctrl"), ("shift", "Shift")];
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
 const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("auto", "Follow the system")];
 const BELLS: &[(&str, &str)] = &[("off", "Off"), ("visual", "Flash the pane"), ("audible", "System sound")];
@@ -55,12 +67,6 @@ const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bot
 const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
 
 pub const SETTINGS: &[Setting] = &[
-    item(TERMINAL, "terminal.font", "Font", "Monospace font family for the terminal", Control::Text),
-    item(TERMINAL, "terminal.font-size", "Font size", "Size in points before zoom", Control::Number { min: 6.0, max: 48.0, step: 1.0 }),
-    item(TERMINAL, "terminal.line-padding", "Line padding", "Extra pixels between lines", Control::Number { min: 0.0, max: 20.0, step: 1.0 }),
-    item(TERMINAL, "terminal.padding", "Text padding", "Space between the text and the edges of a pane", Control::Number { min: 0.0, max: 64.0, step: 1.0 }),
-    item(TERMINAL, "terminal.cursor", "Cursor shape", "Shape of the text cursor", Control::Choice(CURSORS)),
-    item(TERMINAL, "terminal.cursor-blink", "Blinking cursor", "The cursor blinks while the window has focus", Control::Toggle),
     item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
     item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
     item(TERMINAL, "terminal.profile", "Default profile", "Shell for new tabs and windows", Control::Profiles),
@@ -68,10 +74,15 @@ pub const SETTINGS: &[Setting] = &[
     item(TERMINAL, "terminal.recover-tabs", "Restore tabs", "Reopen tabs, splits and their folders on start", Control::Toggle),
     item(TERMINAL, "terminal.confirm-close", "Confirm closing running programs", "Ask before closing a tab, pane or window where a program is still running", Control::Toggle),
     item(TERMINAL, "terminal.focus-follows-mouse", "Focus follows the mouse", "Moving the pointer over a pane makes it the active one", Control::Toggle),
-    item(TERMINAL, "terminal.bell", "Bell", "What happens when a program rings the bell", Control::Choice(BELLS)),
+    item(TERMINAL, "terminal.bell", "Bell", "What happens when a program rings the bell", Control::Segments(BELLS)),
+    item(TERMINAL, "terminal.alt-is-meta", "Alt sends Meta", "Prefix letters typed with Alt with Escape", Control::Toggle),
+    item(TERMINAL, "terminal.bell-attention", "Request attention on bell", "Flash the taskbar when an unfocused window rings", Control::Toggle),
+    item(TERMINAL, "terminal.open-on-start", "Open a terminal on start", "Open the default profile when no session is restored", Control::Toggle),
     item(TERMINAL, "terminal.scroll-on-input", "Scroll on input", "Typing scrolls back to the bottom", Control::Toggle),
     item(INPUT, "terminal.copy-on-select", "Copy on select", "Selected text goes to the clipboard", Control::Toggle),
     item(INPUT, "terminal.copy-as-html", "Copy as HTML", "Include text colors and bold weight when copying a selection", Control::Toggle),
+    item(INPUT, "terminal.link-modifier", "Modifier for opening links", "Hold this key when clicking a link", Control::Choice(LINK_MODIFIERS)),
+    item(INPUT, "terminal.paste-newlines-as-spaces", "Paste line breaks as spaces", "Replace each line break with a space before pasting", Control::Toggle),
     item(INPUT, "terminal.right-click", "Right click", "What the right mouse button does", Control::Choice(RIGHT_CLICK)),
     item(INPUT, "terminal.paste-on-middle-click", "Paste on middle click", "The middle mouse button pastes", Control::Toggle),
     item(INPUT, "terminal.bracketed-paste", "Bracketed paste", "Programs can tell pasted text from typing", Control::Toggle),
@@ -82,25 +93,31 @@ pub const SETTINGS: &[Setting] = &[
     item(SEARCH, "terminal.search-options.case-sensitive", "Match case", "Search tells upper and lower case apart", Control::Toggle),
     item(SEARCH, "terminal.search-options.regex", "Regular expressions", "Search queries are regular expressions", Control::Toggle),
     item(SEARCH, "terminal.search-options.whole-word", "Whole words", "Search matches whole words only", Control::Toggle),
-    item(APPEARANCE, "appearance.opacity", "Opacity", "Background opacity of the terminal", Control::Number { min: 0.2, max: 1.0, step: 0.05 }),
+    item(APPEARANCE, "terminal.font", "Font", "Monospace font family for the terminal", Control::Font { monospace: true }),
+    item(APPEARANCE, "terminal.font-size", "Font size", "Size in points before zoom", Control::Number { min: 6.0, max: 48.0, step: 1.0 }),
+    item(APPEARANCE, "terminal.line-padding", "Line padding", "Extra pixels between lines", Control::Number { min: 0.0, max: 20.0, step: 1.0 }),
+    item(APPEARANCE, "terminal.padding", "Text padding", "Space between the text and the edges of a pane", Control::Number { min: 0.0, max: 64.0, step: 1.0 }),
+    item(APPEARANCE, "terminal.cursor", "Cursor shape", "Shape of the text cursor", Control::Segments(CURSORS)),
+    item(APPEARANCE, "terminal.cursor-blink", "Blinking cursor", "The cursor blinks while the window has focus", Control::Toggle),
     item(APPEARANCE, "terminal.minimum-contrast-ratio", "Minimum contrast ratio", "Adjust text color for readability; 1 disables the adjustment", Control::Number { min: 1.0, max: 21.0, step: 0.5 }),
-    item(APPEARANCE, "appearance.backdrop", "Backdrop", "System material behind the window on Windows 11", Control::Choice(BACKDROPS)),
-    item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Text),
-    item(APPEARANCE, "appearance.density", "Interface density", "Scale tabs, menus, settings and padding", Control::Number { min: 0.6, max: 1.4, step: 0.1 }),
-    item(APPEARANCE, "terminal.fallback-font", "Fallback font", "Font to try for missing terminal characters before system fallback", Control::Text),
+    item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Font { monospace: false }),
+    item(APPEARANCE, "terminal.fallback-font", "Fallback font", "Font to try for missing terminal characters before system fallback", Control::Font { monospace: true }),
     item(APPEARANCE, "terminal.ligatures", "Font ligatures", "Allow the terminal font to join adjacent characters", Control::Toggle),
-    item(APPEARANCE, "appearance.tab-bar", "Tab bar", "Hide the tab bar and window buttons to leave only the terminal; Ctrl+Shift+B toggles it", Control::Choice(TAB_BARS)),
-    item(APPEARANCE, "appearance.tab-index", "Show tab numbers", "Display the tab number before its title", Control::Toggle),
-    item(APPEARANCE, "appearance.tab-close-buttons", "Show close buttons on tabs", "Show a close button on unpinned tabs", Control::Toggle),
-    item(APPEARANCE, "appearance.tabs-in-fullscreen", "Keep the tab bar in full screen", "Use the usual tab bar visibility in full screen", Control::Toggle),
-    item(APPEARANCE, "appearance.tab-width", "Tab width", "Choose the width of horizontal tabs", Control::Choice(TAB_WIDTHS)),
-    item(APPEARANCE, "appearance.tab-bar-position", "Tab bar position", "Choose the edge of the window for the tab bar", Control::Choice(TAB_POSITIONS)),
-    item(APPEARANCE, "appearance.mru-tabs", "Switch tabs in order of recent use", "Hold Ctrl and press Tab to choose a recently used tab", Control::Toggle),
-    item(APPEARANCE, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
-    item(APPEARANCE, "appearance.animations", "Animations", "Show tab name toasts, visual bells and cursor blink", Control::Toggle),
-    item(APPEARANCE, "appearance.last-tab-closes-window", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),
-    item(APPEARANCE, "appearance.tray", "Notification area icon", "Keep Aster running after its last window closes on Windows. Has no effect on Linux.", Control::Toggle),
-    item(COLORS, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Choice(SCHEME_MODES)),
+    item(WINDOW, "appearance.opacity", "Opacity", "Background opacity of the terminal", Control::Number { min: 0.2, max: 1.0, step: 0.05 }),
+    item(WINDOW, "appearance.backdrop", "Backdrop", "System material behind the window on Windows 11", Control::Choice(BACKDROPS)),
+    item(WINDOW, "appearance.density", "Interface density", "Scale tabs, menus, settings and padding", Control::Number { min: 0.6, max: 1.4, step: 0.1 }),
+    item(WINDOW, "appearance.tab-bar", "Tab bar", "Ctrl+Shift+B shows or hides tabs and window buttons", Control::Segments(TAB_BARS)),
+    item(WINDOW, "appearance.tab-index", "Show tab numbers", "Display the tab number before its title", Control::Toggle),
+    item(WINDOW, "appearance.tab-close-buttons", "Show close buttons on tabs", "Show a close button on unpinned tabs", Control::Toggle),
+    item(WINDOW, "appearance.tabs-in-fullscreen", "Keep the tab bar in full screen", "Use the usual tab bar visibility in full screen", Control::Toggle),
+    item(WINDOW, "appearance.tab-width", "Tab width", "Choose the width of horizontal tabs", Control::Segments(TAB_WIDTHS)),
+    item(WINDOW, "appearance.tab-bar-position", "Tab bar position", "Choose the edge of the window for the tab bar", Control::Segments(TAB_POSITIONS)),
+    item(WINDOW, "appearance.mru-tabs", "Switch tabs in order of recent use", "Hold Ctrl and press Tab to choose a recently used tab", Control::Toggle),
+    item(WINDOW, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
+    item(WINDOW, "appearance.animations", "Animations", "Show tab name toasts, visual bells and cursor blink", Control::Toggle),
+    item(WINDOW, "appearance.last-tab-closes-window", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),
+    item(WINDOW, "appearance.tray", "Notification area icon", "Keep Aster running after its last window closes on Windows. Has no effect on Linux.", Control::Toggle),
+    item(COLORS, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Segments(SCHEME_MODES)),
     item(COLORS, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
     item(COLORS, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
     item(DOCK, "appearance.dock", "Dock to edge", "Pin the window to a screen edge", Control::Choice(EDGES)),
@@ -116,11 +133,18 @@ pub const SETTINGS: &[Setting] = &[
     item(SSH, "ssh.share-connections", "Share connections", "New tabs to a host that is already open reuse its login", Control::Toggle),
     item(SSH, "ssh.clear-after-connect", "Clear after login", "Clear connection messages before the remote shell starts", Control::Toggle),
     item(SSH, "ssh.x11-display", "Local X11 display", "For X11 forwarding. Leave empty to use DISPLAY", Control::Text),
-    item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
-    item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add \"Open in Aster\" to the folder menu of Windows Explorer", Control::Toggle),
+    item(SYSTEM, "action.whats-new", "What's new", "Read the notes for this version", Control::Run(Action::WhatsNew)),
+    item(SYSTEM, "action.check-for-updates", "Check for updates", "Open the latest release", Control::Run(Action::CheckForUpdates)),
     item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run(Action::OpenLog)),
     item(SYSTEM, "action.open-config-file", "Config file", "Open the config file in the system editor", Control::Run(Action::OpenConfigFile)),
+    item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
+    item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add \"Open in Aster\" to the folder menu of Windows Explorer", Control::Toggle),
     item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run(Action::ReportProblem)),
+    item(CONFIG_FILE, "info.config-path", "File path", "Location of the active configuration", Control::ReadOnly(Info::ConfigPath)),
+    item(CONFIG_FILE, "action.edit-config", "Open in the editor", "Open the config file in the system editor", Control::Run(Action::OpenConfigFile)),
+    item(CONFIG_FILE, "action.open-config-folder", "Open the folder", "Open the folder containing the config file", Control::Run(Action::OpenConfigFolder)),
+    item(CONFIG_FILE, "info.config-status", "File status", "Check the configuration on disk", Control::ReadOnly(Info::ConfigStatus)),
+    item(CONFIG_FILE, "action.show-default-config", "Show the defaults", "Open a copy of the default settings", Control::Run(Action::ShowDefaultConfig)),
 ];
 
 pub fn get(config: &Config, key: &str) -> Option<Value> {
@@ -158,7 +182,7 @@ fn found(hay: &str, query: &str) -> bool {
 
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
 pub const PROFILES: &str = "Profiles";
-pub const PAGES: [&str; 11] = [SYSTEM, APPEARANCE, COLORS, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, VAULT, SSH];
+pub const PAGES: [&str; 13] = [SYSTEM, APPEARANCE, COLORS, WINDOW, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, VAULT, SSH, CONFIG_FILE];
 pub const FIELDS: [&str; 9] = ["Name", "Command", "Arguments", "Start folder", "SSH destination", "Serial port", "Telnet or TCP address", "Group", "Color scheme"];
 
 const TEMPLATES: [(&str, &str, usize, &str); 5] = [
@@ -371,6 +395,10 @@ pub fn shortcut(item: usize) -> Option<Action> {
     item.checked_sub(SETTINGS.len()).and_then(|k| Action::all().nth(k))
 }
 
+pub(crate) fn shortcut_edit_key(key: Key, mods: Mods) -> bool {
+    matches!(key, Key::Enter | Key::Insert) && mods == Mods::NONE || key == Key::Delete && !mods.ctrl && !mods.meta && !mods.alt
+}
+
 pub fn section_of(item: usize) -> &'static str {
     match shortcut(item) {
         Some(_) => SHORTCUTS,
@@ -394,8 +422,14 @@ pub struct SettingsPage {
     pub shown: Vec<usize>,
     pub selected: usize,
     pub scroll: f32,
+    pub(crate) font_matches: Vec<String>,
+    pub(crate) font_index: usize,
+    pub(crate) font_replace: bool,
+    pub(crate) segment_widths: std::collections::BTreeMap<&'static str, f32>,
     editing: Option<InlineEdit>,
-    pub capture: Option<Action>,
+    pub capture: Option<(Action, bool)>,
+    pub(crate) shortcut_rows: std::collections::BTreeMap<usize, ShortcutLayout>,
+    pub(crate) info_rows: std::collections::BTreeMap<usize, Vec<String>>,
     pub notice: Option<String>,
     pub profiles: Vec<ProfileRow>,
     pub(crate) vault: VaultView,
@@ -447,6 +481,21 @@ impl SettingsPage {
         self.scroll = 0.0;
     }
 
+    fn segment_width(&self, label: &'static str, scale: f32) -> f32 {
+        self.segment_widths.get(label).copied().unwrap_or(64.0 * scale)
+    }
+
+    pub(crate) fn segments(&self, options: &[(&str, &'static str)], rect: Rect, scale: f32) -> Vec<Rect> {
+        let total: f32 = options.iter().map(|(_, label)| self.segment_width(label, scale)).sum();
+        let mut offset = 0.0;
+        options.iter().map(|(_, label)| {
+            let left = rect.x + (offset * rect.w / total).round();
+            offset += self.segment_width(label, scale);
+            let right = rect.x + (offset * rect.w / total).round();
+            Rect::new(left, rect.y, right - left, rect.h)
+        }).collect()
+    }
+
     pub fn searching(&self) -> bool {
         !self.query.trim().is_empty()
     }
@@ -454,6 +503,9 @@ impl SettingsPage {
     pub(crate) fn show_page(&mut self, page: usize) {
         self.page = page.min(PAGES.len() - 1);
         self.query.clear();
+        self.font_matches.clear();
+        self.font_replace = false;
+        self.capture = None;
         self.editing = None;
         self.notice = None;
         self.refilter();
@@ -583,6 +635,7 @@ pub struct SettingsGeometry {
     pub list: Rect,
     pub rows: Vec<Row>,
     pub pages: Vec<Rect>,
+    pub suggestions: Vec<(usize, Rect)>,
     pub height: f32,
 }
 
@@ -595,21 +648,84 @@ pub enum Part {
 
 pub fn control_width(control: Control) -> f32 {
     match control {
+        Control::Segments(_) => 360.0,
         Control::Toggle => 40.0,
         Control::Number { .. } => 132.0,
         Control::Choice(_) | Control::Schemes | Control::Profiles => 220.0,
-        Control::Text => 260.0,
+        Control::Text | Control::Font { .. } => 260.0,
         Control::Run(_) => 120.0,
+        Control::ReadOnly(_) => 0.0,
+    }
+}
+
+pub(crate) fn column_widths(content: Rect, s: f32) -> (f32, f32, f32) {
+    let total = (1080.0 * s).min(content.w - 32.0 * s).max(240.0 * s).round();
+    let side_w = if total >= 640.0 * s { (200.0 * s).round() } else { 0.0 };
+    let gap = if side_w > 0.0 { (24.0 * s).round() } else { 0.0 };
+    (total, side_w, total - side_w - gap)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ShortcutLayout {
+    pub label_width: f32,
+    pub chips: Vec<(Vec<String>, Rect)>,
+    pub hint_top: f32,
+    pub hint_lines: Vec<String>,
+    pub height: f32,
+}
+
+impl ShortcutLayout {
+    pub fn new(width: f32, s: f32, bindings: Vec<String>, hint: &str, mut measure: impl FnMut(&str) -> f32) -> Self {
+        let pad = (14.0 * s).round();
+        let inner = width - 2.0 * pad;
+        let wrap = |text: &str, limit: f32, measure: &mut dyn FnMut(&str) -> f32| {
+            let mut lines = Vec::new();
+            let mut current = String::new();
+            for word in text.split_whitespace() {
+                if !current.is_empty() {
+                    let next = format!("{current} {word}");
+                    if measure(&next) <= limit {
+                        current = next;
+                        continue;
+                    }
+                    lines.push(std::mem::take(&mut current));
+                }
+                current.push_str(word);
+            }
+            if !current.is_empty() {
+                lines.push(current);
+            }
+            lines
+        };
+        let stacked = inner < 420.0 * s;
+        let label_width = if stacked { inner } else { (inner * 0.43).round() };
+        let mut x = if stacked { pad } else { pad + label_width + 8.0 * s };
+        let mut y = if stacked { 32.0 * s } else { 7.0 * s };
+        let mut bottom = y;
+        let mut chips = Vec::new();
+        for text in bindings {
+            let lines = if measure(&text) + 16.0 * s > inner { wrap(&text, inner - 16.0 * s, &mut measure) } else { vec![text] };
+            let w = (lines.iter().map(|l| measure(l)).fold(0.0, f32::max) + 16.0 * s).ceil().min(inner);
+            if x + w > width - pad && x > pad {
+                x = pad;
+                y = bottom.max(29.0 * s) + 4.0 * s;
+            }
+            let r = Rect::new(x, y, w, (6.0 + lines.len() as f32 * 16.0) * s);
+            chips.push((lines, r));
+            bottom = bottom.max(r.bottom());
+            x = r.right() + 5.0 * s;
+        }
+        let hint_top = bottom + 4.0 * s;
+        let hint_lines = wrap(hint, inner, &mut measure);
+        let height = (hint_top + (7.0 + hint_lines.len() as f32 * 16.0) * s).ceil().max((58.0 * s).round());
+        Self { label_width, chips, hint_top, hint_lines, height }
     }
 }
 
 pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry {
-    let total = (1080.0 * s).min(content.w - 32.0 * s).max(240.0 * s).round();
+    let (total, side_w, width) = column_widths(content, s);
     let x0 = (content.x + (content.w - total) / 2.0).round();
-    let side_w = if total >= 640.0 * s { (200.0 * s).round() } else { 0.0 };
-    let gap = if side_w > 0.0 { (24.0 * s).round() } else { 0.0 };
-    let x = x0 + side_w + gap;
-    let width = total - side_w - gap;
+    let x = x0 + total - width;
     let top = content.y + (18.0 * s).round();
     let header_h = (36.0 * s).round();
     let close_w = header_h;
@@ -619,7 +735,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
     let title = Rect::new(x0, top, (field.x - x0 - 8.0 * s).max(0.0), header_h);
     let list_top = top + header_h + (14.0 * s).round();
     let list = Rect::new(x, list_top, width, (content.bottom() - list_top - 12.0 * s).max(0.0));
-    let page_h = (34.0 * s).round();
+    let page_h = (34.0 * s).min(list.h / PAGES.len() as f32).floor().max(1.0);
     let pages = if side_w > 0.0 { (0..PAGES.len()).map(|k| Rect::new(x0, list_top + k as f32 * page_h, side_w, page_h - (2.0 * s).round())).collect() } else { Vec::new() };
     let section_h = (38.0 * s).round();
     let item_h = (58.0 * s).round();
@@ -630,12 +746,19 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
     for (n, &i) in page.shown.iter().enumerate() {
         if page.section(i) != section {
             section = page.section(i);
+            let section_h = section_h + if section == SYSTEM && !page.searching() { (20.0 * s).round() } else { 0.0 };
             rows.push(Row { kind: RowKind::Section(section), rect: Rect::new(x, y, width, section_h), control: Rect::default() });
             y += section_h;
         }
+        let item_h = page.shortcut_rows.get(&i).map_or(item_h, |r| r.height);
+        let item_h = item_h + page.info_rows.get(&i).map_or(0, |lines| lines.len().saturating_sub(1)) as f32 * (16.0 * s).round();
         let rect = Rect::new(x, y, width, item_h);
         let (cw, ch) = match SETTINGS.get(i).map(|s| s.control) {
             Some(Control::Toggle) => ((control_width(Control::Toggle) * s).round(), (22.0 * s).round()),
+            Some(Control::Segments(options)) => {
+                let measured: f32 = options.iter().map(|(_, label)| page.segment_width(label, s)).sum();
+                (measured.min(360.0 * s).min(width * 0.55).round(), control_h)
+            }
             Some(c) => ((control_width(c) * s).min(width * 0.45).round(), control_h),
             None if page.scheme_at(i).is_some() => ((300.0 * s).min(width * 0.45).round(), (36.0 * s).round()),
             None => ((240.0 * s).min(width * 0.45).round(), control_h),
@@ -645,7 +768,24 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
         y += item_h;
     }
     let height = y + page.scroll - list.y;
-    SettingsGeometry { page: content, title, field, close, list, rows, pages, height }
+    let mut suggestions = Vec::new();
+    if page.editing() && matches!(page.current().map(|s| s.control), Some(Control::Font { .. })) {
+        if let Some(row) = rows.iter().find(|r| r.kind == RowKind::Item(page.selected)) {
+            let anchor = row.control;
+            if anchor.y >= list.y && anchor.bottom() <= list.bottom() {
+                let h = (26.0 * s).round();
+                let below = ((list.bottom() - anchor.bottom()) / h) as usize;
+                let above = ((anchor.y - list.y) / h) as usize;
+                let count = page.font_matches.len();
+                let flip = below < count && above > below;
+                let visible = count.min(if flip { above } else { below });
+                let first = (page.font_index + 1).saturating_sub(visible);
+                let top = if flip { anchor.y - visible as f32 * h } else { anchor.bottom() };
+                suggestions.extend((0..visible).map(|i| (first + i, Rect::new(anchor.x, top + i as f32 * h, anchor.w, h))));
+            }
+        }
+    }
+    SettingsGeometry { page: content, title, field, close, list, rows, pages, suggestions, height }
 }
 
 pub fn part_at(control: Control, r: Rect, s: f32, x: f32) -> Part {
@@ -758,6 +898,28 @@ impl App {
         self.reveal_selected();
     }
 
+    pub(crate) fn restore_settings_page(&mut self) {
+        self.settings = Some(self.settings_stash.take().unwrap_or_else(|| self.fresh_settings_page()));
+        self.effects.push(Effect::CheckConfigFile);
+    }
+
+    pub fn set_config_path(&mut self, path: Option<String>) {
+        self.config_path = path;
+        self.dirty = true;
+    }
+
+    pub fn set_config_status(&mut self, error: Option<String>) {
+        self.config_status = Some(error.map_or(Ok(()), Err));
+        self.dirty = true;
+    }
+
+    pub fn settings_file_error(&mut self, error: &str) {
+        if let Some(page) = self.settings.as_mut() {
+            page.notice = Some(tf("Could not open the defaults: {error}", &[("error", error)]));
+            self.dirty = true;
+        }
+    }
+
     pub(crate) fn open_settings(&mut self) {
         use crate::app::{Tab, SETTINGS_PANE};
         self.overlay = None;
@@ -770,8 +932,7 @@ impl App {
             }
         }
         if self.settings.is_none() {
-            let page = self.settings_stash.take().unwrap_or_else(|| self.fresh_settings_page());
-            self.settings = Some(page);
+            self.restore_settings_page();
         }
         self.dirty = true;
     }
@@ -1005,7 +1166,7 @@ impl App {
 
     pub fn setting_options(&self, control: Control) -> Vec<(String, String)> {
         match control {
-            Control::Choice(list) => list.iter().map(|(v, l)| ((*v).to_owned(), t(l).to_owned())).collect(),
+            Control::Choice(list) | Control::Segments(list) => list.iter().map(|(v, l)| ((*v).to_owned(), t(l).to_owned())).collect(),
             Control::Schemes => self.scheme_names().into_iter().map(|n| (n.clone(), n)).collect(),
             Control::Profiles => std::iter::once((String::new(), t("First available").to_owned())).chain(self.profiles.iter().map(|p| (p.id.clone(), p.name.clone()))).collect(),
             _ => Vec::new(),
@@ -1013,11 +1174,21 @@ impl App {
     }
 
     pub fn setting_text(&self, setting: &Setting) -> String {
+        match setting.control {
+            Control::ReadOnly(Info::ConfigPath) => return self.config_path.as_deref().unwrap_or_else(|| t("Config folder unavailable")).to_owned(),
+            Control::ReadOnly(Info::ConfigStatus) => return match &self.config_status {
+                Some(Ok(())) => t("The config file is valid"),
+                Some(Err(error)) => error,
+                None if self.config_path.is_none() => t("Config folder unavailable"),
+                None => t("Checking the config file…"),
+            }.to_owned(),
+            _ => {}
+        }
         let value = get(&self.config, setting.key);
         match (setting.control, &value) {
             (Control::Number { .. }, Some(Value::Integer(n))) => n.to_string(),
             (Control::Number { .. }, Some(Value::Float(f))) => number_text(*f),
-            (Control::Choice(_) | Control::Schemes | Control::Profiles, Some(Value::String(v))) => {
+            (Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles, Some(Value::String(v))) => {
                 self.setting_options(setting.control).into_iter().find(|(o, _)| o.eq_ignore_ascii_case(v)).map(|(_, l)| l).unwrap_or_else(|| v.clone())
             }
             (_, Some(Value::String(v))) => v.clone(),
@@ -1055,7 +1226,7 @@ impl App {
         }
     }
 
-    fn assign_shortcut(&mut self, action: Action, chord: Chord) {
+    fn assign_shortcut(&mut self, action: Action, chord: Chord, append: bool) {
         let text = chord.to_string();
         let mut taken = Vec::new();
         let mut config = self.config.clone();
@@ -1066,7 +1237,11 @@ impl App {
                 taken.push(other.label());
             }
         }
-        config.hotkeys.insert(action.id(), vec![text.clone()]);
+        let mut bindings: Vec<String> = if append { self.keymap.bindings_of(action).map(format_binding).collect() } else { Vec::new() };
+        if !bindings.contains(&text) {
+            bindings.push(text.clone());
+            config.hotkeys.insert(action.id(), bindings);
+        }
         if config != self.config {
             self.set_config(config);
             self.push_save_config();
@@ -1078,7 +1253,7 @@ impl App {
     }
 
     fn capture_key(&mut self, key: Key, mods: Mods) {
-        let Some(action) = self.settings.as_ref().and_then(|p| p.capture) else { return };
+        let Some((action, append)) = self.settings.as_ref().and_then(|p| p.capture) else { return };
         match key {
             Key::Escape if mods == Mods::NONE => {
                 if let Some(p) = self.settings.as_mut() {
@@ -1086,7 +1261,7 @@ impl App {
                 }
             }
             Key::Other => {}
-            _ => self.assign_shortcut(action, Chord { key, mods }),
+            _ => self.assign_shortcut(action, Chord { key, mods }, append),
         }
         self.dirty = true;
     }
@@ -1107,7 +1282,7 @@ impl App {
                 let on = if delta == 0 { !self.setting_on(setting) } else { delta > 0 };
                 self.apply_setting(setting.key, Value::Boolean(on));
             }
-            Control::Choice(_) | Control::Schemes | Control::Profiles => {
+            Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles => {
                 let options = self.setting_options(setting.control);
                 if options.is_empty() {
                     return;
@@ -1134,8 +1309,9 @@ impl App {
                 };
                 self.set_number(setting, now + step * delta as f64);
             }
-            Control::Text => self.begin_edit(),
+            Control::Text | Control::Font { .. } => self.begin_edit(),
             Control::Run(action) => self.run(action),
+            Control::ReadOnly(_) => {}
         }
     }
 
@@ -1152,21 +1328,55 @@ impl App {
     fn begin_edit(&mut self) {
         let Some(setting) = self.settings.as_ref().and_then(|p| p.current()) else { return };
         let text = match setting.control {
-            Control::Number { .. } | Control::Text => self.setting_text(setting),
+            Control::Number { .. } | Control::Text | Control::Font { .. } => self.setting_text(setting),
             _ => return,
         };
         if let Some(p) = self.settings.as_mut() {
             p.editing = Some(InlineEdit::Setting(text));
+            p.font_replace = matches!(setting.control, Control::Font { .. });
+            p.font_matches.clear();
+            p.font_index = 0;
         }
         self.dirty = true;
     }
 
+    pub fn set_font_families(&mut self, monospace: Vec<String>, all: Vec<String>) {
+        self.monospace_fonts = monospace;
+        self.all_fonts = all;
+        self.filter_fonts();
+        self.dirty = true;
+    }
+
+    fn filter_fonts(&mut self) {
+        let Some(page) = self.settings.as_mut() else { return };
+        let Some(Control::Font { monospace }) = page.current().map(|s| s.control) else { return };
+        let Some(InlineEdit::Setting(text)) = &page.editing else { return };
+        page.font_matches.clear();
+        page.font_index = 0;
+        if !page.font_replace && !text.is_empty() {
+            let query = text.to_lowercase();
+            let families = if monospace { &self.monospace_fonts } else { &self.all_fonts };
+            page.font_matches.extend(families.iter().filter(|f| f.to_lowercase().contains(&query)).take(8).cloned());
+        }
+    }
+
+    fn accept_font(&mut self, index: usize) {
+        if let Some(page) = self.settings.as_mut() {
+            if let Some(name) = page.font_matches.get(index) {
+                page.editing = Some(InlineEdit::Setting(name.clone()));
+            }
+        }
+        self.commit_edit();
+    }
+
     fn commit_edit(&mut self) {
         let Some(page) = self.settings.as_mut() else { return };
+        page.font_matches.clear();
+        page.font_replace = false;
         let Some(InlineEdit::Setting(text)) = page.editing.take() else { return };
         let Some(setting) = page.current() else { return };
         match setting.control {
-            Control::Text => self.apply_setting(setting.key, Value::String(text.trim().to_owned())),
+            Control::Text | Control::Font { .. } => self.apply_setting(setting.key, Value::String(text.trim().to_owned())),
             Control::Number { .. } => {
                 if let Ok(v) = text.trim().replace(',', ".").parse::<f64>() {
                     self.set_number(setting, v);
@@ -1314,17 +1524,30 @@ impl App {
         }
         if page.editing.is_some() {
             match key {
-                Key::Escape => page.editing = None,
+                Key::Escape => {
+                    page.editing = None;
+                    page.font_matches.clear();
+                    page.font_replace = false;
+                }
                 Key::Enter if matches!(page.editing, Some(InlineEdit::Passphrase { .. })) => self.submit_passphrase(),
+                Key::Up | Key::Down if !page.font_matches.is_empty() => {
+                    page.font_index = if key == Key::Up { page.font_index.saturating_sub(1) } else { (page.font_index + 1).min(page.font_matches.len() - 1) };
+                }
+                Key::Enter if !page.font_matches.is_empty() => {
+                    let index = page.font_index;
+                    self.accept_font(index);
+                }
                 Key::Enter | Key::Tab => self.commit_edit(),
                 Key::Backspace => {
+                    let replace = std::mem::take(&mut page.font_replace);
                     if let Some(t) = page.editing.as_mut().and_then(InlineEdit::buffer) {
-                        if mods.ctrl {
+                        if mods.ctrl || replace {
                             t.clear();
                         } else {
                             t.pop();
                         }
                     }
+                    self.filter_fonts();
                 }
                 Key::Char('V') if mods.ctrl => {
                     let effect = if page.editing_passphrase() { Effect::RequestVaultPaste(self.vault_input_id) } else { Effect::RequestPaste };
@@ -1335,10 +1558,10 @@ impl App {
             return;
         }
         let current = page.current();
-        if let Some(action) = page.current_shortcut() {
+        if let Some(action) = page.current_shortcut().filter(|_| shortcut_edit_key(key, mods)) {
             match key {
-                Key::Enter => {
-                    page.capture = Some(action);
+                Key::Enter | Key::Insert => {
+                    page.capture = Some((action, key == Key::Insert));
                     return;
                 }
                 Key::Delete if mods.shift => return self.set_shortcuts(action, None),
@@ -1407,7 +1630,9 @@ impl App {
         match page.editing.as_mut() {
             Some(edit) => {
                 if let Some(buffer) = edit.buffer() {
+                    if std::mem::take(&mut page.font_replace) { buffer.clear(); }
                     buffer.push_str(&clean);
+                    self.filter_fonts();
                 }
             }
             None => {
@@ -1422,9 +1647,13 @@ impl App {
         let Some(geo) = self.settings_geometry() else { return };
         self.dirty = true;
         if let Some(page) = self.settings.as_mut() {
+            page.capture = None;
             if page.confirming_vault.is_some() && !geo.rows.iter().any(|row| row.kind == RowKind::Item(page.selected) && row.rect.contains(x, y)) {
                 page.cancel_vault_input();
             }
+        }
+        if let Some(&(index, _)) = geo.suggestions.iter().find(|(_, r)| r.contains(x, y)) {
+            return self.accept_font(index);
         }
         if geo.close.contains(x, y) {
             return self.close_settings();
@@ -1441,6 +1670,7 @@ impl App {
         }
         let Some(row) = geo.rows.iter().find(|r| r.rect.contains(x, y)).copied() else { return self.commit_edit() };
         let RowKind::Item(n) = row.kind else { return self.commit_edit() };
+        let scale = self.ui();
         let editing_same = self.settings.as_ref().is_some_and(|p| p.selected == n && p.editing.is_some());
         if editing_same && self.settings.as_ref().is_some_and(|p| matches!(p.editing, Some(InlineEdit::Passphrase { .. } | InlineEdit::Waiting))) {
             return;
@@ -1468,10 +1698,17 @@ impl App {
             return self.open_editor(item);
         }
         if let Some(action) = shortcut(page.shown[n]) {
-            page.capture = Some(action);
+            page.capture = Some((action, false));
             return;
         }
         let setting = &SETTINGS[page.shown[n]];
+        if let Control::Segments(options) = setting.control {
+            let segments = page.segments(options, row.control, scale);
+            if let Some(index) = segments.iter().position(|rect| rect.contains(x, y)) {
+                self.apply_setting(setting.key, Value::String(options[index].0.to_owned()));
+            }
+            return;
+        }
         match setting.control {
             Control::Toggle => self.adjust_setting(setting, 0),
             control if row.control.contains(x, y) => match part_at(control, row.control, self.ui(), x) {
