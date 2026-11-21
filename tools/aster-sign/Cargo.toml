@@ -1,0 +1,13 @@
+[package]
+name = "aster-sign"
+description = "Signs Aster release archives for the updater and writes latest.json"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+aster-core.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true

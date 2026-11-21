@@ -298,6 +298,18 @@ pub struct System {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
+pub struct Updates {
+    pub check_automatically: bool,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self { check_automatically: true }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct Vault {
     pub sealed: String,
     pub remember_minutes: u32,
@@ -317,6 +329,7 @@ pub struct Config {
     pub vault: Vault,
     pub ssh: Ssh,
     pub system: System,
+    pub updates: Updates,
     pub hotkeys: BTreeMap<String, Vec<String>>,
     pub profiles: Vec<Profile>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

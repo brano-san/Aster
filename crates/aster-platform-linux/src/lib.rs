@@ -6,6 +6,7 @@ mod instance;
 mod pty;
 mod shells;
 mod text;
+mod update;
 mod window;
 
 pub use gl::{GlDevice, GlRenderer};
@@ -136,6 +137,20 @@ impl Platform for Linux {
     fn ssh_command() -> Option<String> {
         std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("ssh")).find(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
     }
+
+    fn download(url: &str, out: &mut dyn std::io::Write, progress: &mut dyn FnMut(u64, Option<u64>) -> bool) -> Result<(), PlatformError> {
+        update::download(url, out, progress)
+    }
+
+    fn wait_exit(pid: u32, limit: std::time::Duration) {
+        update::wait_exit(pid, limit)
+    }
+
+    fn run_elevated(_args: &[String]) -> Result<u32, PlatformError> {
+        Err(PlatformError::new(-1, "Installing with administrator rights is only available on Windows"))
+    }
+
+    fn delete_at_reboot(_path: &std::path::Path) {}
 
     fn open(target: &str) {
         let target = target.to_owned();

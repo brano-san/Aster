@@ -200,18 +200,23 @@ fn config_page_reports_disk_status_and_runs_file_actions() {
 }
 
 #[test]
-fn application_page_opens_versioned_and_latest_releases() {
+fn application_page_opens_the_notes_and_checks_for_updates_in_place() {
     let mut a = app();
     a.run(Action::Settings);
     let page = a.settings.as_ref().unwrap();
     let rows: Vec<_> = page.shown.iter().map(|&i| &SETTINGS[i]).collect();
-    assert_eq!(rows[..4].iter().map(|s| s.key).collect::<Vec<_>>(), ["action.whats-new", "action.check-for-updates", "action.open-log", "action.open-config-file"]);
-    for (at, suffix) in [(0, concat!("tag/v", env!("CARGO_PKG_VERSION"))), (1, "latest")] {
-        a.settings.as_mut().unwrap().selected = at;
-        key(&mut a, Key::Enter);
-        let url = format!("https://github.com/brano-san/Aster/releases/{suffix}");
-        assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Open(target) if target == &url)));
-    }
+    assert_eq!(rows[..5].iter().map(|s| s.key).collect::<Vec<_>>(), ["action.whats-new", "action.check-for-updates", "updates.check-automatically", "action.open-log", "action.open-config-file"]);
+    key(&mut a, Key::Enter);
+    let url = concat!("https://github.com/brano-san/Aster/releases/tag/v", env!("CARGO_PKG_VERSION"));
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Open(target) if target == url)));
+    a.settings.as_mut().unwrap().selected = 1;
+    key(&mut a, Key::Enter);
+    let effects = a.take_effects();
+    assert!(effects.iter().any(|e| matches!(e, Effect::Update(crate::update::UpdateRequest::Check { manual: true }))));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Open(_))));
+    a.settings.as_mut().unwrap().selected = 2;
+    key(&mut a, Key::Enter);
+    assert!(!saved(&mut a).unwrap().updates.check_automatically);
 }
 
 #[test]

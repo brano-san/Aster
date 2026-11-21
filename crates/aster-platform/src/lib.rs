@@ -213,6 +213,10 @@ pub trait Platform: 'static {
     fn secret_set(key: &str, value: &str) -> bool;
     fn secret_delete(key: &str);
     fn ui_language() -> String;
+    fn download(url: &str, out: &mut dyn Write, progress: &mut dyn FnMut(u64, Option<u64>) -> bool) -> Result<(), PlatformError>;
+    fn wait_exit(pid: u32, limit: std::time::Duration);
+    fn run_elevated(args: &[String]) -> Result<u32, PlatformError>;
+    fn delete_at_reboot(path: &std::path::Path);
 }
 
 #[cfg(test)]

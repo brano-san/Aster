@@ -10,6 +10,7 @@ mod secrets;
 mod serial;
 mod session;
 mod stream;
+mod update;
 mod zmodem;
 
 use aster_core::config::{Config, SchemeMode};
@@ -76,6 +77,7 @@ fn run<P: Platform>(request: cli::Request) -> Result<(), aster_platform::Platfor
     let log = log::open(log_path::<P>().as_deref());
     tracing_subscriber::fmt().with_ansi(false).with_writer(move || log.clone()).with_max_level(tracing::Level::INFO).init();
     tracing::info!("Aster {} on {} {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    update::on_start::<P>();
     let windows = P::Windows::new()?;
     let waker = windows.waker();
     let alone = std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_INSTANCE").is_none();
@@ -90,7 +92,9 @@ fn run<P: Platform>(request: cli::Request) -> Result<(), aster_platform::Platfor
     let (mut handler, _vault_worker) = handler::Handler::<P>::new(config, waker)
         .map_err(|e| aster_platform::PlatformError::new(0, format!("vault worker: {e}")))?;
     handler.set_instance(requests, Some(request));
-    windows.run(WindowOptions { title: "Aster".into(), placement, dark }, handler)
+    let result = windows.run(WindowOptions { title: "Aster".into(), placement, dark }, handler);
+    update::relaunch_if_installed();
+    result
 }
 
 fn say(text: &str) {
@@ -123,6 +127,13 @@ fn main() {
         let code = host::<aster_platform_windows::Windows>(base, token);
         #[cfg(target_os = "linux")]
         let code = host::<aster_platform_linux::Linux>(base, token);
+        std::process::exit(code);
+    }
+    if args.get(1).map(String::as_str) == Some(update::INSTALL_ELEVATED) {
+        #[cfg(windows)]
+        let code = update::install_from_command_line::<aster_platform_windows::Windows>(args.get(2), args.get(3));
+        #[cfg(target_os = "linux")]
+        let code = update::install_from_command_line::<aster_platform_linux::Linux>(args.get(2), args.get(3));
         std::process::exit(code);
     }
     let cwd = std::env::current_dir().ok();

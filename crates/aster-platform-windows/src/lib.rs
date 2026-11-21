@@ -10,6 +10,7 @@ mod secrets;
 mod dwrite;
 mod shells;
 mod tray;
+mod update;
 mod window;
 
 pub use d3d::{D3dDevice, D3dRenderer};
@@ -176,6 +177,22 @@ impl Platform for Windows {
         let bundled = root.join("System32").join("OpenSSH").join("ssh.exe");
         let found = Some(bundled).filter(|p| p.is_file()).or_else(|| std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join("ssh.exe")).find(|p| p.is_file()));
         found.map(|p| p.to_string_lossy().into_owned())
+    }
+
+    fn download(url: &str, out: &mut dyn std::io::Write, progress: &mut dyn FnMut(u64, Option<u64>) -> bool) -> Result<(), PlatformError> {
+        update::download(url, out, progress)
+    }
+
+    fn wait_exit(pid: u32, limit: std::time::Duration) {
+        update::wait_exit(pid, limit)
+    }
+
+    fn run_elevated(args: &[String]) -> Result<u32, PlatformError> {
+        update::run_elevated(args)
+    }
+
+    fn delete_at_reboot(path: &std::path::Path) {
+        update::delete_at_reboot(path)
     }
 
     fn open(target: &str) {

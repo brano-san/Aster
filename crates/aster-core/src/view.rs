@@ -266,6 +266,7 @@ impl App {
         if let Some(o) = self.overlay.clone() {
             self.draw_overlay(g, &o);
         }
+        self.draw_update_notice(g);
         self.draw_paste(g, m);
         self.draw_close(g);
         self.draw_tab_toast(g);
@@ -900,6 +901,87 @@ impl App {
         g.dl.round_rect(r, theme.overlay, (8.0 * s).round());
         g.dl.outline(r, theme.overlay_border, (8.0 * s).round(), (1.0 * s).round().max(1.0));
         centered(g, r, &text, ui, theme.text);
+    }
+
+    fn draw_update_notice<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        let s = self.ui();
+        let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
+        let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
+        let content = self.chrome.content;
+        let Some(notice) = self.update_notice.as_mut() else { return };
+        notice.button_widths = notice.buttons().iter().map(|b| (g.measure(b.label(notice.notes_open), ui) + 28.0 * s).ceil()).collect();
+        let inner = (crate::update::notice_geometry(content, s, notice).frame.w - 28.0 * s).max(1.0);
+        notice.status_lines = wrapped_info(g, &notice.status(), ui, inner);
+        if notice.notes_shown() {
+            let width = (inner - 20.0 * s).max(1.0);
+            let mut wrapped = Vec::new();
+            for line in crate::update::note_lines(&notice.release.notes) {
+                if line.is_empty() {
+                    wrapped.push(String::new());
+                } else {
+                    wrapped.extend(wrapped_info(g, &line, ui, width));
+                }
+            }
+            if wrapped != notice.wrapped {
+                notice.wrapped = wrapped;
+                notice.notes_scroll = 0;
+            }
+        }
+        let Some(geo) = self.update_geometry() else { return };
+        let Some(notice) = self.update_notice.clone() else { return };
+        let theme = self.theme;
+        let radius = (8.0 * s).round();
+        let line = (1.0 * s).round().max(1.0);
+        g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 4.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (16.0 * s).round());
+        g.dl.round_rect(geo.frame, theme.overlay, radius);
+        g.dl.outline(geo.frame, theme.overlay_border, radius, line);
+        g.dl.round_rect(Rect::new(geo.frame.x, geo.frame.y + radius, (3.0 * s).round(), (geo.frame.h - 2.0 * radius).max(line)), theme.accent, (1.5 * s).round());
+        let ty = baseline(g, geo.title, title);
+        g.text(geo.title.x, ty, &notice.title(), title, theme.text, geo.title.w);
+        let failed = matches!(notice.stage, crate::update::Stage::Failed | crate::update::Stage::ReadOnly);
+        let status_ink = if failed { Color::rgb(if theme.dark { 0xFF9490 } else { 0xA52320 }) } else { theme.text_dim };
+        for (k, text) in notice.status_lines.iter().take(((geo.status.h / geo.line_h) as usize).max(1)).enumerate() {
+            let r = Rect::new(geo.status.x, geo.status.y + k as f32 * geo.line_h, geo.status.w, geo.line_h);
+            let y = baseline(g, r, ui);
+            g.text(r.x, y, text, ui, status_ink, r.w);
+        }
+        if let (Some(bar), Some(fraction)) = (geo.bar, notice.fraction()) {
+            g.dl.round_rect(bar, theme.surface, bar.h / 2.0);
+            if fraction > 0.0 {
+                g.dl.round_rect(Rect::new(bar.x, bar.y, (bar.w * fraction).max(bar.h).round(), bar.h), theme.accent, bar.h / 2.0);
+            }
+        }
+        if let Some(notes) = geo.notes {
+            g.dl.round_rect(notes, theme.surface, (5.0 * s).round());
+            g.dl.outline(notes, theme.overlay_border, (5.0 * s).round(), line);
+            let inner = notes.inset((10.0 * s).round(), (8.0 * s).round());
+            g.dl.set_clip(Some(notes));
+            for (k, text) in notice.visible_notes().iter().enumerate() {
+                let r = Rect::new(inner.x, inner.y + k as f32 * geo.line_h, inner.w, geo.line_h);
+                let y = baseline(g, r, ui);
+                g.text(r.x, y, text, ui, theme.text, r.w);
+            }
+            g.dl.set_clip(None);
+            if notice.wrapped.len() > crate::update::NOTES_VISIBLE {
+                let total = notice.wrapped.len() as f32;
+                let track = notes.inset(0.0, (6.0 * s).round());
+                let thumb_h = (track.h * crate::update::NOTES_VISIBLE as f32 / total).max(16.0 * s);
+                let thumb_y = track.y + (track.h - thumb_h) * notice.notes_scroll as f32 / (total - crate::update::NOTES_VISIBLE as f32).max(1.0);
+                let w = (3.0 * s).round();
+                g.dl.round_rect(Rect::new(notes.right() - w - (4.0 * s).round(), thumb_y.round(), w, thumb_h.round()), theme.overlay_border, w / 2.0);
+            }
+        }
+        let (mx, my) = self.mouse;
+        for (i, (button, r)) in geo.buttons.iter().enumerate() {
+            let primary = i == 0;
+            if primary {
+                g.dl.round_rect(*r, theme.accent, (5.0 * s).round());
+            } else {
+                g.dl.round_rect(*r, if r.contains(mx, my) { theme.button_hover } else { theme.tab_active }, (5.0 * s).round());
+                g.dl.outline(*r, theme.overlay_border, (5.0 * s).round(), line);
+            }
+            centered(g, *r, button.label(notice.notes_open), ui, if primary { Color::rgb(0xFFFFFF) } else { theme.text });
+        }
     }
 
     fn draw_mru<B: TextBackend>(&self, g: &mut Gfx<B>) {

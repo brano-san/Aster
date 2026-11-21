@@ -91,6 +91,9 @@ pub struct Handler<P: Platform> {
     startup: Option<crate::cli::Request>,
     last_focused: Option<WindowId>,
     recent: Vec<String>,
+    updates: crate::update::UpdateWorker,
+    update_window: Option<WindowId>,
+    restarting: bool,
 }
 
 fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
@@ -171,8 +174,10 @@ impl<P: Platform> Handler<P> {
         }, move |update| events.post(StoreEvent::Vault(update)))?;
         let saved = load_session::<P>();
         let recent = saved.recent;
-        let pending = if config.terminal.recover_tabs { saved.windows } else { Vec::new() };
-        Ok((Self { font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent }, worker))
+        let pending = if config.terminal.recover_tabs || crate::update::restarted() { saved.windows } else { Vec::new() };
+        let update_waker = waker.clone();
+        let updates = crate::update::UpdateWorker::start::<P>(Arc::new(move || update_waker.wake()))?;
+        Ok((Self { font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, updates, update_window: None, restarting: false }, worker))
     }
 
     pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
@@ -608,6 +613,10 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::ImeArea(r) => window.set_ime_area(r),
+            Effect::Update(request) => {
+                self.update_window = Some(id);
+                self.updates.submit(request);
+            }
         }
     }
 
@@ -765,6 +774,37 @@ impl<P: Platform> Handler<P> {
         }
     }
 
+    fn drain_updates(&mut self) {
+        while let Ok(reply) = self.updates.events.try_recv() {
+            match reply {
+                crate::update::Reply::Ui(event) => {
+                    let target = self.update_window.filter(|id| self.windows.contains_key(id)).or_else(|| self.request_target());
+                    if let Some(state) = target.and_then(|id| self.windows.get_mut(&id)) {
+                        state.app.on_update(event);
+                    }
+                }
+                crate::update::Reply::Restart => {
+                    if !self.session_saved {
+                        self.save_session();
+                    }
+                    self.session_saved = true;
+                    self.restarting = true;
+                    self.waker.wake();
+                }
+            }
+        }
+    }
+
+    fn close_for_restart(&mut self, window: &Win<P>) {
+        let first = self.windows.keys().min() == Some(&window.id());
+        if first && !window.is_fullscreen() && self.dock_spec().is_none() {
+            if let Some(path) = crate::state_path::<P>() {
+                let _ = std::fs::write(path, crate::format_placement(&window.placement()));
+            }
+        }
+        window.close();
+    }
+
     fn drain_elevated(&mut self) {
         while let Ok((id, pane, result, terminal)) = self.elevated_rx.try_recv() {
             match result {
@@ -831,7 +871,7 @@ impl<P: Platform> Handler<P> {
 
 impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     fn tray_enabled(&self) -> bool {
-        self.config.appearance.tray
+        self.config.appearance.tray && !self.restarting
     }
 
     fn confirming_close(&self, window: &Win<P>) -> bool {
@@ -848,6 +888,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     fn background_woken(&mut self) -> bool {
         self.drain_exits();
         self.drain_store();
+        self.drain_updates();
         queue_background_request(&mut self.startup, self.requests.as_ref())
     }
 
@@ -882,6 +923,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let saved = (!self.pending.is_empty()).then(|| self.pending.remove(0));
         let startup = self.startup.take().filter(|r| r.command != crate::cli::Command::Window);
         initialize_tabs(&mut app, saved, first, startup.as_ref().map(|r| &r.command));
+        if first && !crate::update::restarted() {
+            app.check_updates_on_start();
+        }
         if let Some(request) = startup {
             Self::serve_request(&mut app, request);
         }
@@ -992,6 +1036,10 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     }
 
     fn woken(&mut self, window: &Win<P>) {
+        self.drain_updates();
+        if self.restarting {
+            return self.close_for_restart(window);
+        }
         self.drain_store();
         if self.window_prefs_dirty && self.windows.keys().min() == Some(&window.id()) {
             self.window_prefs_dirty = false;

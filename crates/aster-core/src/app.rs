@@ -35,7 +35,7 @@ pub enum Broadcast {
     Tab,
     AllTabs,
 }
-const TOAST: Duration = Duration::from_millis(1200);
+pub(crate) const TOAST: Duration = Duration::from_millis(1200);
 const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +124,7 @@ pub enum Effect {
     VaultErase,
     VaultRemove { kind: String, key: String },
     ImeArea(Rect),
+    Update(crate::update::UpdateRequest),
 }
 
 pub(crate) struct Pane {
@@ -251,6 +252,7 @@ pub struct App {
     pub(crate) tab_bar_override: Option<bool>,
     fullscreen: bool,
     pub(crate) tab_toast: Option<(String, Instant)>,
+    pub(crate) update_notice: Option<crate::update::UpdateNotice>,
     pub(crate) monospace_fonts: Vec<String>,
     pub(crate) all_fonts: Vec<String>,
     pub(crate) background_launches: Vec<PaneId>,
@@ -346,6 +348,7 @@ impl App {
             tab_bar_override: None,
             fullscreen: false,
             tab_toast: None,
+            update_notice: None,
             monospace_fonts: Vec::new(),
             all_fonts: Vec::new(),
             settings_stash: None,
@@ -1231,7 +1234,7 @@ impl App {
             OpenConfigFolder => self.effects.push(Effect::OpenConfigFolder),
             ShowDefaultConfig => self.effects.push(Effect::ShowDefaultConfig),
             WhatsNew => self.effects.push(Effect::Open(concat!("https://github.com/brano-san/Aster/releases/tag/v", env!("CARGO_PKG_VERSION")).into())),
-            CheckForUpdates => self.effects.push(Effect::Open("https://github.com/brano-san/Aster/releases/latest".into())),
+            CheckForUpdates => self.check_updates(),
             ToggleTabBar => {
                 if !self.fullscreen || self.config.appearance.tabs_in_fullscreen {
                     self.tab_bar_override = Some(!self.tab_bar_hidden());
@@ -1525,7 +1528,7 @@ impl App {
         let now = Instant::now();
         self.poll_commands(now);
         self.resume_connections(now);
-        if self.tab_toast.as_ref().is_some_and(|(_, t)| t.elapsed() >= TOAST) {
+        if self.tab_toast.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
             self.tab_toast = None;
             self.dirty = true;
         }
@@ -1583,7 +1586,7 @@ impl App {
             (now, before) => now == before,
         };
         if !same && self.config.appearance.animations && self.tab_bar_hidden() && self.tabs.len() > 1 && self.current_tab.is_some() {
-            self.tab_toast = Some((format!("{} / {}  {}", self.active + 1, self.tabs.len(), self.tab_title(self.active)), Instant::now()));
+            self.tab_toast = Some((format!("{} / {}  {}", self.active + 1, self.tabs.len(), self.tab_title(self.active)), Instant::now() + TOAST));
             self.dirty = true;
         }
         if !same {
@@ -1971,6 +1974,13 @@ impl App {
         if self.menu.is_some() {
             return self.menu_hover(x, y);
         }
+        if self.drag == Drag::None && self.update_hovered(x, y) {
+            self.hover = HitArea::Client;
+            self.hover_link = None;
+            self.set_cursor(CursorIcon::Default);
+            self.dirty = true;
+            return;
+        }
         let hover = self.hit_test(x, y);
         if hover != self.hover {
             self.hover = hover;
@@ -2131,6 +2141,9 @@ impl App {
         }
         if self.menu.is_some() {
             return self.menu_click(x, y);
+        }
+        if self.update_click(x, y) {
+            return;
         }
         if let Some(r) = self.rename.as_ref() {
             let inside = self.chrome.tabs.get(r.tab).is_some_and(|t| t.rect.contains(x, y));
@@ -2293,6 +2306,9 @@ impl App {
         let (x, y) = self.mouse;
         if self.menu.is_some() {
             return self.close_menu();
+        }
+        if self.update_wheel(dy) {
+            return;
         }
         if let Some(o) = self.overlay.as_mut() {
             o.step(if dy > 0.0 { -3 } else { 3 });
@@ -2467,7 +2483,7 @@ impl App {
         let next = [
             self.blinking().then_some(self.blink_since + BLINK),
             self.bell.map(|(_, start)| start + BELL_FLASH),
-            self.tab_toast.as_ref().map(|(_, start)| *start + TOAST),
+            self.tab_toast.as_ref().map(|(_, until)| *until),
             self.tabs.iter().filter_map(|t| t.command_watch.deadline()).min(),
             self.panes.values().filter_map(|p| p.reconnect_at).min(),
         ].into_iter().flatten().min();

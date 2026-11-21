@@ -24,4 +24,5 @@ mod start;
 pub mod sudo;
 pub mod tabs;
 pub mod theme;
+pub mod update;
 pub mod view;

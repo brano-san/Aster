@@ -20,12 +20,16 @@ serde.workspace = true
 serde_json.workspace = true
 aster-vt.workspace = true
 crossbeam-channel.workspace = true
+ed25519-dalek.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 aster-platform-windows.workspace = true
+zip.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aster-platform-linux.workspace = true
+tar.workspace = true
+flate2.workspace = true
