@@ -58,8 +58,9 @@ fn ask(pane: &Pane, request: Request) {
 }
 
 fn answer(pane: &Pane) -> Reply {
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let reply = pane.conn.files.recv_timeout(std::time::Duration::from_secs(10)).expect("an SFTP reply");
+        let reply = pane.conn.files.recv_deadline(deadline).expect("an SFTP reply within 30 seconds");
         if !matches!(reply, Reply::Progress { .. }) {
             return reply;
         }
@@ -156,10 +157,32 @@ fn a_file_edited_locally_is_uploaded_after_each_save_until_editing_stops() {
     assert_eq!(std::fs::read_to_string(remote.join("conf.ini")).unwrap(), "a=4");
 
     ask(&pane, Request::Cancel { id: 9 });
-    assert!(matches!(answer(&pane), Reply::Failed { id: Some(9), .. }));
+    assert_eq!(answer(&pane), Reply::Failed { id: Some(9), error: "cancelled".into() });
     std::fs::write(&local, "a=5").unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(400));
     assert_eq!(std::fs::read_to_string(remote.join("conf.ini")).unwrap(), "a=4", "nothing is uploaded after editing stops");
+}
+
+#[test]
+fn edits_with_the_same_size_and_modification_time_are_uploaded() {
+    let remote = temp_ssh_dir();
+    let original = remote.join("conf.ini");
+    std::fs::write(&original, "a=1").unwrap();
+    let (port, _) = serve_files(Some(remote));
+    let pane = logged_in(port);
+    ask(&pane, Request::Edit { id: 1, remote: "/conf.ini".into(), dir: temp_ssh_dir() });
+    let Reply::Editing { id: 1, local } = answer(&pane) else { panic!("no editing reply") };
+    let modified = std::fs::metadata(&local).unwrap().modified().unwrap();
+    let replacement = local.with_extension("tmp");
+    for body in ["a=2", "a=3"] {
+        std::fs::write(&replacement, body).unwrap();
+        std::fs::File::options().write(true).open(&replacement).unwrap().set_modified(modified).unwrap();
+        std::fs::rename(&replacement, &local).unwrap();
+        assert_eq!(std::fs::metadata(&local).unwrap().modified().unwrap(), modified);
+        assert_eq!(answer(&pane), Reply::Saved { id: 1, remote: "/conf.ini".into() });
+        assert_eq!(std::fs::read_to_string(&original).unwrap(), body);
+    }
+    ask(&pane, Request::Cancel { id: 1 });
+    assert_eq!(answer(&pane), Reply::Failed { id: Some(1), error: "cancelled".into() });
 }
 
 #[test]
