@@ -265,6 +265,17 @@ fn the_tab_bar_hides_by_setting_or_shortcut_and_tab_switches_show_their_name() {
 }
 
 #[test]
+fn animations_off_suppresses_tab_toasts_after_a_switch() {
+    let mut a = app(2);
+    a.set_config(Config::parse("[appearance]\ntab-bar = 'never'\nanimations = false").unwrap());
+    let alt = Mods { alt: true, ..Mods::NONE };
+    key(&mut a, Key::Char('1'), alt);
+    key(&mut a, Key::Char('2'), alt);
+    assert_eq!(a.active, 1);
+    assert!(a.tab_toast.is_none());
+}
+
+#[test]
 fn settings_live_in_their_own_tab_and_come_back_where_they_were() {
     let mut a = app(1);
     key(&mut a, Key::Char(','), Mods { ctrl: true, ..Mods::NONE });

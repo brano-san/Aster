@@ -9,3 +9,32 @@ fn clipboard_html_offsets_delimit_utf8_document_and_fragment() {
     assert_eq!(&data[offset("StartFragment:")..offset("EndFragment:")], fragment);
     assert_eq!(&data[offset("EndHTML:")..], "\0");
 }
+
+#[test]
+fn tray_routes_show_open_and_quit_with_or_without_windows() {
+    use crate::tray::{Action, Command};
+    for (windows, show, close) in [(None, Action::Open, Action::Exit), (Some(17), Action::Show(17), Action::Close(17))] {
+        assert_eq!(Command::Show.resolve(windows), show);
+        assert_eq!(Command::Quit.resolve(windows), close);
+        assert_eq!(Command::NewWindow.resolve(windows), Action::Open);
+    }
+}
+
+#[test]
+fn tray_prefers_last_focus_among_surviving_windows() {
+    let (tx, _events) = mpsc::channel();
+    let queue = HubQueue { hwnd: 0, tx };
+    let mut nodes: Vec<Rc<Node<()>>> = (1..=3).map(|id| Rc::new(Node {
+        window: Win32Window::new(id, HWND::default(), queue.clone()), queue: RefCell::default(),
+        ready: Cell::new(false), focused_at: Cell::new(None), shared: std::ptr::null(),
+    })).collect();
+    assert_eq!(recent_window(&nodes).unwrap().window.id, 3);
+    let now = std::time::Instant::now();
+    nodes[0].focused_at.set(Some(now));
+    nodes[1].focused_at.set(Some(now + std::time::Duration::from_secs(1)));
+    assert_eq!(recent_window(&nodes).unwrap().window.id, 2);
+    nodes.remove(1);
+    assert_eq!(recent_window(&nodes).unwrap().window.id, 1);
+    nodes.clear();
+    assert!(recent_window(&nodes).is_none());
+}

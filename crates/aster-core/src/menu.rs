@@ -97,7 +97,7 @@ impl App {
     }
 
     pub fn menu_geometry(&self) -> Option<MenuGeometry> {
-        self.menu.as_ref().map(|m| geometry(m, self.scale, self.size))
+        self.menu.as_ref().map(|m| geometry(m, self.ui(), self.size))
     }
 
     fn open_menu(&mut self, entries: Vec<Entry>, x: f32, y: f32) {

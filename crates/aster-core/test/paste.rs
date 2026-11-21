@@ -93,6 +93,24 @@ fn trailing_newlines_alone_do_not_make_text_multiline() {
 }
 
 #[test]
+fn audible_bell_with_animations_off_requests_attention_if_sound_is_unavailable() {
+    let mut a = app();
+    a.set_config(Config::parse("[appearance]\nanimations = false\n[terminal]\nbell = 'audible'").unwrap());
+    let pane = a.focused_pane().unwrap();
+    for focused in [true, false] {
+        a.on_event(Event::Focus(focused));
+        a.last_bell_reset();
+        a.terminal(pane).unwrap().lock().feed(b"\x07");
+        a.woken();
+        a.flash_bell();
+        let effects = a.take_effects();
+        assert!(effects.iter().any(|e| matches!(e, Effect::Beep)));
+        assert_eq!(effects.iter().filter(|e| matches!(e, Effect::Attention)).count(), 1);
+        assert!(!a.bell_flash(pane));
+    }
+}
+
+#[test]
 fn the_bell_flashes_the_pane_once_per_burst_or_asks_for_a_sound() {
     let mut a = app();
     let pane = a.focused_pane().unwrap();

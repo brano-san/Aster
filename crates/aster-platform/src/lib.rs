@@ -127,6 +127,10 @@ pub trait Window {
 }
 
 pub trait WindowHandler<W: WindowSystem> {
+    fn tray_enabled(&self) -> bool { false }
+    fn quitting(&mut self, _quitting: bool) {}
+    fn confirming_close(&self, _window: &W::Window) -> bool { false }
+    fn background_woken(&mut self) -> bool { false }
     fn created(&mut self, window: &W::Window);
     fn event(&mut self, window: &W::Window, event: Event);
     fn hit_test(&mut self, window: &W::Window, x: f32, y: f32) -> HitArea;

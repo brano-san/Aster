@@ -56,7 +56,7 @@ impl App {
     }
 
     pub fn close_geometry(&self) -> Option<CloseGeometry> {
-        self.close_confirm.as_ref().map(|c| geometry(self.chrome.content, self.scale, c))
+        self.close_confirm.as_ref().map(|c| geometry(self.chrome.content, self.ui(), c))
     }
 
     fn target_panes(&self, target: &CloseTarget) -> Vec<PaneId> {

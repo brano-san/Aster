@@ -157,7 +157,7 @@ impl App {
     pub(crate) fn search_geometry(&self) -> Option<SearchGeometry> {
         let bar = self.search.as_ref()?;
         let rect = self.layout.panes.iter().find(|(id, _)| *id == bar.pane)?.1;
-        Some(geometry(rect, self.scale))
+        Some(geometry(rect, self.ui()))
     }
 
     pub(crate) fn search_click(&mut self, x: f32, y: f32) -> bool {

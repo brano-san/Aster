@@ -100,6 +100,14 @@ fn capturing() -> bool {
     std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_CAPTURE_SESSION").is_none()
 }
 
+fn queue_background_request(startup: &mut Option<crate::cli::Request>, requests: Option<&std::sync::mpsc::Receiver<String>>) -> bool {
+    if startup.is_some() {
+        return false;
+    }
+    *startup = requests.and_then(|rx| rx.try_iter().find_map(|text| crate::cli::Request::decode(&text)));
+    startup.is_some()
+}
+
 fn load_session<P: Platform>() -> SessionState {
     if capturing() {
         return SessionState::default();
@@ -446,7 +454,7 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::OpenLog => {
-                if let Some(dir) = P::config_dir() {
+                if let Some(dir) = crate::config_dir::<P>() {
                     P::open(&dir.to_string_lossy());
                 }
             }
@@ -719,6 +727,27 @@ impl<P: Platform> Handler<P> {
 }
 
 impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
+    fn tray_enabled(&self) -> bool {
+        self.config.appearance.tray
+    }
+
+    fn confirming_close(&self, window: &Win<P>) -> bool {
+        self.windows.get(&window.id()).is_some_and(|s| s.app.close_confirm().is_some())
+    }
+
+    fn quitting(&mut self, quitting: bool) {
+        if quitting && !self.session_saved {
+            self.save_session();
+        }
+        self.session_saved = quitting;
+    }
+
+    fn background_woken(&mut self) -> bool {
+        self.drain_exits();
+        self.drain_store();
+        queue_background_request(&mut self.startup, self.requests.as_ref())
+    }
+
     fn created(&mut self, window: &Win<P>) {
         let mut text = match P::text() {
             Ok(t) => t,
@@ -758,6 +787,8 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let first = self.windows.is_empty();
         self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx: Gfx::new(text, ATLAS), renderer: None });
         if first {
+            self.applied = None;
+            self.waker.wake();
             self.apply_window_prefs(window);
             if self.config.system.explorer_menu {
                 self.apply_explorer_menu(true);
@@ -889,3 +920,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "../test/handler.rs"]
+mod tests;

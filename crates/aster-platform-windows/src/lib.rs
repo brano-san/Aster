@@ -9,6 +9,7 @@ mod process;
 mod secrets;
 mod dwrite;
 mod shells;
+mod tray;
 mod window;
 
 pub use d3d::{D3dDevice, D3dRenderer};

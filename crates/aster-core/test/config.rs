@@ -10,6 +10,14 @@ fn an_empty_file_gives_the_defaults() {
 }
 
 #[test]
+fn tray_is_opt_in_and_round_trips() {
+    let old = Config::parse("[appearance]\ncycle-tabs = false").unwrap();
+    assert!(!old.appearance.tray);
+    let enabled = Config::parse("[appearance]\ntray = true").unwrap();
+    assert!(Config::parse(&enabled.to_text()).unwrap().appearance.tray);
+}
+
+#[test]
 fn partial_sections_keep_the_other_defaults() {
     let c = Config::parse(
         r#"
