@@ -6,7 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_USE_IMMERSIVE_DARK_MODE};
@@ -24,11 +24,30 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_WAKE: u32 = WM_APP + 1;
 const WM_DESTROY_REQUEST: u32 = WM_APP + 2;
-const WM_OPEN_WINDOW: u32 = WM_APP + 3;
-const WM_CAPTURE_KEYS: u32 = WM_APP + 4;
+const WM_HUB_EVENT: u32 = WM_APP + 3;
 const CAPTURE_WAIT_MS: u64 = 1500;
 const TIMER_ID: usize = 1;
 const HOTKEY_ID: i32 = 1;
+
+enum HubEvent {
+    Open(WindowOptions),
+    Capture(Vec<Event>),
+    ContinueQuit,
+}
+
+#[derive(Clone)]
+struct HubQueue {
+    hwnd: isize,
+    tx: mpsc::Sender<HubEvent>,
+}
+
+impl HubQueue {
+    fn post(&self, event: HubEvent) {
+        if self.tx.send(event).is_ok() {
+            unsafe { let _ = PostMessageW(Some(HWND(self.hwnd as _)), WM_HUB_EVENT, WPARAM(0), LPARAM(0)); }
+        }
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct FrameSync {
@@ -40,6 +59,8 @@ pub(crate) struct FrameSync {
 pub struct Win32Window {
     id: WindowId,
     hub: HWND,
+    queue: HubQueue,
+    closing: Cell<bool>,
     hwnd: Cell<HWND>,
     redraw: Cell<bool>,
     size: Cell<(u32, u32)>,
@@ -77,10 +98,12 @@ impl Win32Window {
         }
     }
 
-    fn new(id: WindowId, hub: HWND) -> Self {
+    fn new(id: WindowId, hub: HWND, queue: HubQueue) -> Self {
         Self {
             id,
             hub,
+            queue,
+            closing: Cell::new(false),
             hwnd: Cell::new(HWND::default()),
             redraw: Cell::new(true),
             size: Cell::new((0, 0)),
@@ -235,12 +258,7 @@ impl Window for Win32Window {
     }
 
     fn open_window(&self, opts: WindowOptions) {
-        let p = Box::into_raw(Box::new(opts));
-        unsafe {
-            if PostMessageW(Some(self.hub), WM_OPEN_WINDOW, WPARAM(0), LPARAM(p as isize)).is_err() {
-                drop(Box::from_raw(p));
-            }
-        }
+        self.queue.post(HubEvent::Open(opts));
     }
 
     fn size(&self) -> (u32, u32) {
@@ -299,6 +317,7 @@ impl Window for Win32Window {
     }
 
     fn close(&self) {
+        self.closing.set(true);
         self.post(WM_DESTROY_REQUEST, 0);
     }
 
@@ -498,10 +517,16 @@ pub(crate) struct Node<H> {
     window: Win32Window,
     queue: RefCell<VecDeque<Event>>,
     ready: Cell<bool>,
+    focused_at: Cell<Option<std::time::Instant>>,
     shared: *const Shared<H>,
 }
 
 struct Shared<H> {
+    tray: crate::tray::Tray,
+    new_window: WindowOptions,
+    quit_window: Cell<Option<WindowId>>,
+    queue: HubQueue,
+    events: mpsc::Receiver<HubEvent>,
     handler: RefCell<H>,
     nodes: RefCell<Vec<Rc<Node<H>>>>,
     dead: RefCell<Vec<Rc<Node<H>>>>,
@@ -555,7 +580,11 @@ impl<H: WindowHandler<Win32>> Shared<H> {
                 h.destroyed(&n.window);
             }
             if self.woken.replace(false) {
-                for n in self.nodes() {
+                let nodes = self.nodes();
+                if nodes.is_empty() && h.background_woken() {
+                    self.queue.post(HubEvent::Open(self.new_window.clone()));
+                }
+                for n in nodes {
                     h.woken(&n.window);
                 }
             }
@@ -566,18 +595,45 @@ impl<H: WindowHandler<Win32>> Shared<H> {
                     let Some(ev) = next else { break };
                     idle = false;
                     h.event(&n.window, ev);
+                    if self.quit_window.get() == Some(n.window.id) && !n.window.closing.get() && !h.confirming_close(&n.window) {
+                        self.quit_window.set(None);
+                        h.quitting(false);
+                    }
                 }
             }
             if idle && !self.woken.get() && self.dead.borrow().is_empty() {
                 break;
             }
         }
+        let had_icon = self.tray.installed.get();
+        self.tray.set_enabled(h.tray_enabled());
+        if had_icon && !self.tray.installed.get() && self.nodes.borrow().is_empty() {
+            unsafe { PostQuitMessage(0) };
+        }
+    }
+
+    fn tray_command(&self, command: crate::tray::Command) {
+        use crate::tray::Action;
+        let recent = recent_window(&self.nodes.borrow());
+        match command.resolve(recent) {
+            Action::Exit => unsafe { PostQuitMessage(0) },
+            Action::Close(n) => {
+                n.window.set_visible(true);
+                if let Ok(mut handler) = self.handler.try_borrow_mut() {
+                    handler.quitting(true);
+                }
+                self.quit_window.set(Some(n.window.id));
+                n.send(Event::CloseRequested);
+            }
+            Action::Show(n) => n.window.set_visible(true),
+            Action::Open => self.queue.post(HubEvent::Open(self.new_window.clone())),
+        }
     }
 
     unsafe fn open(&self, opts: WindowOptions) -> Result<(), PlatformError> {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
-        let node = Rc::new(Node { window: Win32Window::new(id, self.hub), queue: RefCell::default(), ready: Cell::new(false), shared: self });
+        let node = Rc::new(Node { window: Win32Window::new(id, self.hub, self.queue.clone()), queue: RefCell::default(), ready: Cell::new(false), focused_at: Cell::new(None), shared: self });
         let sys = GetDpiForSystem() as f32 / 96.0;
         let title = wide(&opts.title);
         let hidden = crate::d3d::hidden();
@@ -626,12 +682,11 @@ impl<H: WindowHandler<Win32>> Shared<H> {
                 node.queue.borrow_mut().extend(batches.next().unwrap_or_default());
                 self.woken.set(true);
                 let rest: Vec<Vec<Event>> = batches.collect();
-                let hub = self.hub.0 as isize;
+                let queue = self.queue.clone();
                 std::thread::spawn(move || {
                     for batch in rest {
                         std::thread::sleep(std::time::Duration::from_millis(CAPTURE_WAIT_MS));
-                        let p = Box::into_raw(Box::new(batch));
-                        let _ = PostMessageW(Some(HWND(hub as _)), WM_CAPTURE_KEYS, WPARAM(0), LPARAM(p as isize));
+                        queue.post(HubEvent::Capture(batch));
                     }
                 });
             }
@@ -648,16 +703,24 @@ impl<H: WindowHandler<Win32>> Shared<H> {
 
     fn destroyed(&self, hwnd: HWND) {
         let mut nodes = self.nodes.borrow_mut();
-        if let Some(i) = nodes.iter().position(|n| n.window.hwnd() == hwnd) {
-            self.dead.borrow_mut().push(nodes.remove(i));
-        }
+        let Some(i) = nodes.iter().position(|n| n.window.hwnd() == hwnd) else { return };
+        let node = nodes.remove(i);
+        let quitting = self.quit_window.get() == Some(node.window.id);
+        self.dead.borrow_mut().push(node);
         let last = nodes.is_empty();
         drop(nodes);
         self.flush();
-        if last {
+        if last && (quitting || !self.tray.installed.get()) {
             unsafe { PostQuitMessage(0) };
+        } else if quitting {
+            self.quit_window.set(None);
+            self.queue.post(HubEvent::ContinueQuit);
         }
     }
+}
+
+fn recent_window<H>(nodes: &[Rc<Node<H>>]) -> Option<Rc<Node<H>>> {
+    nodes.iter().max_by_key(|n| (n.focused_at.get(), n.window.id)).cloned()
 }
 
 fn capture_keys(keys: &str) -> Vec<Vec<Event>> {
@@ -727,26 +790,24 @@ fn capture_key(text: &str) -> Event {
 const WINDOW_CLASS: PCWSTR = w!("AsterWindow");
 const HUB_CLASS: PCWSTR = w!("AsterHub");
 
-type HubDispatch = unsafe fn(*const (), u32, LPARAM);
+type HubDispatch = unsafe fn(*const (), u32, WPARAM, LPARAM);
 
 thread_local! {
+    static TASKBAR_CREATED: u32 = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     static HUB: Cell<Option<(*const (), HubDispatch)>> = const { Cell::new(None) };
 }
 
 unsafe extern "system" fn hub_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg != WM_WAKE && msg != WM_OPEN_WINDOW && msg != WM_HOTKEY && msg != WM_CAPTURE_KEYS {
+    if !matches!(msg, WM_WAKE | WM_HUB_EVENT | WM_HOTKEY | crate::tray::CALLBACK) && !TASKBAR_CREATED.with(|&id| id != 0 && msg == id) {
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
-    match HUB.get() {
-        Some((ctx, dispatch)) => dispatch(ctx, msg, lp),
-        None if msg == WM_OPEN_WINDOW => drop(Box::from_raw(lp.0 as *mut WindowOptions)),
-        None if msg == WM_CAPTURE_KEYS => drop(Box::from_raw(lp.0 as *mut Vec<Event>)),
-        None => {}
+    if let Some((ctx, dispatch)) = HUB.get() {
+        dispatch(ctx, msg, wp, lp);
     }
     LRESULT(0)
 }
 
-unsafe fn hub_dispatch<H: WindowHandler<Win32>>(ctx: *const (), msg: u32, lp: LPARAM) {
+unsafe fn hub_dispatch<H: WindowHandler<Win32>>(ctx: *const (), msg: u32, wp: WPARAM, lp: LPARAM) {
     let sh = &*(ctx as *const Shared<H>);
     if msg == WM_WAKE {
         sh.wake_pending.store(false, Ordering::Release);
@@ -754,15 +815,16 @@ unsafe fn hub_dispatch<H: WindowHandler<Win32>>(ctx: *const (), msg: u32, lp: LP
         sh.flush();
         return;
     }
-    if msg == WM_CAPTURE_KEYS {
-        let batch = *Box::from_raw(lp.0 as *mut Vec<Event>);
-        if let Some(n) = sh.nodes().first() {
-            for ev in batch {
-                n.send(ev);
-            }
-            if n.window.redraw.get() {
-                n.redraw_now();
-            }
+    if TASKBAR_CREATED.with(|&id| msg == id) {
+        sh.tray.taskbar_created();
+        if !sh.tray.installed.get() && sh.nodes.borrow().is_empty() {
+            PostQuitMessage(0);
+        }
+        return;
+    }
+    if msg == crate::tray::CALLBACK {
+        if let Some(command) = sh.tray.command(wp, lp) {
+            sh.tray_command(command);
         }
         return;
     }
@@ -776,12 +838,27 @@ unsafe fn hub_dispatch<H: WindowHandler<Win32>>(ctx: *const (), msg: u32, lp: LP
         return;
     }
     if sh.handler.try_borrow_mut().is_err() {
-        let _ = PostMessageW(Some(sh.hub), WM_OPEN_WINDOW, WPARAM(0), lp);
+        let _ = PostMessageW(Some(sh.hub), WM_HUB_EVENT, WPARAM(0), LPARAM(0));
         return;
     }
-    let opts = *Box::from_raw(lp.0 as *mut WindowOptions);
-    if let Err(e) = sh.open(opts) {
-        tracing::error!("cannot open window: {e}");
+    match sh.events.try_recv() {
+        Ok(HubEvent::ContinueQuit) => sh.tray_command(crate::tray::Command::Quit),
+        Ok(HubEvent::Open(opts)) => {
+            if let Err(e) = sh.open(opts) {
+                tracing::error!("cannot open window: {e}");
+            }
+        }
+        Ok(HubEvent::Capture(batch)) => {
+            if let Some(n) = sh.nodes().first() {
+                for ev in batch {
+                    n.send(ev);
+                }
+                if n.window.redraw.get() {
+                    n.redraw_now();
+                }
+            }
+        }
+        Err(_) => {}
     }
 }
 
@@ -801,7 +878,7 @@ impl WindowSystem for Win32 {
             let hinst: HINSTANCE = GetModuleHandleW(None).map_err(err)?.into();
             let wc = WNDCLASSEXW { cbSize: size_of::<WNDCLASSEXW>() as u32, lpfnWndProc: Some(hub_proc), hInstance: hinst, lpszClassName: HUB_CLASS, ..Default::default() };
             RegisterClassExW(&wc);
-            let hub = CreateWindowExW(WINDOW_EX_STYLE(0), HUB_CLASS, PCWSTR::null(), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, Some(hinst), None).map_err(err)?;
+            let hub = CreateWindowExW(WS_EX_TOOLWINDOW, HUB_CLASS, PCWSTR::null(), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinst), None).map_err(err)?;
             Ok(Self { hinst, hub, wake_pending: Arc::new(AtomicBool::new(false)) })
         }
     }
@@ -823,7 +900,13 @@ impl WindowSystem for Win32 {
                 ..Default::default()
             };
             RegisterClassExW(&wc);
+            let (tx, events) = mpsc::channel();
             let shared = Shared {
+                queue: HubQueue { hwnd: self.hub.0 as isize, tx },
+                events,
+                tray: crate::tray::Tray::new(self.hub, self.hinst),
+                quit_window: Cell::new(None),
+                new_window: WindowOptions { placement: None, ..first.clone() },
                 handler: RefCell::new(handler),
                 nodes: RefCell::default(),
                 dead: RefCell::default(),
@@ -1256,6 +1339,9 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
             Some(LRESULT(1))
         }
         WM_SETFOCUS | WM_KILLFOCUS => {
+            if msg == WM_SETFOCUS {
+                s.focused_at.set(Some(std::time::Instant::now()));
+            }
             s.send(Event::Focus(msg == WM_SETFOCUS));
             None
         }

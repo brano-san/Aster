@@ -149,7 +149,7 @@ pub struct OverlayGeometry {
 }
 
 pub fn overlay_geometry(app: &App, o: &Overlay) -> OverlayGeometry {
-    let s = app.scale;
+    let s = app.ui();
     let (w, _) = app.size;
     let profiles = o.kind == OverlayKind::Profiles;
     let width = (if profiles { 520.0 } else { 560.0 } * s).min(w - 32.0 * s).max(200.0 * s).round();
@@ -212,7 +212,7 @@ impl App {
         g.set_ui_family(&self.config.appearance.ui_font);
         let m = self.metrics_for(g);
         self.metrics = Some(m);
-        let s = self.scale;
+        let s = self.ui();
         let (w, h) = self.size;
         self.chrome = if self.tab_bar_hidden() { bare_chrome(w, h) } else { chrome(w, h, s, self.tabs.len()) };
         self.mark_seen();
@@ -272,6 +272,9 @@ impl App {
         for sp in &layout.splitters {
             g.dl.rect(sp.rect, theme.divider);
         }
+        if self.tabs.is_empty() {
+            self.draw_start_page(g);
+        }
         self.draw_search(g);
         self.draw_settings(g);
         self.draw_files(g);
@@ -285,8 +288,64 @@ impl App {
         self.mark_drawn();
     }
 
+    fn draw_start_page<B: TextBackend>(&self, g: &mut Gfx<B>) {
+        use crate::keymap::{format_binding, Action};
+        use crate::start::Entry;
+
+        let page = self.start_page();
+        let s = self.ui();
+        let ui = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let first = page.row(0);
+        let last = page.row(page.entries.len() - 1);
+        let panel = Rect::new(first.x, first.y, first.w, last.bottom() - first.y).inset(-5.0 * s, -5.0 * s);
+        g.dl.set_clip(Some(self.chrome.content));
+        g.dl.round_rect(panel, self.theme.surface, 8.0 * s);
+        g.dl.outline(panel, self.theme.overlay_border, 8.0 * s, s.max(1.0));
+        for (i, entry) in page.entries.iter().enumerate() {
+            let row = page.row(i);
+            g.dl.set_clip(Some(row));
+            if i == page.selected {
+                g.dl.round_rect(row, self.theme.accent.alpha(0x38), 5.0 * s);
+            } else if row.contains(self.mouse.0, self.mouse.1) && self.overlay.is_none() {
+                g.dl.round_rect(row, self.theme.button_hover, 5.0 * s);
+            }
+            let side = (22.0 * s).round();
+            let mark = Rect::new(row.x + 10.0 * s, row.y + ((row.h - side) / 2.0).round(), side, side);
+            let (label, action, symbol) = match entry {
+                Entry::NewTab => (t("New tab"), Action::NewTab, "+"),
+                Entry::AllProfiles => (t("All profiles…"), Action::ProfileSelector, "…"),
+                Entry::Settings => (t("Settings"), Action::Settings, "\u{2699}"),
+                Entry::Recent(n) => {
+                    let p = &self.profiles[*n];
+                    let (badge, tint) = crate::picker::badge(p);
+                    g.dl.round_rect(mark, Color::rgb(tint), 5.0 * s);
+                    let px = if badge.len() > 2 { 8.5 } else { 10.0 };
+                    centered(g, mark, &badge, FontStyle::new(FontFamily::Ui, (px * s).round(), true), Color::rgb(0xFFFFFF));
+                    (p.name.as_str(), Action::Tab(i as u8), "")
+                }
+            };
+            if !symbol.is_empty() {
+                centered(g, mark, symbol, ui, self.theme.text_dim);
+            }
+            let x = mark.right() + 10.0 * s;
+            let mut right = row.right() - 10.0 * s;
+            if let Some(hint) = self.keymap.bindings_of(action).next().map(format_binding) {
+                let w = g.measure(&hint, small);
+                if right - x - w >= 90.0 * s {
+                    let y = baseline(g, row, small);
+                    g.text(right - w, y, &hint, small, self.theme.text_dim, w + 1.0);
+                    right -= w + 10.0 * s;
+                }
+            }
+            let y = baseline(g, row, ui);
+            g.text(x, y, label, ui, self.theme.text, (right - x).max(0.0));
+        }
+        g.dl.set_clip(None);
+    }
+
     fn draw_tab_bar<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool) {
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let c = self.chrome.clone();
         let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
@@ -375,11 +434,12 @@ impl App {
     }
 
     fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, m: Metrics) {
-        let s = self.scale;
+        let s = self.ui();
         let inner = pane_inner_with(rect, s, self.config.terminal.padding);
         let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
         let mut effects = Vec::new();
         let window_focused = self.terminal_has_focus();
+        let blink_on = self.blink_on || !self.cursor_blink_enabled();
         let palette = self.pane_palette(id);
         let Some(pane) = self.panes.get_mut(&id) else { return };
         if let Some(mut launch) = pane.pending.take_if(|launch| launch.baud_placeholder().is_none()) {
@@ -406,7 +466,6 @@ impl App {
                 effects.push(Effect::Resize { pane: id, cols: size.cols as u16, rows: size.rows as u16 });
             }
         }
-        let blink_on = self.blink_on || !self.config.terminal.cursor_blink;
         let theme = self.theme;
         let terminal = pane.terminal.clone();
         let mut t = terminal.lock();
@@ -439,11 +498,12 @@ impl App {
                 g.dl.rect(cell_rect(v.line, v.col, span), rgb(bg));
             }
         });
+        let dpi = self.scale;
         for mt in &matches {
             let r = cell_rect(mt.line, mt.start, mt.end.saturating_sub(mt.start).max(1));
             if mt.current {
                 g.dl.rect(r, rgb(selection_bg));
-                g.dl.outline(r, Color::rgb(0xF0A030), 0.0, (1.0 * s).round().max(1.0));
+                g.dl.outline(r, Color::rgb(0xF0A030), 0.0, (1.0 * dpi).round().max(1.0));
             } else {
                 g.dl.rect(r, Color::rgb(0xE5C07B).alpha(0x58));
             }
@@ -455,13 +515,13 @@ impl App {
         let cr = cell_rect(cursor.line, cursor.col, cur_cols);
         let active_cursor = focused && window_focused;
         let draw_cursor = show_cursor && (!active_cursor || (blink_on && self.preedit.is_empty()));
-        let thin = (1.0 * s).round().max(1.0);
+        let thin = (1.0 * dpi).round().max(1.0);
         let block = draw_cursor && active_cursor && matches!(cursor.shape, CursorShape::Block);
         if draw_cursor {
             match (active_cursor, cursor.shape) {
                 (true, CursorShape::Block) => g.dl.rect(cr, rgb(cursor_color)),
-                (true, CursorShape::Beam) => g.dl.rect(Rect::new(cr.x, cr.y, (2.0 * s).round().max(1.0), cr.h), rgb(cursor_color)),
-                (true, CursorShape::Underline) => g.dl.rect(Rect::new(cr.x, cr.bottom() - (2.0 * s).round().max(1.0), cr.w, (2.0 * s).round().max(1.0)), rgb(cursor_color)),
+                (true, CursorShape::Beam) => g.dl.rect(Rect::new(cr.x, cr.y, (2.0 * dpi).round().max(1.0), cr.h), rgb(cursor_color)),
+                (true, CursorShape::Underline) => g.dl.rect(Rect::new(cr.x, cr.bottom() - (2.0 * dpi).round().max(1.0), cr.w, (2.0 * dpi).round().max(1.0)), rgb(cursor_color)),
                 _ => g.dl.outline(cr, rgb(cursor_color), 0.0, thin),
             }
         }
@@ -526,13 +586,13 @@ impl App {
         for (x, y, w, flags, ucolor, fg) in decorations {
             let uy = y + under_y;
             if flags.contains(Flags::UNDERCURL) {
-                let band = (3.0 * s).round().max(3.0);
+                let band = (3.0 * dpi).round().max(3.0);
                 g.dl.undercurl(Rect::new(x, uy - band / 2.0, w, band), rgb(ucolor), thin);
             } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
                 g.dl.rect(Rect::new(x, uy - thin, w, thin), rgb(ucolor));
                 g.dl.rect(Rect::new(x, uy + thin, w, thin), rgb(ucolor));
             } else if flags.contains(Flags::DOTTED_UNDERLINE) || flags.contains(Flags::DASHED_UNDERLINE) {
-                let dash = if flags.contains(Flags::DOTTED_UNDERLINE) { thin } else { (3.0 * s).round() };
+                let dash = if flags.contains(Flags::DOTTED_UNDERLINE) { thin } else { (3.0 * dpi).round() };
                 let mut dx = 0.0;
                 while dx < w {
                     g.dl.rect(Rect::new(x + dx, uy, dash.min(w - dx), thin), rgb(ucolor));
@@ -597,7 +657,7 @@ impl App {
         use crate::search::SearchHit;
         let Some(geo) = self.search_geometry() else { return };
         let Some(bar) = self.search.clone() else { return };
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let radius = (6.0 * s).round();
         g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 3.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (10.0 * s).round());
@@ -651,7 +711,7 @@ impl App {
     }
 
     fn draw_hint<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, text: &str) {
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let h = hint_height(s);
         let r = Rect::new(pane.x, pane.bottom() - h, pane.w, h);
@@ -670,7 +730,7 @@ impl App {
             PaneTransfer::Running => return self.draw_hint(g, pane, t("Transfer in progress. Esc cancels.")),
             PaneTransfer::AwaitingFiles | PaneTransfer::None => {}
         }
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let h = (64.0 * s).round();
         let r = Rect::new(pane.x, pane.bottom() - h, pane.w, h);
@@ -695,7 +755,7 @@ impl App {
         use crate::paste::{BUTTONS, PREVIEW_LINES};
         let Some(geo) = self.paste_geometry() else { return };
         let Some(confirm) = self.paste_confirm.clone() else { return };
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let radius = (8.0 * s).round();
         let line = (1.0 * s).round().max(1.0);
@@ -738,7 +798,7 @@ impl App {
         use crate::close::{CloseTarget, BUTTONS, LISTED};
         let Some(geo) = self.close_geometry() else { return };
         let Some(confirm) = self.close_confirm.clone() else { return };
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let radius = (8.0 * s).round();
         let line = (1.0 * s).round().max(1.0);
@@ -782,7 +842,7 @@ impl App {
 
     fn draw_tab_toast<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         let Some((text, _)) = self.tab_toast.clone() else { return };
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
         let w = (g.measure(&text, ui) + 28.0 * s).min(self.size.0 - 24.0 * s).round();
@@ -798,7 +858,7 @@ impl App {
         use crate::menu::Entry;
         let Some(geo) = self.menu_geometry() else { return };
         let Some(menu) = self.menu.clone() else { return };
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let radius = (7.0 * s).round();
         g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 4.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (14.0 * s).round());
@@ -835,7 +895,7 @@ impl App {
         let Some(geo) = self.files_geometry() else { return };
         let Some(page) = self.files.clone() else { return };
         let transfers: Vec<_> = self.transfers_of(page.pane).into_iter().cloned().collect();
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let radius = (6.0 * s).round();
@@ -977,7 +1037,7 @@ impl App {
 
     fn draw_profile_editor<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, editor: &crate::settings::ProfileEditor) {
         use crate::settings::FIELDS;
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let radius = (8.0 * s).round();
@@ -1036,7 +1096,7 @@ impl App {
         use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
         let Some(geo) = self.settings_geometry() else { return };
         let Some(page) = self.settings.as_ref() else { return };
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let (mx, my) = self.mouse;
@@ -1300,7 +1360,7 @@ impl App {
     }
 
     fn draw_overlay<B: TextBackend>(&mut self, g: &mut Gfx<B>, o: &Overlay) {
-        let s = self.scale;
+        let s = self.ui();
         let theme = self.theme;
         let geo = overlay_geometry(self, o);
         let radius = (8.0 * s).round();

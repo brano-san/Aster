@@ -36,6 +36,25 @@ fn spawns(effects: &[Effect]) -> Vec<(PaneId, Launch)> {
 }
 
 #[test]
+fn turning_animations_off_clears_transients_and_stops_the_cursor_timer() {
+    let (mut a, mut gfx) = app();
+    a.open_default_tab();
+    let pane = a.focused_pane().unwrap();
+    a.blink_on = false;
+    a.bell = Some((pane, Instant::now()));
+    a.tab_toast = Some((String::new(), Instant::now()));
+    a.set_config(Config::parse("[appearance]\nanimations = false").unwrap());
+    a.frame(&mut gfx, false);
+    assert!(a.blink_on);
+    assert!(a.tab_toast.is_none() && a.bell.is_none());
+    assert!(!a.take_effects().iter().any(|effect| matches!(effect, Effect::Timer(_))));
+    a.terminal(pane).unwrap().lock().feed(b"\x07");
+    a.woken();
+    assert!(!a.bell_flash(pane));
+    assert_eq!(a.take_effects().iter().filter(|effect| matches!(effect, Effect::Attention)).count(), 1);
+}
+
+#[test]
 fn pane_shapes_ligatures_only_across_adjacent_cells_with_the_same_style() {
     #[derive(Default)]
     struct Recorder(Vec<String>);
@@ -76,6 +95,23 @@ fn pane_shapes_ligatures_only_across_adjacent_cells_with_the_same_style() {
 
     fn vt_point(col: usize) -> aster_vt::Point {
         aster_vt::Point::new(aster_vt::Line(0), aster_vt::Column(col))
+    }
+}
+
+#[test]
+fn density_scales_the_tab_bar_without_changing_terminal_cell_metrics() {
+    let (mut app, mut gfx) = app();
+    app.set_viewport(1000, 700, 1.5);
+    app.open_default_tab();
+    app.frame(&mut gfx, false);
+    let original = app.metrics.unwrap();
+    for density in [0.7, 1.3] {
+        let config = Config::parse(&format!("[appearance]\ndensity = {density}")).unwrap();
+        app.set_config(config);
+        app.frame(&mut gfx, false);
+        assert_eq!(app.chrome.tab_bar.h, (view::TAB_H * 1.5 * density).round());
+        let metrics = app.metrics.unwrap();
+        assert_eq!((metrics.px, metrics.w, metrics.h, metrics.baseline), (original.px, original.w, original.h, original.baseline));
     }
 }
 

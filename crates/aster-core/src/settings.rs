@@ -84,11 +84,14 @@ pub const SETTINGS: &[Setting] = &[
     item(APPEARANCE, "terminal.minimum-contrast-ratio", "Minimum contrast ratio", "Adjust text color for readability; 1 disables the adjustment", Control::Number { min: 1.0, max: 21.0, step: 0.5 }),
     item(APPEARANCE, "appearance.backdrop", "Backdrop", "System material behind the window on Windows 11", Control::Choice(BACKDROPS)),
     item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Text),
+    item(APPEARANCE, "appearance.density", "Interface density", "Scale tabs, menus, settings and padding", Control::Number { min: 0.6, max: 1.4, step: 0.1 }),
     item(APPEARANCE, "terminal.fallback-font", "Fallback font", "Font to try for missing terminal characters before system fallback", Control::Text),
     item(APPEARANCE, "terminal.ligatures", "Font ligatures", "Allow the terminal font to join adjacent characters", Control::Toggle),
     item(APPEARANCE, "appearance.tab-bar", "Tab bar", "Hide the tab bar and window buttons to leave only the terminal; Ctrl+Shift+B toggles it", Control::Choice(TAB_BARS)),
     item(APPEARANCE, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
+    item(APPEARANCE, "appearance.animations", "Animations", "Show tab name toasts, visual bells and cursor blink", Control::Toggle),
     item(APPEARANCE, "appearance.last-tab-closes-window", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),
+    item(APPEARANCE, "appearance.tray", "Notification area icon", "Keep Aster running after its last window closes on Windows. Has no effect on Linux.", Control::Toggle),
     item(COLORS, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Choice(SCHEME_MODES)),
     item(COLORS, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
     item(COLORS, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
@@ -935,7 +938,7 @@ impl App {
     }
 
     pub fn settings_geometry(&self) -> Option<SettingsGeometry> {
-        self.settings.as_ref().map(|p| geometry(self.chrome.content, self.scale, p))
+        self.settings.as_ref().map(|p| geometry(self.chrome.content, self.ui(), p))
     }
 
     pub fn setting_options(&self, control: Control) -> Vec<(String, String)> {
@@ -1377,7 +1380,7 @@ impl App {
             return;
         }
         let control = self.settings.as_ref().and_then(|p| SETTINGS.get(p.shown[n])).map(|s| s.control);
-        if editing_same && row.control.contains(x, y) && control.is_some_and(|c| part_at(c, row.control, self.scale, x) == Part::Whole) {
+        if editing_same && row.control.contains(x, y) && control.is_some_and(|c| part_at(c, row.control, self.ui(), x) == Part::Whole) {
             return;
         }
         self.commit_edit();
@@ -1405,7 +1408,7 @@ impl App {
         let setting = &SETTINGS[page.shown[n]];
         match setting.control {
             Control::Toggle => self.adjust_setting(setting, 0),
-            control if row.control.contains(x, y) => match part_at(control, row.control, self.scale, x) {
+            control if row.control.contains(x, y) => match part_at(control, row.control, self.ui(), x) {
                 Part::Less => self.adjust_setting(setting, -1),
                 Part::More => self.adjust_setting(setting, 1),
                 Part::Whole => self.adjust_setting(setting, 0),
@@ -1416,14 +1419,19 @@ impl App {
 
     pub(crate) fn settings_wheel(&mut self, dy: f32) {
         let Some(geo) = self.settings_geometry() else { return };
+        let step = 60.0 * self.ui();
         let Some(page) = self.settings.as_mut() else { return };
-        page.scroll = (page.scroll - dy * 3.0 * 20.0 * self.scale).clamp(0.0, (geo.height - geo.list.h).max(0.0));
+        page.scroll = (page.scroll - dy * step).clamp(0.0, (geo.height - geo.list.h).max(0.0));
         self.dirty = true;
     }
 }
 
 pub fn explorer_label() -> &'static str {
     t("Open in Aster")
+}
+
+pub fn tray_menu_labels() -> [&'static str; 2] {
+    [t("New window"), t("Quit")]
 }
 
 #[cfg(test)]

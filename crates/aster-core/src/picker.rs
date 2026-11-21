@@ -90,6 +90,10 @@ impl App {
     }
 
     pub fn set_recent(&mut self, recent: Vec<String>) {
+        if self.tabs.is_empty() && self.recent != recent {
+            self.start_selected = 0;
+            self.dirty = true;
+        }
         self.recent = recent;
     }
 

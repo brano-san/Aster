@@ -75,7 +75,7 @@ impl App {
 
     pub fn paste_geometry(&self) -> Option<PasteGeometry> {
         let line_h = self.metrics.map_or(17.0 * self.scale, |m| m.h);
-        self.paste_confirm.as_ref().map(|c| geometry(self.chrome.content, self.scale, line_h, c))
+        self.paste_confirm.as_ref().map(|c| geometry(self.chrome.content, self.ui(), line_h, c))
     }
 
     fn finish_paste(&mut self, button: usize) {

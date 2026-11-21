@@ -238,7 +238,7 @@ impl App {
 
     pub fn files_geometry(&self) -> Option<FilesGeometry> {
         let page = self.files.as_ref()?;
-        Some(geometry(self.chrome.content, self.scale, page, &self.transfers_of(page.pane)))
+        Some(geometry(self.chrome.content, self.ui(), page, &self.transfers_of(page.pane)))
     }
 
     pub(crate) fn can_browse(&self, pane: PaneId) -> bool {
@@ -418,8 +418,8 @@ impl App {
 
     fn reveal_file(&mut self) {
         let Some(geo) = self.files_geometry() else { return };
+        let rh = (ROW_H * self.ui()).round();
         let Some(page) = self.files.as_mut() else { return };
-        let rh = (ROW_H * self.scale).round();
         let top = page.selected as f32 * rh;
         if top < page.scroll {
             page.scroll = top;
@@ -604,8 +604,9 @@ impl App {
 
     pub(crate) fn files_wheel(&mut self, dy: f32) {
         let Some(geo) = self.files_geometry() else { return };
+        let rh = (ROW_H * self.ui()).round();
         let Some(page) = self.files.as_mut() else { return };
-        page.scroll = (page.scroll - dy * 3.0 * ROW_H * self.scale).clamp(0.0, (geo.height - geo.list.h).max(0.0));
+        page.scroll = (page.scroll - dy * 3.0 * rh).clamp(0.0, (geo.height - geo.list.h).max(0.0));
         self.dirty = true;
     }
 

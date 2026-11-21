@@ -19,6 +19,7 @@ pub mod search;
 pub mod session;
 pub mod settings;
 pub mod ssh;
+mod start;
 pub mod sudo;
 pub mod tabs;
 pub mod theme;

@@ -14,10 +14,20 @@ mod zmodem;
 
 use aster_core::config::{Config, SchemeMode};
 use aster_platform::{Placement, Platform, Waker, WindowOptions, WindowSystem};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+fn choose_config_dir(executable: Option<&Path>, fallback: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
+    executable.and_then(Path::parent).map(|dir| dir.join("data")).filter(|dir| dir.is_dir()).or_else(fallback)
+}
+
+fn config_dir<P: Platform>() -> Option<&'static Path> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| choose_config_dir(std::env::current_exe().ok().as_deref(), P::config_dir)).as_deref()
+}
 
 pub fn config_path<P: Platform>() -> Option<PathBuf> {
-    P::config_dir().map(|d| d.join("config.toml"))
+    config_dir::<P>().map(|d| d.join("config.toml"))
 }
 
 fn load_config<P: Platform>() -> Config {
@@ -39,11 +49,11 @@ fn load_config<P: Platform>() -> Config {
 }
 
 pub fn session_path<P: Platform>() -> Option<PathBuf> {
-    P::config_dir().map(|d| d.join("session.json"))
+    config_dir::<P>().map(|d| d.join("session.json"))
 }
 
 pub fn state_path<P: Platform>() -> Option<PathBuf> {
-    P::config_dir().map(|d| d.join("window.state"))
+    config_dir::<P>().map(|d| d.join("window.state"))
 }
 
 pub fn parse_placement(text: &str) -> Option<Placement> {
@@ -59,7 +69,7 @@ pub fn format_placement(p: &Placement) -> String {
 }
 
 pub fn log_path<P: Platform>() -> Option<PathBuf> {
-    P::config_dir().map(|d| d.join("aster.log"))
+    config_dir::<P>().map(|d| d.join("aster.log"))
 }
 
 fn run<P: Platform>(request: cli::Request) -> Result<(), aster_platform::PlatformError> {
@@ -143,14 +153,5 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn placement_round_trips_and_rejects_garbage() {
-        let p = Placement { x: -8, y: 20, width: 1200, height: 700, maximized: true };
-        assert_eq!(parse_placement(&format_placement(&p)), Some(p));
-        assert_eq!(parse_placement("1 2 3"), None);
-        assert_eq!(parse_placement(""), None);
-    }
-}
+#[path = "../test/main.rs"]
+mod tests;

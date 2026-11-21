@@ -224,6 +224,7 @@ pub struct App {
     current_tab: Option<PaneId>,
     pub(crate) broadcast: Option<Broadcast>,
     pub(crate) recent: Vec<String>,
+    pub(crate) start_selected: usize,
     pub(crate) tab_bar_override: Option<bool>,
     pub(crate) tab_toast: Option<(String, Instant)>,
     pub(crate) settings_stash: Option<crate::settings::SettingsPage>,
@@ -310,6 +311,7 @@ impl App {
             current_tab: None,
             broadcast: None,
             recent: Vec::new(),
+            start_selected: 0,
             tab_bar_override: None,
             tab_toast: None,
             settings_stash: None,
@@ -579,6 +581,11 @@ impl App {
             self.effects.push(Effect::Surface(config.appearance.backdrop));
         }
         self.config = config;
+        if !self.config.appearance.animations {
+            self.bell = None;
+            self.tab_toast = None;
+            self.reset_blink();
+        }
         self.apply_language();
         let options = self.options();
         for p in self.panes.values() {
@@ -591,6 +598,11 @@ impl App {
         self.size = (width as f32, height as f32);
         self.scale = scale.max(0.5);
         self.dirty = true;
+    }
+
+    pub(crate) fn ui(&self) -> f32 {
+        let density = self.config.appearance.density;
+        self.scale * if density.is_nan() { 1.0 } else { density.clamp(0.6, 1.4) }
     }
 
     pub fn default_profile(&self) -> Option<Profile> {
@@ -610,7 +622,7 @@ impl App {
             CursorStyle::Beam => CursorShape::Beam,
             CursorStyle::Underline => CursorShape::Underline,
         };
-        Options { scrollback: self.config.terminal.scrollback_lines, cursor, blink: self.config.terminal.cursor_blink, word_separators: self.config.terminal.word_separator.clone() }
+        Options { scrollback: self.config.terminal.scrollback_lines, cursor, blink: self.cursor_blink_enabled(), word_separators: self.config.terminal.word_separator.clone() }
     }
 
     fn inherited_cwd(&self, profile: &Profile) -> Option<String> {
@@ -764,7 +776,29 @@ impl App {
             }
         }
         if self.tabs.is_empty() {
-            self.effects.push(Effect::Close);
+            if self.config.appearance.last_tab_closes_window {
+                self.effects.push(Effect::Close);
+            } else {
+                self.active = 0;
+                self.start_selected = 0;
+                self.current_tab = None;
+                self.drag = Drag::None;
+                self.layout = Layout::default();
+                self.chrome.tabs.clear();
+                self.hover_link = None;
+                self.close_overlay();
+                self.close_confirm = None;
+                self.paste_confirm = None;
+                self.files = None;
+                self.search = None;
+                self.rename = None;
+                self.menu = None;
+                self.settings = None;
+                self.settings_stash = None;
+                self.tab_toast = None;
+                self.broadcast = None;
+            }
+            self.dirty = true;
             return;
         }
         if self.active > index || self.active >= self.tabs.len() {
@@ -960,6 +994,9 @@ impl App {
         if self.search_paste(&text) {
             return;
         }
+        if self.tabs.is_empty() {
+            return;
+        }
         if self.needs_paste_warning(&text, self.paste_mode()) {
             return self.ask_paste(text);
         }
@@ -1006,8 +1043,12 @@ impl App {
 
     pub fn flash_bell(&mut self) {
         if let Some(pane) = self.bell_pane {
-            self.bell = Some((pane, Instant::now()));
-            self.dirty = true;
+            if self.config.appearance.animations {
+                self.bell = Some((pane, Instant::now()));
+                self.dirty = true;
+            } else if self.focused {
+                self.effects.push(Effect::Attention);
+            }
         }
     }
 
@@ -1153,6 +1194,11 @@ impl App {
             PreviousTab => self.cycle(-1),
             MoveTabLeft => self.move_tab(-1),
             MoveTabRight => self.move_tab(1),
+            Tab(n) if self.tabs.is_empty() => {
+                if let Some(&entry @ crate::start::Entry::Recent(_)) = self.start_page().entries.get(n as usize) {
+                    self.launch_start_entry(entry);
+                }
+            }
             Tab(n) => self.activate(n as usize - 1),
             SplitRight => self.split(Side::Right),
             SplitBottom => self.split(Side::Bottom),
@@ -1372,8 +1418,12 @@ impl App {
         self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.paste_confirm.is_none() && self.close_confirm.is_none() && self.files.is_none()
     }
 
+    pub(crate) fn cursor_blink_enabled(&self) -> bool {
+        self.config.appearance.animations && self.config.terminal.cursor_blink
+    }
+
     fn blinking(&self) -> bool {
-        self.config.terminal.cursor_blink && self.terminal_has_focus()
+        self.cursor_blink_enabled() && self.terminal_has_focus() && self.focused_pane().is_some()
     }
 
     pub fn on_timer(&mut self) {
@@ -1419,7 +1469,7 @@ impl App {
             (Some(now), Some(before)) => self.tabs[self.active].root.contains(before) || now == before,
             (now, before) => now == before,
         };
-        if !same && self.tab_bar_hidden() && self.tabs.len() > 1 && self.current_tab.is_some() {
+        if !same && self.config.appearance.animations && self.tab_bar_hidden() && self.tabs.len() > 1 && self.current_tab.is_some() {
             self.tab_toast = Some((format!("{} / {}  {}", self.active + 1, self.tabs.len(), self.tab_title(self.active)), Instant::now()));
             self.dirty = true;
         }
@@ -1575,7 +1625,7 @@ impl App {
         let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.settings.is_some() || self.files.is_some();
         self.swallow_char = false;
         self.swallow_chord = None;
-        self.swallow_control = modal &&matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
+        self.swallow_control = (modal || self.tabs.is_empty()) && matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
         if self.overlay.is_some() {
             self.overlay_key(key, mods);
             return;
@@ -1636,6 +1686,11 @@ impl App {
             }
             Outcome::Pending => self.swallow_chord = Some(key),
             Outcome::None if self.search.is_some() => {}
+            Outcome::None if self.tabs.is_empty() => {
+                if mods == Mods::NONE {
+                    self.start_key(key);
+                }
+            }
             Outcome::None => {
                 if let Some(e) = encode_key(key, mods, self.mode()) {
                     self.swallow_char = e.swallows_char;
@@ -1707,7 +1762,7 @@ impl App {
 
     fn cell_at(&self, pane: PaneId, rect: Rect, x: f32, y: f32) -> (usize, usize, aster_vt::Side) {
         let Some(m) = self.metrics else { return (0, 0, aster_vt::Side::Left) };
-        let inner = view::pane_inner_with(rect, self.scale, self.config.terminal.padding);
+        let inner = view::pane_inner_with(rect, self.ui(), self.config.terminal.padding);
         let size = self.panes.get(&pane).map(|p| p.size).unwrap_or(Size::new(1, 1));
         let fx = ((x - inner.x) / m.w).max(0.0);
         let col = (fx as usize).min(size.cols - 1);
@@ -1737,7 +1792,7 @@ impl App {
     }
 
     pub(crate) fn splitter_at(&self, x: f32, y: f32) -> Option<&crate::panes::Splitter> {
-        let grab = (3.0 * self.scale).max(3.0);
+        let grab = (3.0 * self.ui()).max(3.0);
         self.layout.splitters.iter().find(|s| s.rect.inset(-grab, -grab).contains(x, y))
     }
 
@@ -1785,7 +1840,7 @@ impl App {
                 return;
             }
             Drag::Tab { index, start_x, moved } => {
-                let threshold = 6.0 * self.scale;
+                let threshold = 6.0 * self.ui();
                 if moved || (x - start_x).abs() > threshold {
                     self.drag = Drag::Tab { index, start_x, moved: true };
                     if let Some(target) = self.chrome.tabs.iter().position(|t| t.rect.contains(x, t.rect.y + 1.0)) {
@@ -1801,6 +1856,12 @@ impl App {
                 return;
             }
             _ => {}
+        }
+        if self.tabs.is_empty() && self.overlay.is_none() && self.chrome.content.contains(x, y) {
+            let hit = self.start_page().hit(x, y);
+            self.set_cursor(if hit.is_some() { CursorIcon::Hand } else { CursorIcon::Default });
+            self.dirty = true;
+            return;
         }
         if (self.settings.is_some() || self.files.is_some()) && self.chrome.content.contains(x, y) {
             self.dirty = true;
@@ -1919,6 +1980,16 @@ impl App {
             }
             return;
         }
+        if self.tabs.is_empty() && self.chrome.content.contains(x, y) {
+            if button == MouseButton::Left {
+                let page = self.start_page();
+                if let Some(i) = page.hit(x, y) {
+                    self.start_selected = i;
+                    self.launch_start_entry(page.entries[i]);
+                }
+            }
+            return;
+        }
         if button == MouseButton::Left && self.search_click(x, y) {
             return;
         }
@@ -1952,7 +2023,7 @@ impl App {
             return;
         }
         let Some((pane, rect)) = self.pane_at(x, y) else { return };
-        if self.broadcast.is_some() && self.broadcast_targets().contains(&pane) && y >= rect.bottom() - view::hint_height(self.scale) {
+        if self.broadcast.is_some() && self.broadcast_targets().contains(&pane) && y >= rect.bottom() - view::hint_height(self.ui()) {
             self.broadcast = None;
             self.dirty = true;
             return;
