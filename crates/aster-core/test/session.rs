@@ -82,6 +82,67 @@ fn garbage_or_empty_state_restores_nothing() {
 }
 
 #[test]
+fn saved_layout_reopens_the_tree_with_current_profiles_and_leaf_folders() {
+    use crate::keymap::Action;
+    let (mut a, mut gfx) = app();
+    a.open_default_tab();
+    a.run(Action::ProfileSelector);
+    a.overlay.as_mut().unwrap().insert("Shell B");
+    a.on_event(Event::Key { key: Key::Enter, mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true });
+    a.run(Action::SplitBottom);
+    let ids = a.tabs[0].root.panes();
+    for (id, dir) in ids.iter().zip([r"D:\one", r"D:\two", r"D:\three"]) {
+        a.terminal(*id).unwrap().lock().set_cwd(Some(dir.into()));
+    }
+    a.tabs[0].root.set_ratio(&[], 0.35);
+    a.run(Action::SaveLayout);
+    let text = a.config.to_text();
+    assert!(!text.contains("buffer ="));
+    let mut config = Config::parse(&text).unwrap();
+    let saved = config.profiles.last().unwrap().clone();
+    let pick = a.profile_picks().into_iter().find(|p| p.value == saved.id).unwrap();
+    assert_eq!((pick.badge.as_str(), pick.hint.as_str()), ("▦", "Layout"));
+    let (mut b, _) = app();
+    config.profile_defaults.entry("local".into()).or_default().env.insert("NEW".into(), "yes".into());
+    b.set_config(config);
+    b.open_tab(saved);
+    b.frame(&mut gfx, false);
+    let effects = b.take_effects();
+    let dirs: Vec<_> = effects.iter().filter_map(|e| match e {
+        Effect::Spawn { launch, .. } => { assert_eq!(launch.env["NEW"], "yes"); launch.cwd.as_deref() }
+        _ => None,
+    }).collect();
+    assert_eq!(dirs, [r"D:\one", r"D:\two", r"D:\three"]);
+    let programs = spawns(&effects).into_iter().map(|(program, _, _)| program).collect::<Vec<_>>();
+    assert_eq!(programs, ["a.exe", "b.exe", "b.exe"]);
+    assert!(matches!(&b.tabs[0].root, Node::Split { axis: Axis::Horizontal, ratio, b, .. } if (*ratio - 0.35).abs() < 1e-6 && matches!(**b, Node::Split { axis: Axis::Vertical, .. })));
+}
+
+#[test]
+fn layouts_with_a_missing_leaf_leave_the_existing_tab_intact() {
+    let (mut a, _) = app();
+    a.open_default_tab();
+    let old = a.focused_pane();
+    let leaf = |id: &str| Box::new(ProfileLayout::Pane { profile: id.into(), cwd: None });
+    let layout = ProfileLayout::Split { vertical: false, ratio: 0.5, a: leaf("local:a"), b: leaf("missing") };
+    a.open_tab(Profile { layout: Some(layout), ..Default::default() });
+    assert_eq!((a.tab_count(), a.panes.len(), a.focused_pane()), (1, 1, old));
+    assert!(a.tab_toast.as_ref().unwrap().0.contains("missing"));
+}
+
+#[test]
+fn restored_sessions_resolve_defaults_against_the_new_configuration() {
+    let (mut a, _) = app();
+    a.set_config(Config::parse("[profile-defaults.local.env]\nVERSION='first'").unwrap());
+    a.open_default_tab();
+    let snapshot = a.snapshot();
+    let (mut b, _) = app();
+    b.set_config(Config::parse("[profile-defaults.local.env]\nVERSION='second'").unwrap());
+    assert!(b.restore(&snapshot));
+    assert_eq!(b.panes[&b.tabs[0].focus].pending.as_ref().unwrap().env["VERSION"], "second");
+}
+
+#[test]
 fn a_split_remembers_the_folder_it_inherited_before_the_shell_reports_one() {
     let (mut a, mut g) = app();
     a.open_default_tab();

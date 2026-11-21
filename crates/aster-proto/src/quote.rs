@@ -65,6 +65,15 @@ pub fn quote_paths(paths: &[String], kind: ShellKind) -> String {
         .join(" ")
 }
 
+pub fn login_shell_in(cwd: Option<&str>) -> Option<String> {
+    let dir = cwd.filter(|d| !d.contains('\0'))?;
+    let drive_path = matches!(dir.as_bytes(), [letter, b':', b'/' | b'\\', ..] if letter.is_ascii_alphabetic());
+    if !dir.starts_with('/') && !drive_path {
+        return None;
+    }
+    Some(format!("cd {} && exec \"$SHELL\" -l", quote_path(dir, ShellKind::Unix)))
+}
+
 #[cfg(test)]
 #[path = "../test/quote.rs"]
 mod tests;

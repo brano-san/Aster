@@ -71,7 +71,7 @@ fn unplug_retries_the_same_port_and_settings_until_it_opens_again() {
 
 #[test]
 fn line_mode_finishes_cleanly_when_the_user_closes_an_open_port() {
-    let stream = Stream { input: aster_core::profile::InputMode::Line, ..Stream::default() };
+    let stream = Stream { input: Some(aster_core::profile::InputMode::Line), ..Stream::default() };
     let mut serial = Serial::new("COM4", Some(stream)).unwrap();
     let (device, output) = unbounded();
     let (input, from_host) = unbounded();

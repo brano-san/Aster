@@ -241,9 +241,17 @@ impl App {
 
     pub fn open_tab_at(&mut self, profile: crate::profile::Profile, cwd: Option<String>) {
         let cwd = cwd.filter(|_| profile.ssh.is_none() || self.config.ssh.client != crate::config::SshClient::Native);
-        let id = self.new_pane_in(profile, cwd);
+        self.insert_profile_tab(profile, cwd);
+    }
+
+    pub(crate) fn insert_profile_tab(&mut self, profile: crate::profile::Profile, cwd: Option<String>) {
+        let title = profile.layout.as_ref().map(|_| profile.name.clone());
+        let Some(root) = self.profile_tree(profile, cwd) else { return };
+        let focus = root.panes()[0];
+        let mut tab = crate::app::Tab::new(root, focus);
+        tab.title = title;
         let at = self.tab_insert_index(false);
-        self.tabs.insert(at, crate::app::Tab::new(crate::panes::Node::Leaf(id), id));
+        self.tabs.insert(at, tab);
         self.active = at;
         self.mru.visit(self.tabs[at].key);
         self.overlay = None;

@@ -6,7 +6,7 @@ use crate::profile::Profile;
 pub const RECENT: &str = "recent:";
 
 pub fn badge(p: &Profile) -> (String, u32) {
-    let (text, color) = if p.ssh.is_some() {
+    let fallback = if p.ssh.is_some() {
         ("SSH", 0x2F8F83)
     } else if p.serial.is_some() {
         ("COM", 0x8A6D3B)
@@ -17,31 +17,38 @@ pub fn badge(p: &Profile) -> (String, u32) {
             ("TN", 0x5A6B7D)
         }
     } else {
-        match p.icon.as_deref() {
-            Some("powershell") => ("PS", 0x2671BE),
-            Some("cmd") => ("C:", 0x4D4D4D),
-            Some("linux") => ("WSL", 0xE95420),
-            Some("git") => ("Git", 0xF05032),
-            Some("cygwin") => ("Cy", 0x4B8B3B),
-            Some("msys2") => ("M2", 0x7B4FA0),
-            Some("vs") => ("VS", 0x68217A),
-            _ => ("$", 0x3C7A3C),
-        }
+        ("$", 0x3C7A3C)
+    };
+    let (text, color) = match p.icon.as_deref() {
+        _ if p.layout.is_some() => ("▦", 0x5A6B7D),
+        Some("powershell") => ("PS", 0x2671BE),
+        Some("cmd") => ("C:", 0x4D4D4D),
+        Some("linux") => ("WSL", 0xE95420),
+        Some("git") => ("Git", 0xF05032),
+        Some("cygwin") => ("Cy", 0x4B8B3B),
+        Some("msys2") => ("M2", 0x7B4FA0),
+        Some("vs") => ("VS", 0x68217A),
+        Some("ssh") => ("SSH", 0x2F8F83),
+        Some(icon) if !icon.is_empty() => (icon, fallback.1),
+        _ => fallback,
     };
     let tint = p.color.as_deref().and_then(aster_vt::schemes::parse_hex).map(|c| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)).unwrap_or(color);
     (text.to_owned(), tint)
 }
 
 pub fn detail(p: &Profile) -> String {
+    if p.layout.is_some() {
+        return t("Layout").to_owned();
+    }
     p.ssh.clone().or_else(|| p.serial.clone()).or_else(|| p.socket.clone()).unwrap_or_else(|| p.command.clone())
 }
 
-fn group_of(p: &Profile) -> (u32, String) {
+fn group_of(p: &Profile, config: &crate::config::Config) -> (u32, String) {
+    if let Some(group) = p.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+        return (3, crate::profile::group_path(group, config));
+    }
     if !p.builtin {
-        return match p.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
-            Some(group) => (3, group.to_owned()),
-            None => (2, t("My profiles").to_owned()),
-        };
+        return (2, t("My profiles").to_owned());
     }
     if p.id.starts_with("ssh:") {
         (5, t("From ~/.ssh/config").to_owned())
@@ -60,9 +67,9 @@ fn pick(p: &Profile, group: String, rank: u32, value: String) -> Pick {
 impl App {
     pub(crate) fn profile_picks(&self) -> Vec<Pick> {
         let mut picks = Vec::new();
-        let recent: Vec<&Profile> = self.recent.iter().filter_map(|id| self.profiles.iter().find(|p| &p.id == id)).take(self.config.terminal.recent_profiles).collect();
+        let recent: Vec<&Profile> = self.recent.iter().filter_map(|id| self.profiles.iter().find(|p| &p.id == id && !self.config.profile_hidden(p))).take(self.config.terminal.recent_profiles).collect();
         for p in &recent {
-            picks.push(pick(p, t("Recent").to_owned(), 1, format!("{RECENT}{}", p.id)));
+            picks.push(pick(&crate::profile::effective(p, &self.config), t("Recent").to_owned(), 1, format!("{RECENT}{}", p.id)));
         }
         if !recent.is_empty() {
             picks.push(Pick { label: t("Clear recent profiles").to_owned(), value: CLEAR_RECENT.into(), group: t("Recent").to_owned(), rank: 1, badge: "\u{00D7}".into(), ..Pick::default() });
@@ -70,9 +77,10 @@ impl App {
         let mut rest: Vec<(u32, String, Pick)> = self
             .profiles
             .iter()
+            .filter(|p| !self.config.profile_hidden(p))
             .map(|p| {
-                let (rank, group) = group_of(p);
-                let pick = pick(p, group.clone(), rank, p.id.clone());
+                let (rank, group) = group_of(p, &self.config);
+                let pick = pick(&crate::profile::effective(p, &self.config), group.clone(), rank, p.id.clone());
                 (rank, group, pick)
             })
             .collect();

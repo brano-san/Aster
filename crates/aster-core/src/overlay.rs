@@ -7,6 +7,7 @@ use std::ops::Range;
 pub enum OverlayKind {
     Commands,
     Profiles,
+    ProfileTemplates,
     Schemes,
     TabColors,
     SerialSpeed(PaneId),
@@ -74,6 +75,7 @@ impl Overlay {
         match self.kind {
             OverlayKind::Commands => t("Type a command"),
             OverlayKind::Profiles => t("Select a profile or enter an address"),
+            OverlayKind::ProfileTemplates => t("Select a profile template"),
             OverlayKind::Schemes => t("Select a color scheme"),
             OverlayKind::TabColors => t("Select a tab color"),
             OverlayKind::SerialSpeed(_) => t("Select or enter the serial port speed"),

@@ -74,16 +74,22 @@ impl Node {
     }
 
     pub fn split(&mut self, pane: PaneId, side: Side, new: PaneId) -> bool {
+        self.split_tree(pane, side, Node::Leaf(new))
+    }
+
+    fn leaf_mut(&mut self, pane: PaneId) -> Option<&mut Node> {
         match self {
-            Node::Leaf(id) if *id == pane => {
-                let (old, fresh) = (Box::new(Node::Leaf(pane)), Box::new(Node::Leaf(new)));
-                let (a, b) = if side.before() { (fresh, old) } else { (old, fresh) };
-                *self = Node::Split { axis: side.axis(), ratio: 0.5, a, b };
-                true
-            }
-            Node::Leaf(_) => false,
-            Node::Split { a, b, .. } => a.split(pane, side, new) || b.split(pane, side, new),
+            Node::Leaf(id) => (*id == pane).then_some(self),
+            Node::Split { a, b, .. } => a.leaf_mut(pane).or_else(|| b.leaf_mut(pane)),
         }
+    }
+
+    pub fn split_tree(&mut self, pane: PaneId, side: Side, new: Node) -> bool {
+        let Some(leaf) = self.leaf_mut(pane) else { return false };
+        let (old, fresh) = (Box::new(Node::Leaf(pane)), Box::new(new));
+        let (a, b) = if side.before() { (fresh, old) } else { (old, fresh) };
+        *leaf = Node::Split { axis: side.axis(), ratio: 0.5, a, b };
+        true
     }
 
     pub fn remove(&mut self, pane: PaneId) -> bool {

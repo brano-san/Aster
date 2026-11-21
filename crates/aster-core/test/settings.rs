@@ -284,6 +284,84 @@ fn ctrl(k: Key) -> Event {
     Event::Key { key: k, mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true }
 }
 
+fn choose_template(a: &mut App, name: &str) {
+    select_profile(a, "");
+    key(a, Key::Enter);
+    typed(a, name);
+    key(a, Key::Enter);
+}
+
+#[test]
+fn new_profile_templates_prefill_the_editor_and_focus_the_connection_field() {
+    let mut a = app();
+    for (name, focus, initial) in [("Local shell", 1, "a.exe"), ("SSH connection", 4, ""), ("Serial port", 5, ""), ("Telnet", 6, "telnet://"), ("TCP", 6, "tcp://")] {
+        choose_template(&mut a, name);
+        let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
+        assert_eq!((editor.focus, &*editor.fields[focus], &*editor.fields[0]), (focus, initial, name));
+        if focus != 1 {
+            assert!(editor.fields[1].is_empty());
+        }
+        key(&mut a, Key::Escape);
+    }
+    select_profile(&mut a, "");
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::Escape);
+    let page = a.settings.as_ref().unwrap();
+    assert!(page.is_new_profile(page.current_item().unwrap()));
+    assert!(page.editor.is_none() && a.overlay.is_none() && saved(&mut a).is_none());
+}
+
+#[test]
+fn h_toggles_custom_and_detected_profiles_preserving_selection_and_query() {
+    let mut a = app();
+    let mut config = a.config().clone();
+    config.profiles.push(Profile { id: "custom:mine".into(), name: "Mine".into(), command: "shell".into(), ..Default::default() });
+    a.set_config(config);
+    for name in ["Alpha", "Mine"] {
+        select_profile(&mut a, name);
+        for hidden in [true, false] {
+            key(&mut a, Key::Char('H'));
+            typed(&mut a, "h");
+            let page = a.settings.as_ref().unwrap();
+            let row = page.profile_at(page.current_item().unwrap()).unwrap();
+            assert_eq!((row.name.as_str(), row.hidden, page.query.as_str()), (name, hidden, ""));
+            let id = row.id.clone();
+            let config = saved(&mut a).unwrap();
+            assert_eq!(config.hidden_profiles.contains(&id), hidden && name == "Alpha");
+            assert_eq!(config.profiles[0].hidden, hidden && name == "Mine");
+            assert_eq!(a.find_profile(name).unwrap().id, id);
+        }
+    }
+    let mut external = a.config().clone();
+    external.hidden_profiles.push("local:b".into());
+    a.set_config(external);
+    assert!(a.settings.as_ref().unwrap().profiles.iter().any(|row| row.name == "Beta" && row.hidden));
+}
+
+#[test]
+fn editing_a_layout_preserves_its_tree_and_config_only_fields() {
+    let mut a = app();
+    let original = Profile {
+        id: "custom:pair".into(), name: "Pair".into(), hidden: true,
+        on_exit: crate::profile::OnExit::Keep,
+        layout: Some(crate::session::ProfileLayout::Split {
+            vertical: false, ratio: 0.4,
+            a: Box::new(crate::session::ProfileLayout::Pane { profile: "local:a".into(), cwd: Some("work".into()) }),
+            b: Box::new(crate::session::ProfileLayout::Pane { profile: "local:b".into(), cwd: None }),
+        }),
+        ..Default::default()
+    };
+    let mut config = a.config().clone();
+    config.profiles.push(original.clone());
+    a.set_config(config);
+    select_profile(&mut a, "Pair");
+    key(&mut a, Key::Enter);
+    typed(&mut a, " renamed");
+    a.on_event(ctrl(Key::Enter));
+    let updated = Profile { name: "Pair renamed".into(), ..original };
+    assert_eq!(saved(&mut a).unwrap().profiles, [updated]);
+}
+
 #[test]
 fn arguments_split_on_spaces_and_respect_quotes() {
     assert_eq!(split_args(r#"-NoLogo -File "C:\My Scripts\a.ps1" ''"#), ["-NoLogo", "-File", r"C:\My Scripts\a.ps1", ""]);
@@ -318,8 +396,11 @@ fn a_detected_profile_is_copied_into_an_editable_custom_one() {
 #[test]
 fn a_new_ssh_profile_needs_only_a_name_and_a_destination() {
     let mut a = app();
-    select_profile(&mut a, "");
-    key(&mut a, Key::Enter);
+    choose_template(&mut a, "SSH connection");
+    for _ in 0..4 {
+        key(&mut a, Key::Up);
+    }
+    a.on_event(ctrl(Key::Backspace));
     a.on_event(ctrl(Key::Enter));
     assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "a nameless profile is refused");
     typed(&mut a, "Prod");
@@ -343,11 +424,10 @@ fn ctrl_enter_makes_a_profile_the_default_and_custom_ones_delete_after_a_second_
     key(&mut a, Key::Delete);
     assert!(a.settings.as_ref().unwrap().notice.as_deref().is_some_and(|n| n.contains("cannot be deleted")));
 
-    select_profile(&mut a, "");
-    key(&mut a, Key::Enter);
+    choose_template(&mut a, "Local shell");
+    key(&mut a, Key::Up);
+    a.on_event(ctrl(Key::Backspace));
     typed(&mut a, "Mine");
-    key(&mut a, Key::Tab);
-    typed(&mut a, "bash");
     a.on_event(ctrl(Key::Enter));
     saved(&mut a);
     let page = a.settings.as_ref().unwrap();
@@ -363,16 +443,11 @@ fn ctrl_enter_makes_a_profile_the_default_and_custom_ones_delete_after_a_second_
 #[test]
 fn a_serial_profile_needs_only_a_name_and_a_port() {
     let mut a = app();
-    select_profile(&mut a, "");
-    key(&mut a, Key::Enter);
-    typed(&mut a, "Router console");
-    for _ in 0..5 {
-        key(&mut a, Key::Tab);
-    }
+    choose_template(&mut a, "Serial port");
     typed(&mut a, "COM3:9600,8N1");
     a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
-    let p = config.profiles.iter().find(|p| p.name == "Router console").unwrap();
+    let p = config.profiles.iter().find(|p| p.name == "Serial port").unwrap();
     assert_eq!(p.serial.as_deref(), Some("COM3:9600,8N1"));
     assert!(a.settings.as_ref().unwrap().profiles.iter().any(|r| r.detail == "serial COM3:9600,8N1"));
 }
@@ -400,13 +475,8 @@ fn switching_the_language_setting_translates_the_interface_at_once() {
 #[test]
 fn a_network_profile_stores_a_normalized_address() {
     let mut a = app();
-    select_profile(&mut a, "");
-    key(&mut a, Key::Enter);
-    typed(&mut a, "Switch");
-    for _ in 0..6 {
-        key(&mut a, Key::Tab);
-    }
-    typed(&mut a, "tcp://switch");
+    choose_template(&mut a, "TCP");
+    typed(&mut a, "switch");
     a.on_event(ctrl(Key::Enter));
     assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "TCP needs a port");
     for _ in 0..12 {
@@ -417,7 +487,7 @@ fn a_network_profile_stores_a_normalized_address() {
     typed(&mut a, "Network");
     a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
-    let p = config.profiles.iter().find(|p| p.name == "Switch").unwrap();
+    let p = config.profiles.iter().find(|p| p.name == "TCP").unwrap();
     assert_eq!(p.socket.as_deref(), Some("telnet://switch.lan:23"));
     assert_eq!(p.group.as_deref(), Some("Network"));
     assert!(!p.is_local());
@@ -444,11 +514,7 @@ fn the_first_letter_typed_after_opening_settings_by_shortcut_is_kept() {
 fn the_profile_editor_validates_and_canonicalizes_the_color_scheme() {
     let mut a = app();
     let scheme = a.scheme_names().into_iter().find(|name| *name != name.to_ascii_lowercase()).unwrap();
-    select_profile(&mut a, "");
-    key(&mut a, Key::Enter);
-    typed(&mut a, "Work");
-    key(&mut a, Key::Tab);
-    typed(&mut a, "shell");
+    choose_template(&mut a, "Local shell");
     for _ in 1..8 {
         key(&mut a, Key::Tab);
     }

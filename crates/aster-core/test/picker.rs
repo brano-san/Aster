@@ -46,6 +46,25 @@ fn profiles_are_grouped_with_badges_details_and_a_manage_entry() {
 }
 
 #[test]
+fn hidden_profiles_leave_both_picker_sections_but_remain_addressable() {
+    let config = Config::parse("hidden-profiles = ['local:pwsh']\n[[profiles]]\nid = 'work'\nname = 'Work'\nhidden = true").unwrap();
+    let mut a = App::new(config, profiles(), true, None, Arc::new(|| {}));
+    a.set_recent(vec!["work".into(), "local:pwsh".into()]);
+    let picks = a.profile_picks();
+    assert!(!picks.iter().any(|p| p.group == "Recent" || matches!(p.value.as_str(), "work" | "local:pwsh")));
+    assert_eq!(a.find_profile("Work").unwrap().id, "work");
+    assert!(a.find_profile("local:pwsh").is_some());
+}
+
+#[test]
+fn nested_groups_supply_the_section_title_badge_and_tint() {
+    let config = Config::parse("[[groups]]\nid='team'\nname='Team'\nicon='cmd'\n[[groups]]\nid='qa'\nname='QA'\nparent='team'\ncolor='#123456'\n[[profiles]]\nid='qa-shell'\ngroup='QA'\ncommand='shell'").unwrap();
+    let a = App::new(config, profiles(), true, None, Arc::new(|| {}));
+    let pick = a.profile_picks().into_iter().find(|p| p.value == "qa-shell").unwrap();
+    assert_eq!((pick.group.as_str(), pick.badge.as_str(), pick.tint), ("Team › QA", "C:", Some(0x123456)));
+}
+
+#[test]
 fn chosen_profiles_become_recent_and_can_be_cleared() {
     let mut a = app(Vec::new());
     a.run(crate::keymap::Action::ProfileSelector);

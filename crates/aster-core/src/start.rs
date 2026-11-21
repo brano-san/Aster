@@ -31,7 +31,7 @@ impl StartPage {
 impl App {
     pub(crate) fn start_page(&self) -> StartPage {
         let mut entries = vec![Entry::NewTab];
-        let recents = self.recent.iter().filter_map(|id| self.profiles.iter().position(|p| &p.id == id));
+        let recents = self.recent.iter().filter_map(|id| self.profiles.iter().position(|p| &p.id == id && !self.config.profile_hidden(p)));
         entries.extend(recents.take(5).map(Entry::Recent));
         entries.extend([Entry::AllProfiles, Entry::Settings]);
         let s = self.ui();

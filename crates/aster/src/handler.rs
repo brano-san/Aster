@@ -296,7 +296,7 @@ impl<P: Platform> Handler<P> {
     fn effect(&mut self, window: &Win<P>, effect: Effect) {
         let id = window.id();
         match effect {
-            Effect::Spawn { pane, launch, terminal } if launch.serial.is_some() => {
+            Effect::Spawn { pane, launch, terminal, .. } if launch.serial.is_some() => {
                 match crate::serial::Serial::new(launch.serial.as_deref().unwrap_or_default(), launch.stream) {
                     Ok(serial) => {
                         self.serials.insert((id, pane), serial);
@@ -309,17 +309,17 @@ impl<P: Platform> Handler<P> {
                     }
                 }
             }
-            Effect::Spawn { pane, launch, terminal } if launch.socket.is_some() => {
-                let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), launch.stream.as_ref().is_none_or(|s| s.input == aster_core::profile::InputMode::Normal));
+            Effect::Spawn { pane, launch, terminal, .. } if launch.socket.is_some() => {
+                let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), launch.stream.as_ref().is_none_or(|s| s.input_mode() == aster_core::profile::InputMode::Normal));
                 let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal);
                 self.sessions.insert((id, pane), session);
             }
-            Effect::Spawn { pane, launch, terminal } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
+            Effect::Spawn { pane, launch, terminal, reconnecting } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
                 let destination = launch.ssh.unwrap_or_default();
                 let options = crate::remote::Options {
                     profile: launch.ssh_options.map(|o| *o).unwrap_or_default(),
                     cwd: launch.cwd,
-                    clear_after_connect: self.config.ssh.clear_after_connect,
+                    clear_after_connect: self.config.ssh.clear_after_connect && !reconnecting,
                     x11_display: self.config.ssh.x11_display.clone(),
                     share: self.config.ssh.share_connections,
                     forward_agent: self.config.ssh.forward_agent,
@@ -343,7 +343,7 @@ impl<P: Platform> Handler<P> {
                 let session = Session::start(self.session_start(id, pane), crate::stream::wrap(remote.spawned, launch.stream.as_ref()), terminal);
                 self.sessions.insert((id, pane), session);
             }
-            Effect::Spawn { pane, launch, terminal } => {
+            Effect::Spawn { pane, launch, terminal, .. } => {
                 let req = SpawnRequest {
                     command: launch.command,
                     args: launch.args,
@@ -730,12 +730,14 @@ impl<P: Platform> Handler<P> {
             }
         }
         while let Ok((wid, pane, code)) = self.exits.try_recv() {
-            let session = self.sessions.remove(&(wid, pane));
+            use aster_core::profile::OnExit;
+            let policy = self.windows.get(&wid).and_then(|s| s.app.pane_exit_policy(pane));
+            let manual_retry = matches!(policy, Some(OnExit::Auto | OnExit::Inherit)) && self.serials.get_mut(&(wid, pane)).is_some_and(|s| s.disconnected(code));
+            if let Some(session) = self.sessions.remove(&(wid, pane)).filter(|_| manual_retry || policy == Some(OnExit::Reconnect)) {
+                session.abandon_transfer();
+            }
             self.remotes.remove(&(wid, pane));
-            if self.serials.get_mut(&(wid, pane)).is_some_and(|s| s.disconnected(code)) {
-                if let Some(session) = session {
-                    session.abandon_transfer();
-                }
+            if manual_retry {
                 if let Some(state) = self.windows.get_mut(&wid) {
                     state.app.transfer_offered(pane, aster_core::app::PaneTransfer::None);
                     if let Some(terminal) = state.app.terminal(pane) {
