@@ -189,6 +189,8 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::ToggleMaximize, "toggle-maximize", "Maximize or restore window"),
     (Action::CloseWindow, "close-window", "Close window"),
     (Action::Quit, "quit", "Quit"),
+    (Action::ApplicationsMenu(true), "add-to-applications-menu", "Add to the applications menu"),
+    (Action::ApplicationsMenu(false), "remove-from-applications-menu", "Remove from the applications menu"),
 ];
 
 impl Action {
