@@ -23,6 +23,15 @@ pub enum RightClick {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+pub enum LinkModifier {
+    #[default]
+    None,
+    Ctrl,
+    Shift,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum Bell {
     Off,
     #[default]
@@ -113,15 +122,19 @@ pub struct Terminal {
     pub scrollback_lines: usize,
     pub cursor: CursorStyle,
     pub cursor_blink: bool,
+    pub alt_is_meta: bool,
     pub copy_on_select: bool,
     pub copy_as_html: bool,
     pub right_click: RightClick,
+    pub link_modifier: LinkModifier,
     pub paste_on_middle_click: bool,
     pub bracketed_paste: bool,
     pub trim_whitespace_on_paste: bool,
+    pub paste_newlines_as_spaces: bool,
     pub warn_on_multiline_paste: bool,
     pub sudo_passwords: bool,
     pub bell: Bell,
+    pub bell_attention: bool,
     pub draw_bold_text_in_bright_colors: bool,
     pub word_separator: String,
     pub scroll_on_input: bool,
@@ -130,6 +143,7 @@ pub struct Terminal {
     pub identification: Identification,
     pub search_options: SearchOptions,
     pub recover_tabs: bool,
+    pub open_on_start: bool,
     pub confirm_close: bool,
     pub focus_follows_mouse: bool,
     pub recent_profiles: usize,
@@ -148,15 +162,19 @@ impl Default for Terminal {
             scrollback_lines: 25_000,
             cursor: CursorStyle::Block,
             cursor_blink: true,
+            alt_is_meta: true,
             copy_on_select: true,
             copy_as_html: false,
             right_click: RightClick::Clipboard,
+            link_modifier: LinkModifier::None,
             paste_on_middle_click: false,
             bracketed_paste: true,
             trim_whitespace_on_paste: true,
+            paste_newlines_as_spaces: false,
             warn_on_multiline_paste: true,
             sudo_passwords: true,
             bell: Bell::Visual,
+            bell_attention: true,
             draw_bold_text_in_bright_colors: true,
             word_separator: " ()[]{}'\"".into(),
             scroll_on_input: true,
@@ -165,6 +183,7 @@ impl Default for Terminal {
             identification: Identification::Aster,
             search_options: SearchOptions::default(),
             recover_tabs: true,
+            open_on_start: true,
             confirm_close: true,
             focus_follows_mouse: false,
             recent_profiles: 3,
@@ -319,7 +338,12 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Config, String> {
-        toml::from_str(text).map_err(|e| e.to_string())
+        toml::from_str(text).map_err(|e| {
+            let Some(prefix) = e.span().and_then(|span| text.get(..span.start)) else { return e.message().to_owned() };
+            let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+            let column = prefix.rsplit('\n').next().unwrap_or_default().chars().count() + 1;
+            crate::i18n::tf("Line {line}, column {column}: {error}", &[("line", &line.to_string()), ("column", &column.to_string()), ("error", e.message())])
+        })
     }
 
     pub fn to_text(&self) -> String {

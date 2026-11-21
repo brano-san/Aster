@@ -31,6 +31,10 @@ impl Platform for Linux {
         Ok(LinuxText::new())
     }
 
+    fn font_families(monospace: bool) -> Vec<String> {
+        fonts::fonts().wait().fc.as_ref().map(|fc| fc.families(monospace)).unwrap_or_default()
+    }
+
     fn shells() -> Vec<Profile> {
         shells::detect()
     }

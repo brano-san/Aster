@@ -47,3 +47,27 @@ fn unreadable_config_is_preserved_after_failed_writes() {
     assert!(save_settings(&path, &mut Config::default(), "").is_err());
     assert_eq!(fs::read(&path).unwrap(), b"[invalid");
 }
+
+#[test]
+fn disk_diagnostics_include_location_without_echoing_the_config_line() {
+    let dir = ConfigDir::new("diagnostic");
+    let path = dir.file();
+    fs::write(&path, "[terminal]\nfont-size = ] # private value\n").unwrap();
+    let message = load(&path).unwrap_err().to_string();
+    assert!(message.contains("Line 2, column 13"), "{message}");
+    assert!(!message.contains("private value"));
+}
+
+#[test]
+fn showing_defaults_refreshes_a_separate_file_and_preserves_the_active_config() {
+    let dir = ConfigDir::new("defaults");
+    let path = dir.file();
+    let original = "[terminal]\nfont-size = 23";
+    fs::write(&path, original).unwrap();
+    let defaults = dir.0.join("defaults.toml");
+    fs::write(&defaults, "old").unwrap();
+    assert_eq!(write_defaults(&dir.0).unwrap(), defaults);
+    assert_eq!(fs::read_to_string(&defaults).unwrap(), Config::default().to_text());
+    assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    fs::remove_file(defaults).unwrap();
+}

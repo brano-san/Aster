@@ -85,6 +85,29 @@ fn baseline<B: TextBackend>(g: &mut Gfx<B>, r: Rect, style: FontStyle) -> f32 {
     (r.y + (r.h + m.ascent - m.descent) / 2.0).round()
 }
 
+fn wrapped_info<B: TextBackend>(g: &mut Gfx<B>, text: &str, style: FontStyle, width: f32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for mut line in text.lines() {
+        while !line.is_empty() && g.measure(line, style) > width {
+            let mut end = g.hit(line, style, width);
+            if end > 0 && g.measure(&line[..end], style) > width {
+                end = line[..end].char_indices().next_back().map_or(0, |(at, _)| at);
+            }
+            if end == 0 {
+                end = line.chars().next().map_or(0, char::len_utf8);
+            }
+            let head = &line[..end];
+            let split = head.rfind([' ', '/', '\\']).map_or(end, |at| at + 1);
+            lines.push(line[..split].to_owned());
+            line = &line[split..];
+        }
+        if !line.is_empty() {
+            lines.push(line.to_owned());
+        }
+    }
+    lines
+}
+
 fn centered<B: TextBackend>(g: &mut Gfx<B>, r: Rect, text: &str, style: FontStyle, c: Color) {
     let w = g.measure(text, style);
     let y = baseline(g, r, style);
@@ -1120,18 +1143,49 @@ impl App {
         };
     }
 
-    fn draw_settings<B: TextBackend>(&self, g: &mut Gfx<B>) {
+    fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
-        let Some(geo) = self.settings_geometry() else { return };
-        let Some(page) = self.settings.as_ref() else { return };
         let s = self.ui();
+        let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let (_, _, width) = crate::settings::column_widths(self.chrome.content, s);
+        let Some(page) = self.settings.as_ref() else { return };
+        let info_rows = page.shown.iter().filter_map(|&index| {
+            let setting = SETTINGS.get(index).filter(|setting| matches!(setting.control, Control::ReadOnly(_)))?;
+            Some((index, wrapped_info(g, &self.setting_text(setting), small, (width - 28.0 * s).max(1.0))))
+        }).collect();
+        let Some(page) = self.settings.as_mut() else { return };
+        page.info_rows = info_rows;
+        page.shortcut_rows.clear();
+        for (n, &index) in page.shown.iter().enumerate() {
+            if let Some(action) = crate::settings::shortcut(index) {
+                let mut bindings: Vec<_> = self.keymap.bindings_of(action).map(crate::keymap::format_binding).collect();
+                if page.capture.is_some_and(|(a, _)| a == action) {
+                    bindings = vec![t("Press the new shortcut").to_owned()];
+                } else if bindings.is_empty() {
+                    bindings.push(t("None").to_owned());
+                }
+                let hint = if n == page.selected {
+                    page.notice.clone().unwrap_or_else(|| t("Enter replace  ·  Insert add  ·  Del clear  ·  Shift+Del restore defaults").to_owned())
+                } else {
+                    action.id()
+                };
+                let layout = crate::settings::ShortcutLayout::new(width, s, bindings, &hint, |text| g.measure(text, small));
+                page.shortcut_rows.insert(index, layout);
+            }
+            if let Some(Control::Segments(options)) = SETTINGS.get(index).map(|setting| setting.control) {
+                for &(_, label) in options {
+                    page.segment_widths.insert(label, (g.measure(t(label), ui) + 16.0 * s).ceil());
+                }
+            }
+        }
+        let Some(geo) = self.settings_geometry() else { return };
+        let page = self.settings.as_ref().unwrap();
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let (mx, my) = self.mouse;
         g.dl.rect(geo.page, theme.surface);
         let title = FontStyle::new(FontFamily::Ui, (20.0 * s).round(), true);
-        let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
-        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
         let section = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), true);
         let ty = baseline(g, geo.title, title);
         g.text(geo.title.x, ty, t("Settings"), title, theme.text, geo.title.w);
@@ -1156,18 +1210,13 @@ impl App {
             let current = !page.searching() && page.page == k;
             if current {
                 g.dl.round_rect(*r, theme.accent.alpha(0x30), radius);
-                g.dl.round_rect(Rect::new(r.x, r.y + (8.0 * s).round(), (3.0 * s).round(), r.h - (16.0 * s).round()), theme.accent, (1.5 * s).round());
+                g.dl.round_rect(Rect::new(r.x, r.y + (8.0 * s).round(), (3.0 * s).round(), (r.h - (16.0 * s).round()).max(line)), theme.accent, (1.5 * s).round());
             } else if r.contains(mx, my) {
                 g.dl.round_rect(*r, theme.button_hover, radius);
             }
             let inner = r.inset((14.0 * s).round(), 0.0);
             let y = baseline(g, inner, ui);
             g.text(inner.x, y, t(crate::settings::PAGES[k]), ui, if current { theme.text } else { theme.text_dim }, inner.w);
-        }
-        if let Some(last) = geo.pages.last() {
-            let r = Rect::new(last.x, last.bottom() + (18.0 * s).round(), last.w, (24.0 * s).round()).inset((14.0 * s).round(), 0.0);
-            let y = baseline(g, r, small);
-            g.text(r.x, y, &format!("Aster {}", env!("CARGO_PKG_VERSION")), small, theme.text_dim, r.w);
         }
         if page.shown.is_empty() {
             centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), t("No settings match"), ui, theme.text_dim);
@@ -1181,9 +1230,13 @@ impl App {
             }
             match row.kind {
                 RowKind::Section(name) => {
-                    let r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), row.rect.w, row.rect.h - (10.0 * s).round());
+                    let r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), row.rect.w, (28.0 * s).round());
                     let y = baseline(g, r, section);
                     g.text(r.x, y, t(name), section, theme.accent, r.w);
+                    if name == crate::settings::SYSTEM && !page.searching() {
+                        let version = tf("Aster {version}", &[("version", env!("CARGO_PKG_VERSION"))]);
+                        g.text(r.x, y + (20.0 * s).round(), &version, ui, theme.text, r.w);
+                    }
                 }
                 RowKind::Item(n) => {
                     let selected = n == page.selected;
@@ -1195,22 +1248,24 @@ impl App {
                     }
                     if let Some(action) = crate::settings::shortcut(page.shown[n]) {
                         let tx = row.rect.x + (14.0 * s).round();
-                        let tw = (row.control.x - tx - 16.0 * s).max(0.0);
-                        let capturing = page.capture == Some(action);
-                        g.text(tx, row.rect.y + (25.0 * s).round(), &action.label(), ui, theme.text, tw);
-                        let hint = match (&page.notice, selected) {
-                            (Some(n), true) => n.clone(),
-                            (_, true) => t("Enter to change  ·  Del to clear  ·  Shift+Del for the default").to_owned(),
-                            _ => action.id(),
-                        };
-                        g.text(tx, row.rect.y + (43.0 * s).round(), &hint, small, if selected && page.notice.is_some() { theme.accent } else { theme.text_dim }, tw);
-                        let c = row.control;
-                        g.dl.round_rect(c, theme.overlay, radius);
-                        g.dl.outline(c, if capturing { theme.accent } else { theme.overlay_border }, radius, line);
-                        let inner = c.inset((10.0 * s).round(), 0.0);
-                        let y = baseline(g, inner, ui);
-                        let (text, ink) = if capturing { (t("Press the new shortcut").to_owned(), theme.text_dim) } else { (self.shortcut_text(action), theme.text) };
-                        g.text(inner.x, y, &text, ui, ink, inner.w);
+                        let layout = &page.shortcut_rows[&page.shown[n]];
+                        let capturing = page.capture.is_some_and(|(a, _)| a == action);
+                        g.text(tx, row.rect.y + (24.0 * s).round(), &action.label(), ui, theme.text, layout.label_width);
+                        for (lines, local) in &layout.chips {
+                            let c = Rect::new(row.rect.x + local.x, row.rect.y + local.y, local.w, local.h);
+                            g.dl.round_rect(c, theme.overlay, radius);
+                            g.dl.outline(c, if capturing { theme.accent } else { theme.overlay_border }, radius, line);
+                            for (k, text) in lines.iter().enumerate() {
+                                let line = Rect::new(c.x, c.y + (3.0 + 16.0 * k as f32) * s, c.w, 16.0 * s);
+                                centered(g, line, text, small, if capturing { theme.text_dim } else { theme.text });
+                            }
+                        }
+                        let ink = if selected && page.notice.is_some() { theme.accent } else { theme.text_dim };
+                        for (k, hint) in layout.hint_lines.iter().enumerate() {
+                            let r = Rect::new(tx, row.rect.y + layout.hint_top + k as f32 * 16.0 * s, row.rect.w - 28.0 * s, 16.0 * s);
+                            let y = baseline(g, r, small);
+                            g.text(r.x, y, hint, small, ink, r.w);
+                        }
                         continue;
                     }
                     let item = page.shown[n];
@@ -1309,12 +1364,39 @@ impl App {
                     }
                     let setting = &SETTINGS[page.shown[n]];
                     let tx = row.rect.x + (14.0 * s).round();
+                    if let Some(lines) = page.info_rows.get(&page.shown[n]) {
+                        let tw = (row.rect.w - 28.0 * s).max(1.0);
+                        g.text(tx, row.rect.y + (25.0 * s).round(), t(setting.label), ui, theme.text, tw);
+                        for (k, text) in lines.iter().enumerate() {
+                            g.text(tx, row.rect.y + (43.0 * s).round() + k as f32 * (16.0 * s).round(), text, small, theme.text_dim, tw);
+                        }
+                        continue;
+                    }
                     let tw = (row.control.x - tx - 16.0 * s).max(0.0);
                     g.text(tx, row.rect.y + (25.0 * s).round(), t(setting.label), ui, theme.text, tw);
-                    let notice = (selected && setting.key == "vault.remember-minutes").then(|| page.vault_notice()).flatten();
-                    g.text(tx, row.rect.y + (43.0 * s).round(), notice.unwrap_or_else(|| t(setting.hint)), small, if notice.is_some() { theme.accent } else { theme.text_dim }, tw);
+                    let notice = if selected && setting.key == "vault.remember-minutes" { page.vault_notice() } else if selected { page.notice.as_deref() } else { None };
+                    let hint = notice.unwrap_or_else(|| t(setting.hint));
+                    g.text(tx, row.rect.y + (43.0 * s).round(), hint, small, if notice.is_some() { theme.accent } else { theme.text_dim }, tw);
                     let c = row.control;
                     match setting.control {
+                        Control::ReadOnly(_) => {}
+                        Control::Segments(options) => {
+                            let value = crate::settings::get(&self.config, setting.key);
+                            let active = value.as_ref().and_then(|v| v.as_str());
+                            g.dl.round_rect(c, theme.overlay, radius);
+                            for (segment, &(key, label)) in page.segments(options, c, s).into_iter().zip(options) {
+                                let chosen = active == Some(key);
+                                if chosen || segment.contains(mx, my) {
+                                    g.dl.round_rect(segment, if chosen { theme.accent } else { theme.button_hover }, radius);
+                                }
+                                let inner = segment.inset(3.0 * s, 0.0);
+                                let text = t(label);
+                                let width = g.measure(text, ui).min(inner.w);
+                                let y = baseline(g, inner, ui);
+                                g.text(inner.x + ((inner.w - width) / 2.0).round(), y, text, ui, if chosen { theme.surface } else { theme.text }, inner.w);
+                            }
+                            g.dl.outline(c, theme.overlay_border, radius, line);
+                        }
                         Control::Toggle => {
                             let on = self.setting_on(setting);
                             g.dl.round_rect(c, if on { theme.accent } else { theme.overlay_border }, c.h / 2.0);
@@ -1328,10 +1410,10 @@ impl App {
                             centered(g, c, t("Open"), ui, theme.text);
                         }
                         control => {
-                            let editing = selected && page.editing() && matches!(control, Control::Text | Control::Number { .. });
+                            let editing = selected && page.editing() && matches!(control, Control::Text | Control::Font { .. } | Control::Number { .. });
                             g.dl.round_rect(c, theme.overlay, radius);
                             g.dl.outline(c, if editing { theme.accent } else { theme.overlay_border }, radius, line);
-                            let stepper = !matches!(control, Control::Text);
+                            let stepper = !matches!(control, Control::Text | Control::Font { .. });
                             let edge = if stepper { (30.0 * s).round() } else { (10.0 * s).round() };
                             let inner = Rect::new(c.x + edge, c.y, (c.w - 2.0 * edge).max(0.0), c.h);
                             if stepper {
@@ -1360,6 +1442,10 @@ impl App {
                             let text = if editing { page.edit_text() } else { self.setting_text(setting) };
                             let y = baseline(g, inner, ui);
                             if editing {
+                                if page.font_replace && !text.is_empty() {
+                                    let w = g.measure(&text, ui).min(inner.w);
+                                    g.dl.rect(Rect::new(inner.x, c.y + 4.0 * s, w, c.h - 8.0 * s), theme.selection);
+                                }
                                 let w = g.text(inner.x, y, &text, ui, theme.text, inner.w);
                                 g.dl.rect(Rect::new(inner.x + w + 1.0, c.y + ((c.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
                             } else if stepper {
@@ -1372,6 +1458,16 @@ impl App {
                     }
                 }
             }
+        }
+        for &(index, r) in &geo.suggestions {
+            g.dl.rect(r, theme.surface);
+            g.dl.rect(r, if index == page.font_index { theme.accent.alpha(0x42) } else if r.contains(mx, my) { theme.button_hover } else { theme.overlay });
+            let inner = r.inset(10.0 * s, 0.0);
+            let y = baseline(g, inner, ui);
+            g.text(inner.x, y, &page.font_matches[index], ui, theme.text, inner.w);
+        }
+        if let (Some((_, first)), Some((_, last))) = (geo.suggestions.first(), geo.suggestions.last()) {
+            g.dl.outline(Rect::new(first.x, first.y, first.w, last.bottom() - first.y), theme.overlay_border, 0.0, line);
         }
         g.dl.set_clip(None);
         if let Some(editor) = &page.editor {

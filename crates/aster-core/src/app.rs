@@ -1,4 +1,4 @@
-use crate::config::{Bell, Config, CursorStyle, RightClick, SchemeMode};
+use crate::config::{Bell, Config, CursorStyle, LinkModifier, RightClick, SchemeMode};
 use crate::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Preedit};
 use crate::keymap::{Action, Chord, Keymap, Outcome};
 use crate::keys::{encode_alt_char, encode_key, encode_mouse, paste_bytes, MouseAction};
@@ -94,6 +94,9 @@ pub enum Effect {
     ExportBuffer { pane: PaneId, text: String },
     RecentProfiles(Vec<String>),
     OpenConfigFile,
+    CheckConfigFile,
+    OpenConfigFolder,
+    ShowDefaultConfig,
     Title(String),
     Cursor(CursorIcon),
     Minimize,
@@ -162,7 +165,7 @@ impl Tab {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Drag {
     None,
-    Select { pane: PaneId },
+    Select { pane: PaneId, open_link: bool },
     Report { pane: PaneId, button: MouseButton },
     Splitter { path: Vec<bool>, axis: Axis, span: Rect },
     Tab { index: usize, start: f32, moved: bool },
@@ -215,6 +218,8 @@ pub struct App {
     pub(crate) hover_link: Option<HoverLink>,
     pub(crate) overlay: Option<Overlay>,
     pub(crate) settings: Option<crate::settings::SettingsPage>,
+    pub(crate) config_path: Option<String>,
+    pub(crate) config_status: Option<Result<(), String>>,
     pub(crate) vault: crate::settings::VaultView,
     pub(crate) vault_input_id: u64,
     pub(crate) menu: Option<crate::menu::Menu>,
@@ -246,6 +251,8 @@ pub struct App {
     pub(crate) tab_bar_override: Option<bool>,
     fullscreen: bool,
     pub(crate) tab_toast: Option<(String, Instant)>,
+    pub(crate) monospace_fonts: Vec<String>,
+    pub(crate) all_fonts: Vec<String>,
     pub(crate) settings_stash: Option<crate::settings::SettingsPage>,
     pub(crate) shown_progress: Option<Progress>,
     swallow_control: bool,
@@ -306,6 +313,8 @@ impl App {
             hover_link: None,
             overlay: None,
             settings: None,
+            config_path: None,
+            config_status: None,
             menu: None,
             rename: None,
             paste_confirm: None,
@@ -335,6 +344,8 @@ impl App {
             tab_bar_override: None,
             fullscreen: false,
             tab_toast: None,
+            monospace_fonts: Vec::new(),
+            all_fonts: Vec::new(),
             settings_stash: None,
             shown_progress: None,
             swallow_control: false,
@@ -1033,6 +1044,11 @@ impl App {
         if text.is_empty() {
             return;
         }
+        let text = if self.config.terminal.paste_newlines_as_spaces && text.contains(['\r', '\n']) {
+            text.replace("\r\n", " ").replace(['\r', '\n'], " ")
+        } else {
+            text
+        };
         if let Some(o) = self.overlay.as_mut() {
             o.insert(&text.replace(['\r', '\n'], " "));
             self.dirty = true;
@@ -1084,7 +1100,7 @@ impl App {
         if kind == Bell::Off {
             return;
         }
-        if !self.focused {
+        if !self.focused && self.config.terminal.bell_attention {
             self.effects.push(Effect::Attention);
         }
         let now = Instant::now();
@@ -1212,6 +1228,10 @@ impl App {
             NotifyCommand => self.toggle_command_watch(),
             OpenLog => self.effects.push(Effect::OpenLog),
             OpenConfigFile => self.effects.push(Effect::OpenConfigFile),
+            OpenConfigFolder => self.effects.push(Effect::OpenConfigFolder),
+            ShowDefaultConfig => self.effects.push(Effect::ShowDefaultConfig),
+            WhatsNew => self.effects.push(Effect::Open(concat!("https://github.com/brano-san/Aster/releases/tag/v", env!("CARGO_PKG_VERSION")).into())),
+            CheckForUpdates => self.effects.push(Effect::Open("https://github.com/brano-san/Aster/releases/latest".into())),
             ToggleTabBar => {
                 if !self.fullscreen || self.config.appearance.tabs_in_fullscreen {
                     self.tab_bar_override = Some(!self.tab_bar_hidden());
@@ -1545,8 +1565,7 @@ impl App {
         }
         let on = self.tabs.get(self.active).is_some_and(|t| t.focus == SETTINGS_PANE);
         if on && self.settings.is_none() {
-            let page = self.settings_stash.take().unwrap_or_else(|| self.fresh_settings_page());
-            self.settings = Some(page);
+            self.restore_settings_page();
             self.dirty = true;
         } else if !on && self.settings.is_some() {
             if let Some(page) = self.settings.as_mut() {
@@ -1782,11 +1801,16 @@ impl App {
                 return self.offer_key(pane, key, mods);
             }
         }
-        if self.settings.is_some() {
-            if self.settings.as_ref().is_some_and(|p| p.capture.is_some()) {
+        if let Some(page) = self.settings.as_ref() {
+            if page.capture.is_some() {
+                self.swallow_char = true;
                 return self.settings_key(key, mods);
             }
-            let editing = self.settings.as_ref().is_some_and(|p| p.editing() || p.editor.is_some());
+            let editing = page.editing() || page.editor.is_some();
+            if !editing && page.current_shortcut().is_some() && crate::settings::shortcut_edit_key(key, mods) {
+                self.keymap.reset();
+                return self.settings_key(key, mods);
+            }
             match self.keymap.press(Chord { key, mods }) {
                 Outcome::Action(Action::Settings) => return self.close_settings(),
                 Outcome::Action(a) if !editing && a.works_beside_settings() => {
@@ -1889,7 +1913,7 @@ impl App {
         if self.cancel_focused_reconnect() {
             return;
         }
-        let bytes = if alt {
+        let bytes = if alt && self.config.terminal.alt_is_meta {
             encode_alt_char(c)
         } else {
             let mut buf = [0u8; 4];
@@ -1953,7 +1977,7 @@ impl App {
             self.dirty = true;
         }
         match self.drag.clone() {
-            Drag::Select { pane } => {
+            Drag::Select { pane, .. } => {
                 if let Some(rect) = self.layout.panes.iter().find(|(id, _)| *id == pane).map(|(_, r)| *r) {
                     let (line, col, side) = self.cell_at(pane, rect, x, y);
                     if let Some(p) = self.panes.get(&pane) {
@@ -2202,7 +2226,15 @@ impl App {
                         }
                     }
                 }
-                self.drag = Drag::Select { pane };
+                let open_link = match self.config.terminal.link_modifier {
+                    LinkModifier::None => true,
+                    LinkModifier::Ctrl => held.ctrl,
+                    LinkModifier::Shift => held.shift,
+                };
+                if open_link {
+                    self.hover_link = self.link_at(x, y);
+                }
+                self.drag = Drag::Select { pane, open_link };
             }
             MouseButton::Right => match self.config.terminal.right_click {
                 RightClick::Menu => self.open_terminal_menu(x, y),
@@ -2225,12 +2257,14 @@ impl App {
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.dirty = true;
         match drag {
-            Drag::Select { pane } => {
+            Drag::Select { pane, open_link } => {
                 let has = self.panes.get(&pane).is_some_and(|p| p.terminal.lock().has_selection());
                 if !has {
                     self.clear_selection(pane);
-                    if let Some(link) = self.link_at(x, y).filter(|l| self.hover_link.as_ref() == Some(l)) {
-                        self.effects.push(Effect::Open(open_target(&link.target)));
+                    if open_link && button == MouseButton::Left {
+                        if let Some(link) = self.link_at(x, y).filter(|l| self.hover_link.as_ref() == Some(l)) {
+                            self.effects.push(Effect::Open(open_target(&link.target)));
+                        }
                     }
                 } else if self.config.terminal.copy_on_select {
                     self.copy();

@@ -82,6 +82,10 @@ pub enum Action {
     NotifyCommand,
     OpenLog,
     OpenConfigFile,
+    OpenConfigFolder,
+    ShowDefaultConfig,
+    WhatsNew,
+    CheckForUpdates,
     ToggleTabBar,
 }
 
@@ -163,6 +167,10 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::NotifyCommand, "notify-command", "Notify when the command finishes"),
     (Action::OpenLog, "open-log", "Open the log folder"),
     (Action::OpenConfigFile, "open-config-file", "Open the config file in an editor"),
+    (Action::OpenConfigFolder, "open-config-folder", "Open the config folder"),
+    (Action::ShowDefaultConfig, "show-default-config", "Show the defaults"),
+    (Action::WhatsNew, "whats-new", "What's new"),
+    (Action::CheckForUpdates, "check-for-updates", "Check for updates"),
     (Action::ToggleTabBar, "toggle-tab-bar", "Show or hide the tab bar"),
 ];
 

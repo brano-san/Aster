@@ -1,6 +1,12 @@
 use super::*;
 
 #[test]
+fn capture_recognizes_shortcut_editing_keys() {
+    assert!(matches!(capture_key("Insert"), Event::Key { key: Key::Insert, mods: Mods::NONE, pressed: true }));
+    assert!(matches!(capture_key("Shift+Delete"), Event::Key { key: Key::Delete, mods: Mods { shift: true, .. }, pressed: true }));
+}
+
+#[test]
 fn clipboard_html_offsets_delimit_utf8_document_and_fragment() {
     let fragment = "<pre>界🙂&amp;</pre>";
     let data = clipboard_html(fragment);

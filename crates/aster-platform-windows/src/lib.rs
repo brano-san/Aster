@@ -65,6 +65,13 @@ impl Platform for Windows {
         DWriteText::new()
     }
 
+    fn font_families(monospace: bool) -> Vec<String> {
+        dwrite::font_families(monospace).unwrap_or_else(|e| {
+            tracing::warn!("system font collection: {e}");
+            Vec::new()
+        })
+    }
+
     fn shells() -> Vec<Profile> {
         shells::detect()
     }

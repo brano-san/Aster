@@ -35,6 +35,29 @@ fn spawns(effects: &[Effect]) -> Vec<(PaneId, Launch)> {
     effects.iter().filter_map(|e| if let Effect::Spawn { pane, launch, .. } = e { Some((*pane, launch.clone())) } else { None }).collect()
 }
 
+#[test]
+fn the_config_page_wraps_full_paths_and_errors_in_a_narrow_window() {
+    let (mut a, mut gfx) = app();
+    a.set_viewport(350, 640, 1.0);
+    let path = format!("data/{}/config.toml", "файлы/".repeat(16));
+    let error = format!("Line 3, column 9: {}", "unexpected key ".repeat(7));
+    a.set_config_path(Some(path.clone()));
+    a.set_config_status(Some(error.clone()));
+    a.run(Action::Settings);
+    a.on_event(Event::Key { key: Key::PageUp, mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true });
+    a.frame(&mut gfx, false);
+    let page = a.settings.as_ref().unwrap();
+    let geo = a.settings_geometry().unwrap();
+    for (n, expected) in [(0, path), (3, error)] {
+        let lines = &page.info_rows[&page.shown[n]];
+        assert!(lines.len() > 1);
+        assert_eq!(lines.concat(), expected);
+        let row = geo.rows.iter().find(|r| r.kind == crate::settings::RowKind::Item(n)).unwrap();
+        assert!(lines.iter().all(|line| line.chars().count() as f32 * 8.0 <= row.rect.w - 28.0));
+        assert!(row.rect.h >= 58.0 + (lines.len() - 1) as f32 * 16.0);
+    }
+}
+
 fn take_command_probe(a: &mut App) -> (u64, Vec<u32>) {
     a.take_effects().into_iter().find_map(|e| match e {
         Effect::ProbeCommand { request, pids } => Some((request, pids)),
@@ -202,6 +225,20 @@ fn density_scales_the_tab_bar_without_changing_terminal_cell_metrics() {
 
 fn writes(effects: &[Effect]) -> Vec<Vec<u8>> {
     effects.iter().filter_map(|e| if let Effect::Write { bytes, .. } = e { Some(bytes.clone()) } else { None }).collect()
+}
+
+#[test]
+fn alt_letters_use_the_configured_meta_prefix() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let mods = Mods { alt: true, ..Mods::NONE };
+    for (enabled, expected) in [(true, "\x1bж"), (false, "ж")] {
+        a.set_config(Config::parse(&format!("[terminal]\nalt-is-meta = {enabled}")).unwrap());
+        key(&mut a, Key::Char('J'), mods);
+        a.on_event(Event::AltChar('ж'));
+        assert_eq!(writes(&a.take_effects()), [expected.as_bytes()]);
+    }
 }
 
 const CTRL_SHIFT: Mods = Mods { ctrl: true, shift: true, alt: false, meta: false };
@@ -730,6 +767,29 @@ fn hovering_a_link_underlines_it_and_a_plain_click_opens_it() {
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Open(t) if t == "https://aster.dev/x")));
     assert_eq!(open_target("C:/src/main.rs:12:5"), "C:/src/main.rs");
     assert_eq!(open_target("https://a.b:8080"), "https://a.b:8080");
+}
+
+#[test]
+fn links_use_the_configured_modifier_at_mouse_down() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.focused_terminal().unwrap().lock().feed(b"see https://aster.dev/x ok");
+    let ctrl = Mods { ctrl: true, ..Mods::NONE };
+    let shift = Mods { shift: true, ..Mods::NONE };
+    for (setting, required, wrong) in [("ctrl", ctrl, shift), ("shift", shift, ctrl)] {
+        a.set_config(Config::parse(&format!("[terminal]\nlink-modifier = '{setting}'")).unwrap());
+        a.frame(&mut g, false);
+        let inner = view::pane_inner(a.layout.panes[0].1, 1.0);
+        let (x, y) = (inner.x + 8.0 * 6.5, inner.y + 8.0);
+        for (down, up, opens) in [(Mods::NONE, required, false), (wrong, wrong, false), (required, Mods::NONE, true)] {
+            a.on_event(Event::Modifiers(down));
+            a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+            a.on_event(Event::Modifiers(up));
+            a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+            assert_eq!(a.take_effects().iter().any(|e| matches!(e, Effect::Open(t) if t == "https://aster.dev/x")), opens);
+        }
+    }
 }
 
 #[test]

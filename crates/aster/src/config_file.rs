@@ -1,10 +1,25 @@
 use aster_core::config::Config;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub fn load(path: &Path) -> io::Result<Config> {
+    Config::parse(&fs::read_to_string(path)?).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
 
 pub fn read(path: &Path) -> io::Result<Config> {
-    Config::parse(&fs::read_to_string(path)?).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid configuration"))
+    load(path).map_err(|e| if e.kind() == io::ErrorKind::InvalidData {
+        io::Error::new(io::ErrorKind::InvalidData, "invalid configuration")
+    } else { e })
+}
+
+pub fn write_defaults(dir: &Path) -> io::Result<PathBuf> {
+    let path = dir.join("defaults.toml");
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "defaults.toml is a symbolic link"));
+    }
+    write(&path, &Config::default())?;
+    Ok(path)
 }
 
 fn write(path: &Path, config: &Config) -> io::Result<()> {

@@ -480,7 +480,7 @@ impl TextBackend for LinuxText {
     }
 
     fn families(&mut self) -> Vec<String> {
-        fonts::fonts().wait().fc.as_ref().map(|fc| fc.families()).unwrap_or_default()
+        fonts::fonts().wait().fc.as_ref().map(|fc| fc.families(false)).unwrap_or_default()
     }
 
     fn set_font_waker(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {

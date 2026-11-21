@@ -192,6 +192,7 @@ pub trait Platform: 'static {
     type Renderer: Renderer<Window = <Self::Windows as WindowSystem>::Window>;
     type Text: TextBackend;
     fn text() -> Result<Self::Text, PlatformError>;
+    fn font_families(monospace: bool) -> Vec<String>;
     fn shells() -> Vec<Profile>;
     fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError>;
     fn config_dir() -> Option<PathBuf>;
