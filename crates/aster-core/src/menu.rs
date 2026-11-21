@@ -120,7 +120,7 @@ impl App {
         let n = self.tabs.len();
         let left = self.tabs[..index].iter().any(|t| !t.pinned);
         let right = self.tabs[index + 1..].iter().any(|t| !t.pinned);
-        let entries = vec![
+        let mut entries = vec![
             item("New tab", Action::NewTab, true),
             item("Duplicate", Action::DuplicateTab, true),
             item("Duplicate as administrator", Action::DuplicateAsAdmin, self.can_elevate() && self.focused_pane().and_then(|p| self.panes.get(&p)).is_some_and(|p| p.profile.is_local())),
@@ -128,6 +128,14 @@ impl App {
             item(if self.tabs[index].pinned { "Unpin tab" } else { "Pin tab" }, Action::PinTab, true),
             item("Color", Action::SetTabColor, true),
             item(if self.tabs[index].command_watch.armed() { "Cancel command notification" } else { "Notify when the command finishes" }, Action::NotifyCommand, self.can_watch_command(index)),
+        ];
+        if self.focused_pane().is_some_and(|id| self.panes.contains_key(&id)) {
+            entries.push(item("Save as a profile", Action::SaveAsProfile, true));
+            if self.can_save_layout() {
+                entries.push(item("Save the layout as a profile", Action::SaveLayout, true));
+            }
+        }
+        entries.extend([
             Entry::Separator,
             item("Move left", Action::MoveTabLeft, index > 0 && self.can_move_tab(index, index - 1)),
             item("Move right", Action::MoveTabRight, self.can_move_tab(index, index + 1)),
@@ -139,7 +147,7 @@ impl App {
             item("Close tabs to the right", Action::CloseTabsToRight, right),
             item("Close tabs to the left", Action::CloseTabsToLeft, left),
             item("Reopen closed tab", Action::ReopenTab, !self.closed_tabs.is_empty()),
-        ];
+        ]);
         self.open_menu(entries, x, y);
     }
 

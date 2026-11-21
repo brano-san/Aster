@@ -4,7 +4,7 @@ use crate::keymap::{Action, Chord, Keymap, Outcome};
 use crate::keys::{encode_alt_char, encode_key, encode_mouse, paste_bytes, MouseAction};
 use crate::overlay::{Overlay, OverlayKind, Pick};
 use crate::panes::{neighbor, Axis, Layout, Node, PaneId, Side};
-use crate::profile::Profile;
+use crate::profile::{ExitDecision, OnExit, Profile};
 use crate::theme::Theme;
 use crate::view::{self, Chrome};
 use aster_gfx::render::Rect;
@@ -23,6 +23,7 @@ pub type ChildrenProbe = Arc<dyn Fn(u32) -> Vec<String> + Send + Sync>;
 
 pub const BLINK: Duration = Duration::from_millis(530);
 const BELL_FLASH: Duration = Duration::from_millis(150);
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const CLOSED_TABS: usize = 10;
 const PANE_STEP: f32 = 0.1;
 pub(crate) const SETTINGS_PANE: PaneId = PaneId::MAX;
@@ -77,7 +78,7 @@ pub enum PaneTransfer {
 }
 
 pub enum Effect {
-    Spawn { pane: PaneId, launch: Launch, terminal: Shared },
+    Spawn { pane: PaneId, launch: Launch, terminal: Shared, reconnecting: bool },
     SerialControl { pane: PaneId, control: SerialControl },
     Write { pane: PaneId, bytes: Vec<u8> },
     Resize { pane: PaneId, cols: u16, rows: u16 },
@@ -124,10 +125,14 @@ pub enum Effect {
 
 pub(crate) struct Pane {
     pub terminal: Shared,
+    pub source_profile: Profile,
     pub profile: Profile,
     pub title: Option<String>,
     pub exited: Option<Option<u32>>,
     pub pending: Option<Launch>,
+    pub retry_launch: Option<Box<Launch>>,
+    reconnect_at: Option<Instant>,
+    generation: u64,
     pub queued: Vec<u8>,
     pub pid: Option<u32>,
     pub size: Size,
@@ -194,8 +199,8 @@ pub struct App {
     system_dark: bool,
     pub(crate) effects: Vec<Effect>,
     pub(crate) dirty: bool,
-    events: Receiver<(PaneId, VtEvent)>,
-    sender: Sender<(PaneId, VtEvent)>,
+    events: Receiver<(PaneId, u64, VtEvent)>,
+    sender: Sender<(PaneId, u64, VtEvent)>,
     wake: Wake,
     home: Option<String>,
     ssh: Option<String>,
@@ -229,7 +234,7 @@ pub struct App {
     backdrop: bool,
     pub(crate) search: Option<crate::search::SearchBar>,
     swallow_char: bool,
-    swallow_chord: Option<Key>,
+    pub(crate) swallow_chord: Option<Key>,
     mouse_mods: Mods,
     pub(crate) closed_tabs: Vec<crate::session::TabState>,
     last_tab: Option<PaneId>,
@@ -463,7 +468,7 @@ impl App {
         if let Some(dir) = pane.terminal.lock().cwd() {
             return Some(dir.to_owned());
         }
-        let remote = !pane.profile.is_local() || pane.profile.id.starts_with("ssh:") || pane.profile.id.starts_with("local:wsl");
+        let remote = !pane.profile.is_local() || pane.profile.id.starts_with("ssh:") || pane.profile.is_wsl();
         if remote {
             return None;
         }
@@ -591,6 +596,12 @@ impl App {
     pub fn set_config(&mut self, config: Config) {
         let mut profiles = self.detected.clone();
         profiles.extend(config.profiles.iter().cloned());
+        if let Some(page) = self.settings.as_mut().or(self.settings_stash.as_mut()) {
+            let hidden: std::collections::HashSet<_> = profiles.iter().filter(|p| config.profile_hidden(p)).map(|p| p.id.as_str()).collect();
+            for row in &mut page.profiles {
+                row.hidden = hidden.contains(row.id.as_str());
+            }
+        }
         self.profiles = profiles;
         self.keymap = Keymap::with_mru(&config.hotkeys, config.appearance.mru_tabs);
         self.mru.cancel();
@@ -651,18 +662,14 @@ impl App {
         self.pane_cwd(id)
     }
 
-    pub(crate) fn new_pane_in(&mut self, profile: Profile, inherited: Option<String>) -> PaneId {
+    pub(crate) fn new_pane_in(&mut self, source_profile: Profile, inherited: Option<String>) -> PaneId {
+        let profile = crate::profile::effective(&source_profile, &self.config);
         let native_ssh = profile.ssh.is_some() && self.config.ssh.client == crate::config::SshClient::Native;
         let inherited = inherited.filter(|_| !native_ssh || profile.ssh_options.as_ref().and_then(|o| o.remember_cwd) == Some(true));
         let id = self.next_id;
         self.next_id += 1;
-        let sender = self.sender.clone();
-        let wake = self.wake.clone();
-        let sink: Sink = Arc::new(move |e| {
-            let _ = sender.send((id, e));
-            wake();
-        });
         let size = Size::new(80, 24);
+        let sink = Self::terminal_sink(self.sender.clone(), self.wake.clone(), id, 0);
         let terminal = Arc::new(FairMutex::new(Terminal::new(size, self.options(), sink)));
         let mut env = self.config.terminal.environment.clone();
         env.extend(profile.env.clone());
@@ -677,18 +684,28 @@ impl App {
             terminal.lock().set_cwd(inherited.clone());
         }
         let (args, cwd) = if native_ssh {
-            (profile.args.clone(), inherited)
+            (profile.args.clone(), inherited.or_else(|| profile.cwd.clone()))
+        } else if let Some(args) = crate::ssh::system_shell_in_profile_folder(&profile) {
+            (args, self.home.clone())
         } else {
             inherit_cwd(&profile, inherited, self.home.clone())
         };
         let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
-        self.panes.insert(id, Pane { terminal, profile, title: None, exited: None, pending: Some(launch), queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0 });
+        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, exited: None, pending: Some(launch), retry_launch: None, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0 });
         id
     }
 
+    fn terminal_sink(sender: Sender<(PaneId, u64, VtEvent)>, wake: Wake, id: PaneId, generation: u64) -> Sink {
+        Arc::new(move |event| {
+            let _ = sender.send((id, generation, event));
+            wake();
+        })
+    }
+
     pub fn open_tab(&mut self, profile: Profile) {
-        let inherited = self.inherited_cwd(&profile);
-        self.open_tab_at(profile, inherited);
+        let effective = crate::profile::effective(&profile, &self.config);
+        let inherited = if effective.cwd.is_some() { None } else { self.inherited_cwd(&effective) };
+        self.insert_profile_tab(profile, inherited);
     }
 
     pub(crate) fn focused_pane(&self) -> Option<PaneId> {
@@ -697,6 +714,10 @@ impl App {
 
     pub(crate) fn serial_pane(&self) -> Option<PaneId> {
         self.focused_pane().filter(|id| self.panes.get(id).is_some_and(|p| p.profile.serial.is_some() && p.pending.is_none() && p.exited.is_none()))
+    }
+
+    pub fn pane_exit_policy(&self, pane: PaneId) -> Option<OnExit> {
+        self.panes.get(&pane).map(|p| p.profile.on_exit)
     }
 
     pub(crate) fn prompt_pending_serial(&mut self) {
@@ -726,7 +747,7 @@ impl App {
 
     fn split(&mut self, side: Side) {
         let Some(focus) = self.focused_pane().filter(|p| *p != SETTINGS_PANE) else { return };
-        let profile = self.panes.get(&focus).map(|p| p.profile.clone()).or_else(|| self.default_profile());
+        let profile = self.panes.get(&focus).map(|p| p.source_profile.clone()).or_else(|| self.default_profile());
         if let Some(profile) = profile {
             self.split_with(side, profile);
         }
@@ -734,11 +755,14 @@ impl App {
 
     fn split_with(&mut self, side: Side, profile: Profile) {
         let Some(focus) = self.focused_pane().filter(|p| *p != SETTINGS_PANE) else { return self.open_tab(profile) };
-        let cwd = self.inherited_cwd(&profile);
-        let id = self.new_pane_in(profile, cwd);
+        let effective = crate::profile::effective(&profile, &self.config);
+        let same_profile = self.panes.get(&focus).is_some_and(|p| p.profile.id == profile.id);
+        let cwd = if same_profile || effective.cwd.is_none() { self.inherited_cwd(&effective) } else { None };
+        let Some(root) = self.profile_tree(profile, cwd) else { return };
+        let id = root.panes()[0];
         let tab = &mut self.tabs[self.active];
         tab.zoomed = None;
-        tab.root.split(focus, side, id);
+        tab.root.split_tree(focus, side, root);
         tab.focus = id;
         self.prompt_pending_serial();
         self.dirty = true;
@@ -944,6 +968,9 @@ impl App {
 
     fn write(&mut self, pane: PaneId, bytes: Vec<u8>) {
         let Some(p) = self.panes.get_mut(&pane) else { return };
+        if p.reconnect_at.is_some() {
+            return;
+        }
         if p.exited.is_some() {
             self.close_pane(pane);
             return;
@@ -1194,6 +1221,8 @@ impl App {
             Settings => self.open_settings(),
             RenameTab => self.start_rename(self.active),
             PinTab => self.toggle_pin(),
+            SaveAsProfile => self.save_as_profile(false),
+            SaveLayout => self.save_as_profile(true),
             OpenFiles => self.open_files(),
             FillPassword => {
                 self.fill_password();
@@ -1206,7 +1235,7 @@ impl App {
             NewWindow => self.effects.push(Effect::NewWindow),
             CloseTab => self.close_tab_asking(self.active),
             DuplicateTab => {
-                if let Some(p) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.profile.clone()) {
+                if let Some(p) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.source_profile.clone()) {
                     self.open_tab(p);
                 }
             }
@@ -1216,7 +1245,7 @@ impl App {
                 }
             }
             DuplicateAsAdmin => {
-                if let Some(p) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.profile.clone()) {
+                if let Some(p) = self.focused_pane().and_then(|p| self.panes.get(&p)).map(|p| p.source_profile.clone()) {
                     self.open_admin_tab(p);
                 }
             }
@@ -1311,13 +1340,16 @@ impl App {
         self.dirty = true;
     }
 
-    fn open_overlay(&mut self, kind: OverlayKind) {
+    pub(crate) fn open_overlay(&mut self, kind: OverlayKind) {
         let items = match kind {
             OverlayKind::Commands => Action::all()
                 .filter(|a| !matches!(a, Action::SerialSpeed | Action::SerialBreak) || self.serial_pane().is_some())
+                .filter(|a| *a != Action::SaveLayout || self.can_save_layout())
+                .filter(|a| *a != Action::SaveAsProfile || self.focused_pane().is_some_and(|id| self.panes.contains_key(&id)))
                 .map(|a| Pick { label: a.label(), hint: self.keymap.bindings_of(a).next().map(crate::keymap::format_binding).unwrap_or_default(), value: a.id(), ..Pick::default() })
                 .collect(),
             OverlayKind::Profiles => self.profile_picks(),
+            OverlayKind::ProfileTemplates => crate::settings::profile_templates(),
             OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), value: n, ..Pick::default() }).collect(),
             OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string(), ..Pick::default() }).collect(),
             OverlayKind::SerialSpeed(pane) => {
@@ -1345,6 +1377,7 @@ impl App {
         self.overlay = None;
         self.dirty = true;
         match kind {
+            OverlayKind::ProfileTemplates => self.edit_profile_template(&value),
             OverlayKind::SerialSpeed(pane) => {
                 let Ok(baud) = value.parse() else { return };
                 if let Some(launch) = self.panes.get_mut(&pane).and_then(|p| p.pending.as_mut()) {
@@ -1469,7 +1502,9 @@ impl App {
 
     pub fn on_timer(&mut self) {
         self.timer_due = None;
-        self.poll_commands(Instant::now());
+        let now = Instant::now();
+        self.poll_commands(now);
+        self.resume_connections(now);
         if self.tab_toast.as_ref().is_some_and(|(_, t)| t.elapsed() >= TOAST) {
             self.tab_toast = None;
             self.dirty = true;
@@ -1484,6 +1519,19 @@ impl App {
             self.dirty = true;
         }
         self.schedule_timer();
+    }
+
+    fn resume_connections(&mut self, now: Instant) {
+        for (&id, pane) in &mut self.panes {
+            if pane.reconnect_at.take_if(|due| *due <= now).is_some() {
+                let Some(launch) = pane.retry_launch.as_deref_mut() else { continue };
+                launch.cols = pane.size.cols as u16;
+                launch.rows = pane.size.rows as u16;
+                pane.exited = None;
+                self.effects.push(Effect::Spawn { pane: id, launch: launch.clone(), terminal: pane.terminal.clone(), reconnecting: true });
+                self.dirty = true;
+            }
+        }
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -1701,6 +1749,11 @@ impl App {
             }
             return;
         }
+        if !modal && self.search.is_none() && self.cancel_focused_reconnect() {
+            self.swallow_char = true;
+            self.keymap.reset();
+            return;
+        }
         if self.overlay.is_some() {
             self.overlay_key(key, mods);
             return;
@@ -1831,6 +1884,9 @@ impl App {
             if !alt {
                 self.search_char(c);
             }
+            return;
+        }
+        if self.cancel_focused_reconnect() {
             return;
         }
         let bytes = if alt {
@@ -2254,12 +2310,13 @@ impl App {
     }
 
     pub fn woken(&mut self) {
-        while let Ok((pane, ev)) = self.events.try_recv() {
+        while let Ok((pane, generation, ev)) = self.events.try_recv() {
+            if self.panes.get(&pane).is_none_or(|p| p.generation != generation) {
+                continue;
+            }
             match ev {
                 VtEvent::Write(bytes) => {
-                    if self.panes.contains_key(&pane) {
-                        self.effects.push(Effect::Write { pane, bytes });
-                    }
+                    self.effects.push(Effect::Write { pane, bytes });
                 }
                 VtEvent::Title(t) => {
                     if let Some(p) = self.panes.get_mut(&pane) {
@@ -2280,21 +2337,49 @@ impl App {
     }
 
     pub fn exited(&mut self, pane: PaneId, code: Option<u32>) {
+        let options = self.options();
         let Some(p) = self.panes.get_mut(&pane) else { return };
         if p.exited.is_some() {
             return;
         }
         p.exited = Some(code);
-        if code == Some(0) && !p.profile.hold {
-            self.close_pane(pane);
-        } else {
-            let text = match code {
-                Some(c) => format!("\r\n\x1b[0m\x1b[2m{}\x1b[0m\r\n", crate::i18n::tf("[Process exited with code {code}. Press any key to close.]", &[("code", &c.to_string())])),
-                None => format!("\r\n\x1b[0m\x1b[2m{}\x1b[0m\r\n", crate::i18n::t("[Process exited. Press any key to close.]")),
-            };
-            p.terminal.lock().feed(text.as_bytes());
-            self.dirty = true;
+        p.pid = None;
+        self.offers.remove(&pane);
+        self.prompts.remove(&pane);
+        match p.profile.exit_decision(code) {
+            ExitDecision::Close => self.close_pane(pane),
+            ExitDecision::Reconnect if p.retry_launch.is_some() => {
+                let cwd = p.retry_launch.as_ref().and_then(|launch| launch.cwd.clone());
+                p.generation += 1;
+                let sink = Self::terminal_sink(self.sender.clone(), self.wake.clone(), pane, p.generation);
+                let mut terminal = p.terminal.lock().next_session(options, sink, cwd);
+                let notice = crate::i18n::t("[Reconnecting in 1 second. Press any key to cancel.]");
+                terminal.feed(format!("\r\n\x1b[0;2m{notice}\x1b[0m\r\n").as_bytes());
+                p.terminal = Arc::new(FairMutex::new(terminal));
+                p.title = None;
+                p.reconnect_at = Some(Instant::now() + RECONNECT_DELAY);
+                self.schedule_timer();
+            }
+            _ => {
+                let notice = match code {
+                    Some(c) => crate::i18n::tf("[Process exited with code {code}. Press any key to close.]", &[("code", &c.to_string())]),
+                    None => crate::i18n::t("[Process exited. Press any key to close.]").to_owned(),
+                };
+                p.terminal.lock().feed(format!("\r\n\x1b[0;2m{notice}\x1b[0m\r\n").as_bytes());
+            }
         }
+        self.dirty = true;
+    }
+
+    fn cancel_focused_reconnect(&mut self) -> bool {
+        let Some(p) = self.focused_pane().and_then(|id| self.panes.get_mut(&id)) else { return false };
+        if p.reconnect_at.take().is_none() {
+            return false;
+        }
+        let notice = crate::i18n::t("[Reconnect cancelled. Press any key to close.]");
+        p.terminal.lock().feed(format!("\r\n\x1b[0;2m{notice}\x1b[0m\r\n").as_bytes());
+        self.dirty = true;
+        true
     }
 
     pub fn set_can_elevate(&mut self, can: bool) {
@@ -2317,8 +2402,12 @@ impl App {
     pub fn spawn_failed(&mut self, pane: PaneId, message: &str) {
         if let Some(p) = self.panes.get_mut(&pane) {
             p.terminal.lock().feed(format!("\x1b[31m{message}\x1b[0m\r\n").as_bytes());
-            p.exited = Some(None);
-            self.dirty = true;
+            if matches!(p.profile.on_exit, OnExit::Auto | OnExit::Inherit) {
+                p.exited = Some(None);
+                self.dirty = true;
+            } else {
+                self.exited(pane, None);
+            }
         }
     }
 
@@ -2343,6 +2432,7 @@ impl App {
             self.bell.map(|(_, start)| start + BELL_FLASH),
             self.tab_toast.as_ref().map(|(_, start)| *start + TOAST),
             self.tabs.iter().filter_map(|t| t.command_watch.deadline()).min(),
+            self.panes.values().filter_map(|p| p.reconnect_at).min(),
         ].into_iter().flatten().min();
         if let Some(due) = next.filter(|&due| self.timer_due.is_none_or(|armed| due < armed)) {
             let left = due.saturating_duration_since(Instant::now()).as_millis().max(1) as u32;
@@ -2374,7 +2464,7 @@ impl App {
 
 pub fn dropped_text(profile: &Profile, paths: &[String]) -> String {
     use aster_proto::quote::{quote_paths, shell_kind, ShellKind};
-    let wsl = profile.id.starts_with("local:wsl");
+    let wsl = profile.is_wsl();
     let kind = if profile.ssh.is_some() || wsl { ShellKind::Unix } else { shell_kind(&profile.command) };
     let paths: Vec<String> = paths.iter().map(|p| if wsl { wsl_path(p) } else { p.clone() }).collect();
     quote_paths(&paths, kind)
@@ -2421,14 +2511,14 @@ pub fn open_target(target: &str) -> String {
 
 pub fn inherit_cwd(profile: &Profile, inherited: Option<String>, home: Option<String>) -> (Vec<String>, Option<String>) {
     let mut args = profile.args.clone();
+    if let Some(dir) = inherited.as_ref().or(profile.cwd.as_ref()).filter(|dir| dir.starts_with('/')) {
+        if let Some(next) = args.iter().position(|a| a == "--cd").and_then(|i| args.get_mut(i + 1)) {
+            next.clone_from(dir);
+            return (args, profile.cwd.clone().filter(|cwd| !cwd.starts_with('/')).or(home));
+        }
+    }
     let Some(dir) = inherited else { return (args, profile.cwd.clone().or(home)) };
     if dir.starts_with('/') {
-        if let Some(i) = args.iter().position(|a| a == "--cd") {
-            if let Some(next) = args.get_mut(i + 1) {
-                *next = dir;
-                return (args, profile.cwd.clone().or(home));
-            }
-        }
         return (args, profile.cwd.clone().or(home));
     }
     (args, Some(dir))

@@ -94,6 +94,22 @@ fn custom_titles_survive_a_session_round_trip() {
     assert_eq!(b.tab_title(0), "Shell!");
 }
 
+#[test]
+fn saving_the_focused_profile_persists_defaults_and_selects_the_copy() {
+    let mut a = app(0);
+    a.set_config(Config::parse("[profile-defaults.local.env]\nWORK = 'test'").unwrap());
+    a.open_default_tab();
+    a.tabs[0].title = Some("Build".into());
+    a.focused_terminal().unwrap().lock().set_cwd(Some(r"D:\src".into()));
+    a.run(Action::SaveAsProfile);
+    let saved = a.config.profiles.last().unwrap();
+    assert_eq!((saved.name.as_str(), saved.cwd.as_deref(), saved.env["WORK"].as_str()), ("Build (saved)", Some(r"D:\src"), "test"));
+    assert!(!saved.builtin && !saved.elevated && !saved.hold);
+    let page = a.settings.as_ref().unwrap();
+    assert_eq!(page.profile_at(page.shown[page.selected]).unwrap().id, saved.id);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::SaveConfig(text) if Config::parse(text).unwrap().profiles.len() == 1)));
+}
+
 
 #[test]
 fn administrator_tabs_spawn_elevated_and_say_so_in_the_title() {

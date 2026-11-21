@@ -66,7 +66,7 @@ fn fake() -> Fake {
 }
 
 fn line_mode() -> Stream {
-    Stream { input: InputMode::Line, login: vec![LoginStep { expect: "login:".into(), send: r"admin\r".into(), ..LoginStep::default() }], ..Stream::default() }
+    Stream { input: Some(InputMode::Line), login: Some(vec![LoginStep { expect: "login:".into(), send: r"admin\r".into(), ..LoginStep::default() }]), ..Stream::default() }
 }
 
 #[test]

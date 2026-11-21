@@ -1,4 +1,4 @@
-use crate::profile::Profile;
+use crate::profile::{Profile, ProfileDefaults, ProfileGroup};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -300,10 +300,24 @@ pub struct Config {
     pub system: System,
     pub hotkeys: BTreeMap<String, Vec<String>>,
     pub profiles: Vec<Profile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden_profiles: Vec<String>,
     pub color_schemes: Vec<CustomScheme>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<ProfileGroup>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub profile_defaults: BTreeMap<String, ProfileDefaults>,
 }
 
 impl Config {
+    pub fn profile_hidden(&self, profile: &Profile) -> bool {
+        if profile.builtin {
+            self.hidden_profiles.contains(&profile.id)
+        } else {
+            profile.hidden
+        }
+    }
+
     pub fn parse(text: &str) -> Result<Config, String> {
         toml::from_str(text).map_err(|e| e.to_string())
     }

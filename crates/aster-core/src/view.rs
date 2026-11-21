@@ -274,9 +274,9 @@ impl App {
                 Entry::Settings => (t("Settings"), Action::Settings, "\u{2699}"),
                 Entry::Recent(n) => {
                     let p = &self.profiles[*n];
-                    let (badge, tint) = crate::picker::badge(p);
+                    let (badge, tint) = crate::picker::badge(&crate::profile::effective(p, &self.config));
                     g.dl.round_rect(mark, Color::rgb(tint), 5.0 * s);
-                    let px = if badge.len() > 2 { 8.5 } else { 10.0 };
+                    let px = if badge.chars().count() > 2 { 8.5 } else { 10.0 };
                     centered(g, mark, &badge, FontStyle::new(FontFamily::Ui, (px * s).round(), true), Color::rgb(0xFFFFFF));
                     (p.name.as_str(), Action::Tab(i as u8), "")
                 }
@@ -443,7 +443,10 @@ impl App {
                 t.set_cell_pixels(m.w as u16, m.h as u16);
             }
             pane.size = size;
-            effects.push(Effect::Spawn { pane: id, launch, terminal: pane.terminal.clone() });
+            if pane.profile.exit_decision(None) == crate::profile::ExitDecision::Reconnect {
+                pane.retry_launch = Some(Box::new(launch.clone()));
+            }
+            effects.push(Effect::Spawn { pane: id, launch, terminal: pane.terminal.clone(), reconnecting: false });
             if !pane.queued.is_empty() {
                 effects.push(Effect::Write { pane: id, bytes: std::mem::take(&mut pane.queued) });
             }
@@ -1285,13 +1288,14 @@ impl App {
                         let (label, detail, badge) = match page.profile_at(item) {
                             Some(p) => {
                                 let kind = if p.custom { t("Custom") } else { t("Detected") };
-                                (p.name.clone(), p.detail.clone(), if p.default { tf("Default  ·  {kind}", &[("kind", kind)]) } else { kind.to_owned() })
+                                let label = if p.hidden { tf("{name} (Hidden)", &[("name", &p.name)]) } else { p.name.clone() };
+                                (label, p.detail.clone(), if p.default { tf("Default  ·  {kind}", &[("kind", kind)]) } else { kind.to_owned() })
                             }
                             None => (t("New profile").to_owned(), t("Create a profile for a command, an SSH host, a serial port or a Telnet or TCP address").to_owned(), "+".to_owned()),
                         };
                         let hint = match (&page.notice, selected) {
                             (Some(n), true) => n.clone(),
-                            (_, true) if page.profile_at(item).is_some() => t("Enter to edit  ·  Ctrl+Enter to make default  ·  Del to delete").to_owned(),
+                            (_, true) if page.profile_at(item).is_some() => t("Enter edit  ·  H hide/show  ·  Ctrl+Enter default  ·  Del delete").to_owned(),
                             _ => detail,
                         };
                         g.text(tx, row.rect.y + (25.0 * s).round(), &label, ui, theme.text, tw);

@@ -1,5 +1,6 @@
 use crate::console::{Console, Input};
 use crate::destination::{self, Context, Destination};
+use aster_proto::quote::login_shell_in;
 use crossbeam_channel::Receiver;
 use russh::client::{self, AuthResult, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::client::AgentClient;
@@ -331,7 +332,7 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
     if forwards_agent(dest, req) {
         let _ = tx.agent_forward(false).await;
     }
-    if let Some(command) = cwd_command(dest.remember_cwd, req.cwd.as_deref()) {
+    if let Some(command) = login_shell_in(req.cwd.as_deref()) {
         tx.exec(true, command).await
     } else {
         tx.request_shell(false).await
@@ -383,16 +384,6 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
         }
     }
     Ok(code.unwrap_or(0))
-}
-
-fn cwd_command(remember: bool, cwd: Option<&str>) -> Option<String> {
-    use aster_proto::quote::{ShellKind, quote_path};
-    let dir = cwd.filter(|d| remember && !d.contains('\0'))?;
-    let drive_path = matches!(dir.as_bytes(), [letter, b':', b'/' | b'\\', ..] if letter.is_ascii_alphabetic());
-    if !dir.starts_with('/') && !drive_path {
-        return None;
-    }
-    Some(format!("cd {} && exec \"$SHELL\" -l", quote_path(dir, ShellKind::Unix)))
 }
 
 async fn request_x11(channel: &mut russh::Channel<client::Msg>, grants: &crate::x11::Grants, req: &Request, timeout_ms: u64, console: &Shared) -> Result<Option<Arc<crate::x11::X11>>, String> {

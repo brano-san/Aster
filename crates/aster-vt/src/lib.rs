@@ -134,6 +134,29 @@ impl Terminal {
         Self { term: Term::new(config(&options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, output_seq: 0, progress: None, sniffer: osc::Sniffer::default(), cwd: None, search: None, scrollback: options.scrollback }
     }
 
+    pub fn next_session(&mut self, options: Options, sink: Sink, cwd: Option<String>) -> Self {
+        if self.mode().contains(TermMode::ALT_SCREEN) {
+            self.term.swap_alt();
+        }
+        let mut fresh = Self::new(self.size, options, sink);
+        fresh.term.is_focused = self.term.is_focused;
+        fresh.cell.store(self.cell.load(Ordering::Relaxed), Ordering::Relaxed);
+        let grid = self.term.grid_mut();
+        let point = grid.cursor.point;
+        grid.cursor = Default::default();
+        grid.cursor.point = point;
+        grid.saved_cursor = grid.cursor.clone();
+        std::mem::swap(fresh.term.grid_mut(), grid);
+        fresh.cwd = cwd;
+        fresh.seq = self.seq.wrapping_add(1);
+        fresh.output_seq = self.output_seq;
+        fresh.search = self.search.take();
+        if let Some(found) = fresh.search.as_mut() {
+            found.reset_index();
+        }
+        fresh
+    }
+
     pub fn set_search(&mut self, query: &str, options: search::SearchOptions) -> Result<(), String> {
         self.search = None;
         self.bump();

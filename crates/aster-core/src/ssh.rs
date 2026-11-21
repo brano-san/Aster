@@ -88,6 +88,20 @@ pub fn host_profile(alias: &str, ssh: &str) -> Profile {
     p
 }
 
+pub(crate) fn system_shell_in_profile_folder(profile: &Profile) -> Option<Vec<String>> {
+    let target = parse_target(profile.ssh.as_deref()?)?;
+    let command = profile.command.rsplit(['/', '\\']).next()?;
+    if !(command.eq_ignore_ascii_case("ssh") || command.eq_ignore_ascii_case("ssh.exe")) || profile.args.last() != target.args().last() {
+        return None;
+    }
+    let cwd = profile.cwd.as_deref().filter(|cwd| cwd.starts_with('/'))?;
+    let shell = aster_proto::quote::login_shell_in(Some(cwd))?;
+    let mut args = profile.args.clone();
+    args.insert(0, "-t".into());
+    args.push(shell);
+    Some(args)
+}
+
 #[cfg(test)]
 #[path = "../test/ssh.rs"]
 mod tests;

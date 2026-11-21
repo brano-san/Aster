@@ -40,6 +40,32 @@ pub enum NodeState {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ProfileLayout {
+    Pane { profile: String, cwd: Option<String> },
+    Split { vertical: bool, ratio: f32, a: Box<ProfileLayout>, b: Box<ProfileLayout> },
+}
+
+impl ProfileLayout {
+    fn resolve(&self, profiles: &[Profile]) -> Result<NodeState, String> {
+        Ok(match self {
+            Self::Pane { profile, cwd } => {
+                let source = profiles.iter().find(|p| &p.id == profile && p.layout.is_none()).ok_or_else(|| profile.clone())?;
+                let mut source = source.clone();
+                if cwd.is_some() {
+                    source.cwd.clone_from(cwd);
+                }
+                NodeState::Pane(Box::new(PaneState { profile: source, cwd: cwd.clone(), buffer: Vec::new() }))
+            }
+            Self::Split { vertical, ratio, a, b } => NodeState::Split {
+                vertical: *vertical, ratio: if ratio.is_finite() { *ratio } else { 0.5 },
+                a: Box::new(a.resolve(profiles)?), b: Box::new(b.resolve(profiles)?),
+            },
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaneState {
     pub profile: Profile,
     #[serde(default)]
@@ -68,13 +94,71 @@ fn restore_text(lines: &[String]) -> Vec<u8> {
 }
 
 impl App {
+    pub(crate) fn profile_tree(&mut self, profile: Profile, cwd: Option<String>) -> Option<Node> {
+        let Some(layout) = profile.layout.as_ref() else { return Some(Node::Leaf(self.new_pane_in(profile, cwd))) };
+        match layout.resolve(&self.profiles) {
+            Ok(state) => Some(self.build(&state)),
+            Err(id) => {
+                self.tab_toast = Some((crate::i18n::tf("Layout profile unavailable: {id}", &[("id", &id)]), std::time::Instant::now()));
+                self.dirty = true;
+                None
+            }
+        }
+    }
+
+    fn capture_layout(&self, node: &Node, layout_id: &str, config: &mut crate::config::Config) -> Option<ProfileLayout> {
+        Some(match node {
+            Node::Leaf(id) => {
+                let pane = self.panes.get(id)?;
+                let source = &pane.source_profile;
+                let profile = if self.profiles.iter().any(|p| p.id == source.id && p.layout.is_none()) {
+                    source.id.clone()
+                } else {
+                    let base = format!("{layout_id}/pane-{id}");
+                    let id = std::iter::once(base.clone()).chain((2..).map(|n| format!("{base}-{n}")))
+                        .find(|id| self.profiles.iter().chain(&config.profiles).all(|p| &p.id != id))?;
+                    config.profiles.push(Profile { id: id.clone(), hidden: true, builtin: false, elevated: false, hold: false, ..source.clone() });
+                    id
+                };
+                ProfileLayout::Pane { profile, cwd: self.pane_cwd(*id).or_else(|| pane.profile.cwd.clone()) }
+            }
+            Node::Split { axis, ratio, a, b } => ProfileLayout::Split {
+                vertical: *axis == Axis::Vertical, ratio: *ratio,
+                a: Box::new(self.capture_layout(a, layout_id, config)?), b: Box::new(self.capture_layout(b, layout_id, config)?),
+            },
+        })
+    }
+
+    pub(crate) fn can_save_layout(&self) -> bool {
+        self.tabs.get(self.active).is_some_and(|tab| matches!(tab.root, Node::Split { .. }))
+    }
+
+    pub(crate) fn save_as_profile(&mut self, layout: bool) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(pane) = self.panes.get(&tab.focus) else { return };
+        let name = crate::i18n::tf("{title} (saved)", &[("title", &self.tab_title(self.active))]);
+        let id = self.custom_profile_id(&name);
+        let mut config = self.config.clone();
+        let profile = if layout {
+            if !self.can_save_layout() { return; }
+            let Some(tree) = self.capture_layout(&tab.root, &id, &mut config) else { return };
+            Profile { layout: Some(tree), ..Profile::default() }
+        } else {
+            Profile { cwd: self.pane_cwd(tab.focus).or_else(|| pane.profile.cwd.clone()), ..pane.profile.clone() }
+        };
+        config.profiles.push(Profile { id: id.clone(), name, hidden: false, builtin: false, elevated: false, hold: false, ..profile });
+        self.set_config(config);
+        self.push_save_config();
+        self.select_profile_settings(&id);
+    }
+
     fn node_state(&self, node: &Node) -> Option<NodeState> {
         Some(match node {
             Node::Leaf(id) => {
                 let pane = self.panes.get(id).filter(|p| !p.profile.hold)?;
                 let cwd = self.pane_cwd(*id);
                 let t = pane.terminal.lock();
-                NodeState::Pane(Box::new(PaneState { profile: pane.profile.clone(), cwd, buffer: t.tail_lines(BUFFER_LINES) }))
+                NodeState::Pane(Box::new(PaneState { profile: pane.source_profile.clone(), cwd, buffer: t.tail_lines(BUFFER_LINES) }))
             }
             Node::Split { axis, ratio, a, b } => match (self.node_state(a), self.node_state(b)) {
                 (Some(a), Some(b)) => NodeState::Split { vertical: *axis == Axis::Vertical, ratio: *ratio, a: Box::new(a), b: Box::new(b) },

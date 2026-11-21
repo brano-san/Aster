@@ -481,6 +481,75 @@ fn a_failing_exit_keeps_the_pane_until_a_key_is_pressed() {
 }
 
 #[test]
+fn reconnect_reuses_the_launch_and_preserves_output_in_a_background_pane() {
+    let (mut a, mut g) = app();
+    a.config.appearance.animations = false;
+    a.open_tab(Profile { on_exit: crate::profile::OnExit::Reconnect, ..serial_profile("device:?,8N1") });
+    key(&mut a, Key::Enter, Mods::NONE);
+    a.frame(&mut g, false);
+    let (pane, launch) = spawns(&a.take_effects()).pop().unwrap();
+    assert_eq!(launch.serial.as_deref(), Some("device:115200,8N1"));
+    let terminal = a.terminal(pane).unwrap().clone();
+    terminal.lock().feed(b"prior output\x1b[?2004h");
+    a.exited(pane, Some(0));
+    let deadline = a.panes[&pane].reconnect_at.unwrap();
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Timer(ms) if (1..=1000).contains(ms))));
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.take_effects();
+    a.resume_connections(deadline - Duration::from_millis(1));
+    assert!(spawns(&a.take_effects()).is_empty());
+    a.resume_connections(deadline);
+    let effects = a.take_effects();
+    assert_eq!(spawns(&effects), [(pane, launch)]);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Spawn { reconnecting: true, .. })));
+    terminal.lock().feed(b"late output\x1b]0;stale title\x07\x1b[6n");
+    a.woken();
+    let current = a.terminal(pane).unwrap();
+    assert!(current.lock().buffer_text().contains("prior output"));
+    assert!(!current.lock().buffer_text().contains("late output"));
+    assert!(!current.lock().mode().contains(TermMode::BRACKETED_PASTE));
+    assert!(a.panes[&pane].title.is_none());
+    assert!(writes(&a.take_effects()).is_empty());
+    a.resume_connections(deadline);
+    assert!(spawns(&a.take_effects()).is_empty());
+}
+
+#[test]
+fn a_failed_reconnect_reports_the_error_and_schedules_another_attempt() {
+    let (mut a, mut g) = app();
+    a.open_tab(Profile { ssh: Some("host".into()), on_exit: crate::profile::OnExit::Reconnect, ..Profile::default() });
+    a.frame(&mut g, false);
+    let pane = spawns(&a.take_effects())[0].0;
+    for _ in 0..2 {
+        a.spawn_failed(pane, "connection failed");
+        assert!(a.terminal(pane).unwrap().lock().buffer_text().contains("connection failed"));
+        a.resume_connections(a.panes[&pane].reconnect_at.unwrap());
+        assert_eq!(spawns(&a.take_effects()).len(), 1);
+    }
+}
+
+#[test]
+fn a_key_cancels_reconnect_and_keeps_the_pane() {
+    let (mut a, mut g) = app();
+    a.open_tab(Profile { socket: Some("tcp://host:23".into()), on_exit: crate::profile::OnExit::Reconnect, ..Profile::default() });
+    a.frame(&mut g, false);
+    let pane = spawns(&a.take_effects())[0].0;
+    a.exited(pane, Some(1));
+    let deadline = a.panes[&pane].reconnect_at.unwrap();
+    key(&mut a, Key::Char('T'), CTRL_SHIFT);
+    a.on_event(Event::Char('\u{14}'));
+    a.resume_connections(deadline);
+    a.frame(&mut g, false);
+    assert_eq!(a.tab_count(), 1);
+    assert_eq!(a.focused_pane(), Some(pane));
+    assert!(spawns(&a.take_effects()).is_empty());
+    assert!(a.panes[&pane].exited.is_some());
+    a.on_event(Event::Char('q'));
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
+}
+
+#[test]
 fn osc_titles_name_the_tab_and_the_window() {
     let (mut a, mut g) = app();
     a.open_default_tab();
@@ -619,11 +688,26 @@ fn native_ssh_duplicate_and_restore_inherit_only_the_remote_cwd() {
 }
 
 #[test]
+fn a_saved_system_ssh_folder_is_passed_to_the_remote_shell() {
+    let (mut app, _) = app();
+    app.set_config(Config::parse("[ssh]\nclient='system'").unwrap());
+    let mut profile = crate::ssh::host_profile("build", "ssh");
+    profile.cwd = Some("/srv/team folder".into());
+    app.open_tab(profile);
+    let launch = app.panes[&app.focused_pane().unwrap()].pending.as_ref().unwrap();
+    assert_eq!(launch.cwd.as_deref(), Some(r"C:\home"));
+    assert_eq!(launch.args, ["-t", "build", "cd '/srv/team folder' && exec \"$SHELL\" -l"]);
+}
+
+#[test]
 fn wsl_profiles_receive_a_unix_directory_through_their_cd_argument() {
     let wsl = Profile::new("local:wsl:u", "WSL", "wsl.exe", &["-d", "Ubuntu", "--cd", "~"]);
     let (args, cwd) = inherit_cwd(&wsl, Some("/srv/app".into()), Some(r"C:\home".into()));
     assert_eq!(args, ["-d", "Ubuntu", "--cd", "/srv/app"]);
     assert_eq!(cwd.as_deref(), Some(r"C:\home"));
+    let saved = Profile { id: "custom:saved".into(), cwd: Some("/saved".into()), ..wsl };
+    assert_eq!(dropped_text(&saved, &[r"C:\src".into()]), "/mnt/c/src");
+    assert_eq!(inherit_cwd(&saved, None, Some(r"C:\home".into())), (vec!["-d".to_owned(), "Ubuntu".into(), "--cd".into(), "/saved".into()], Some(r"C:\home".into())));
     let cmd = Profile::new("local:cmd", "CMD", "cmd.exe", &[]);
     assert_eq!(inherit_cwd(&cmd, Some("/srv/app".into()), None).1, None);
     assert_eq!(inherit_cwd(&cmd, None, Some("H".into())).1.as_deref(), Some("H"));

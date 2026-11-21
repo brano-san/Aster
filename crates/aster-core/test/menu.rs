@@ -45,14 +45,15 @@ fn keyboard_navigation_skips_separators_and_disabled_items() {
     let mut a = app(1);
     let r = a.chrome.tabs[0].rect;
     right_click(&mut a, r.x + 10.0, r.y + 10.0);
-    for action in [Action::NewTab, Action::DuplicateTab, Action::RenameTab, Action::PinTab, Action::SetTabColor, Action::CloseTab] {
+    assert!(!labels(&a).iter().any(|(label, _)| *label == "Save the layout as a profile"));
+    for action in [Action::NewTab, Action::DuplicateTab, Action::RenameTab, Action::PinTab, Action::SetTabColor, Action::SaveAsProfile, Action::CloseTab] {
         key(&mut a, Key::Down);
         let m = a.menu.as_ref().unwrap();
         assert_eq!(m.action(m.selected.unwrap()), Some(action));
     }
     key(&mut a, Key::Up);
     let m = a.menu.as_ref().unwrap();
-    assert_eq!(m.action(m.selected.unwrap()), Some(Action::SetTabColor));
+    assert_eq!(m.action(m.selected.unwrap()), Some(Action::SaveAsProfile));
     key(&mut a, Key::Escape);
     assert!(!a.menu_open());
 }

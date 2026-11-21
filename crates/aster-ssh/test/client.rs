@@ -51,10 +51,10 @@ async fn cancelled_handshake_releases_the_unanswered_host_key_prompt() {
 
 #[test]
 fn remembered_cwd_is_a_single_shell_argument() {
-    assert_eq!(cwd_command(true, Some("/src/it's $(odd)")), Some(r#"cd '/src/it'\''s $(odd)' && exec "$SHELL" -l"#.into()));
-    assert_eq!(cwd_command(false, Some("/tmp")), None);
-    assert_eq!(cwd_command(true, Some("-")), None);
-    assert_eq!(cwd_command(true, None), None);
+    assert_eq!(login_shell_in(Some("/src/it's $(odd)")), Some(r#"cd '/src/it'\''s $(odd)' && exec "$SHELL" -l"#.into()));
+    assert_eq!(login_shell_in(Some("/tmp\0/other")), None);
+    assert_eq!(login_shell_in(Some("-")), None);
+    assert_eq!(login_shell_in(None), None);
 }
 
 #[tokio::test]
@@ -202,7 +202,7 @@ fn tabs_to_the_same_host_share_one_login_until_the_last_one_closes() {
     let mut req = request(format!("ann@127.0.0.1:{port}"), dir.clone());
     req.share = true;
     req.profile.term = Some("vt100".into());
-    req.profile.remember_cwd = Some(true);
+    req.profile.remember_cwd = Some(false);
     req.cwd = Some("/remote folder".into());
     req.clear_after_connect = false;
     let mut second = Pane { conn: start(req), seen: String::new() };
