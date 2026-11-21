@@ -1679,6 +1679,8 @@ impl App {
                             let label = match action {
                                 crate::keymap::Action::ApplicationsMenu(true) => t("Add"),
                                 crate::keymap::Action::ApplicationsMenu(false) => t("Remove"),
+                                crate::keymap::Action::StartMenuShortcut => if self.start_menu_shortcut { t("Remove shortcut") } else { t("Create shortcut") },
+                                crate::keymap::Action::EditEnvironment => t("Edit"),
                                 _ => t("Open"),
                             };
                             centered(g, c, label, ui, theme.text);

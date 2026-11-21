@@ -5,13 +5,16 @@ mod config_file;
 mod desktop;
 mod handler;
 mod log;
+mod local_spawn;
 mod net;
 mod remote;
 mod secrets;
 mod serial;
 mod session;
+mod shell_integration;
 mod stream;
 mod update;
+mod url_scheme;
 mod zmodem;
 
 use aster_core::config::{Config, SchemeMode};

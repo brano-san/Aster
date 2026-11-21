@@ -50,6 +50,7 @@ pub struct Launch {
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub env: BTreeMap<String, String>,
+    pub local_environment: Option<Box<crate::environment::LocalEnvironment>>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -90,6 +91,7 @@ pub enum Effect {
     SaveConfig(String),
     Open(String),
     OpenLog,
+    StartMenuShortcut(bool),
     SaveOutput { pane: PaneId },
     ExportBuffer { pane: PaneId, text: String },
     RecentProfiles(Vec<String>),
@@ -224,6 +226,7 @@ pub struct App {
     pub(crate) config_path: Option<String>,
     pub(crate) config_status: Option<Result<(), String>>,
     pub(crate) launcher_installed: Option<bool>,
+    pub(crate) start_menu_shortcut: bool,
     pub(crate) vault: crate::settings::VaultView,
     pub(crate) vault_input_id: u64,
     pub(crate) menu: Option<crate::menu::Menu>,
@@ -324,6 +327,7 @@ impl App {
             config_path: None,
             config_status: None,
             launcher_installed: None,
+            start_menu_shortcut: false,
             menu: None,
             rename: None,
             paste_confirm: None,
@@ -710,7 +714,10 @@ impl App {
         } else {
             inherit_cwd(&profile, inherited, self.home.clone())
         };
-        let launch = Launch { elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let local_environment = profile.is_local().then(|| Box::new(crate::environment::LocalEnvironment {
+            global: self.config.terminal.environment.clone(), profile: profile.env.clone(), refresh: self.config.terminal.refresh_environment, set_comspec: self.config.terminal.set_comspec,
+        }));
+        let launch = Launch { local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, exited: None, pending: Some(launch), retry_launch: None, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0 });
         id
     }
@@ -1049,6 +1056,21 @@ impl App {
         }
     }
 
+    pub fn paste_path(&mut self, path: &str) {
+        if path.is_empty() || path.chars().any(char::is_control) || self.offered_pane().is_some() {
+            return;
+        }
+        if self.focused_pane().and_then(|pane| self.panes.get(&pane)).is_none_or(|pane| pane.exited.is_some()) {
+            self.open_default_tab();
+            self.track_tab();
+        }
+        if let Some((id, pane)) = self.focused_pane().and_then(|id| self.panes.get(&id).map(|pane| (id, pane))) {
+            let text = dropped_text(&pane.profile, &[path.to_owned()]);
+            let bytes = paste_bytes(&text, self.paste_mode(), false);
+            self.write(id, bytes);
+        }
+    }
+
     pub fn paste(&mut self, text: String) {
         if text.is_empty() {
             return;
@@ -1239,6 +1261,8 @@ impl App {
             }
             NotifyCommand => self.toggle_command_watch(),
             OpenLog => self.effects.push(Effect::OpenLog),
+            EditEnvironment => self.edit_environment(),
+            StartMenuShortcut => self.effects.push(Effect::StartMenuShortcut(!self.start_menu_shortcut)),
             OpenConfigFile => self.effects.push(Effect::OpenConfigFile),
             OpenConfigFolder => self.effects.push(Effect::OpenConfigFolder),
             ShowDefaultConfig => self.effects.push(Effect::ShowDefaultConfig),

@@ -105,7 +105,14 @@ pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
         argv.push(cstr(a)?);
     }
     let argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
-    let env = environment(&req.env);
+    let env = if let Some(spec) = &req.local_environment {
+        let inherited = std::env::vars_os().filter(|(key, _)| !matches!(key.as_bytes(), b"TERM_PROGRAM" | b"TERM_PROGRAM_VERSION"))
+            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
+        let vars: Vec<_> = spec.apply(inherited, &req.env, false).into_iter().collect();
+        environment(&vars)
+    } else {
+        environment(&req.env)
+    };
     let env_ptrs: Vec<*const libc::c_char> = env.iter().map(|e| e.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
     let cwd = req.cwd.as_ref().filter(|p| p.is_dir()).and_then(|p| CString::new(p.as_os_str().as_bytes()).ok());
     let mut master: RawFd = -1;

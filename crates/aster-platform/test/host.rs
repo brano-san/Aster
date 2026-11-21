@@ -8,6 +8,9 @@ fn request() -> SpawnRequest {
         args: vec!["-l".into(), "two words".into()],
         cwd: Some(PathBuf::from("/srv/app")),
         env: vec![("TERM".into(), "xterm-256color".into()), ("EMPTY".into(), String::new())],
+        local_environment: Some(Box::new(aster_core::environment::LocalEnvironment {
+            refresh: true, set_comspec: true, global: [("A".into(), "$HOME".into())].into(), profile: [("A".into(), "$A/bin".into())].into(),
+        })),
         cols: 120,
         rows: 40,
     }

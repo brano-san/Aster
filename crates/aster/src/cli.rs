@@ -14,6 +14,7 @@ pub enum Command {
     },
     Profile { name: String },
     Paste { text: String },
+    PastePath { path: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,13 +32,15 @@ pub enum Parsed {
 }
 
 pub const USAGE: &str = "Usage:
-  aster                     open a new window
+  aster [--new-window]      open a new window
   aster [open] DIR          open a tab in DIR
   aster run [--] CMD ARGS   open a tab running CMD
   aster [--dir DIR] -e CMD [ARGS...]
   aster [--working-directory DIR] -- CMD [ARGS...]
   aster profile NAME        open a tab with the profile NAME
   aster paste TEXT          paste TEXT into the active tab
+  aster paste-path PATH     paste a shell-quoted path into the active pane
+  aster url URL             open an Aster profile or folder URL
   aster --hidden            start in the background when tray or dock is enabled
   aster --version | --help";
 
@@ -66,6 +69,7 @@ pub fn parse(args: &[String], cwd: Option<&Path>) -> Parsed {
     }
     match args.first().map(String::as_str) {
         None => Parsed::Request(Command::Window),
+        Some("--new-window") if args.len() == 1 => Parsed::Request(Command::Window),
         Some("--version" | "-V") => Parsed::Version,
         Some("--help" | "-h") => Parsed::Help,
         Some("--hidden") if args.len() == 1 => Parsed::Request(Command::Hidden),
@@ -80,6 +84,15 @@ pub fn parse(args: &[String], cwd: Option<&Path>) -> Parsed {
             name => Parsed::Request(Command::Profile { name: name.join(" ") }),
         },
         Some("paste") => Parsed::Request(Command::Paste { text: rest(1).join(" ") }),
+        Some("paste-path") if args.len() == 2 && !args[1].is_empty() && !args[1].chars().any(char::is_control) => {
+            Parsed::Request(Command::PastePath { path: args[1].clone() })
+        }
+        Some("paste-path") => Parsed::Error("paste-path takes one path".into()),
+        Some("url") => match args.get(1).filter(|_| args.len() == 2).and_then(|url| crate::url_scheme::parse(url)) {
+            Some(crate::url_scheme::UrlCommand::Profile(name)) => Parsed::Request(Command::Profile { name }),
+            Some(crate::url_scheme::UrlCommand::Open(dir)) => Parsed::Request(Command::Open { dir: absolute(&dir) }),
+            None => Parsed::Error("invalid Aster URL".into()),
+        },
         Some(flag) if flag.starts_with('-') => Parsed::Error(format!("unknown option {flag}")),
         Some(dir) if args.len() == 1 => Parsed::Request(Command::Open { dir: absolute(dir) }),
         Some(word) => Parsed::Error(format!("unknown command {word}")),

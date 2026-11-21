@@ -1252,3 +1252,29 @@ fn released_modifier_binding_commits_an_mru_switch_immediately() {
     assert_eq!(a.active, 0);
     assert!(a.mru.selection().is_none());
 }
+
+#[test]
+fn paste_path_quotes_for_the_active_shell_and_only_writes_to_its_pane() {
+    let (mut app, mut gfx) = app();
+    app.open_tab(Profile::new("local:cmd", "CMD", "cmd.exe", &[]));
+    app.open_tab(Profile::new("local:ps", "PowerShell", "pwsh.exe", &[]));
+    app.frame(&mut gfx, false);
+    app.take_effects();
+    app.broadcast = Some(Broadcast::AllTabs);
+    let pane = app.focused_pane().unwrap();
+    app.paste_path(r"C:\Work & Notes\a'b.txt");
+    app.paste_path(r"C:\work\a.txt");
+    let writes: Vec<_> = app.take_effects().into_iter().filter_map(|effect| match effect {
+        Effect::Write { pane, bytes } => Some((pane, bytes)),
+        _ => None,
+    }).collect();
+    assert_eq!(writes, [
+        (pane, br"'C:\Work & Notes\a''b.txt'".to_vec()),
+        (pane, br"C:\work\a.txt".to_vec()),
+    ]);
+    app.active = 0;
+    app.frame(&mut gfx, false);
+    let pane = app.focused_pane().unwrap();
+    app.paste_path(r"C:\Work & Notes\a.txt");
+    assert!(app.take_effects().into_iter().any(|effect| matches!(effect, Effect::Write { pane: target, bytes } if target == pane && bytes == br#""C:\Work & Notes\a.txt""#)));
+}

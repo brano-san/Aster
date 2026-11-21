@@ -4,14 +4,20 @@ mod autostart;
 mod conpty;
 mod d3d;
 mod elevate;
+mod environment;
 mod explorer;
 mod instance;
+mod jump_list;
 mod process;
 mod secrets;
 mod dwrite;
 mod shells;
+mod shell_link;
+mod shell_registry;
+mod shortcut;
 mod tray;
 mod update;
+mod url_scheme;
 mod window;
 
 pub use d3d::{D3dDevice, D3dRenderer};
@@ -108,6 +114,22 @@ impl Platform for Windows {
 
     fn set_autostart(enabled: bool, args: &[&str]) -> std::io::Result<()> {
         autostart::set(enabled, args)
+    }
+
+    fn set_url_scheme(enabled: bool) -> bool {
+        url_scheme::set(enabled)
+    }
+
+    fn set_jump_list(list: &aster_core::jump_list::JumpList) -> Result<(), PlatformError> {
+        jump_list::apply(list)
+    }
+
+    fn start_menu_shortcut(change: Option<bool>) -> Result<bool, PlatformError> {
+        shortcut::apply(change)
+    }
+
+    fn set_explorer_paste_menu(label: &str, enabled: bool) -> bool {
+        explorer::set_paste(label, enabled)
     }
 
     fn instance_send(message: &str) -> bool {

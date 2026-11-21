@@ -251,6 +251,19 @@ impl App {
         }
     }
 
+    pub(crate) fn edit_environment(&mut self) {
+        if self.settings.is_none() {
+            self.open_settings();
+        }
+        if let Some(page) = &mut self.settings {
+            page.editor = Some(ProfileEditor::global_environment(&self.config.terminal.environment));
+            page.group_editor = None;
+            page.defaults_kind = None;
+            page.notice = None;
+            self.dirty = true;
+        }
+    }
+
     fn close_profile_modal(&mut self) {
         let Some(page) = &mut self.settings else { return };
         if page.editor.take().is_none() { page.group_editor = None; }
@@ -263,6 +276,15 @@ impl App {
         let Some(page) = self.settings.as_mut() else { return };
         let mut config = self.config.clone();
         if let Some(editor) = &mut page.editor {
+            if editor.is_global_environment() {
+                match editor.environment() {
+                    Ok(env) => config.terminal.environment = env,
+                    Err(error) => { editor.error = Some(error); return; }
+                }
+                self.close_profile_modal();
+                self.persist_profiles(config);
+                return;
+            }
             if let Some(kind) = page.defaults_kind {
                 let defaults = match editor.defaults_result() {
                     Ok(defaults) => defaults,

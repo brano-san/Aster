@@ -94,17 +94,30 @@ pub fn command_line(command: &str, args: &[String]) -> String {
     std::iter::once(quote_arg(command)).chain(args.iter().map(|a| quote_arg(a))).collect::<Vec<_>>().join(" ")
 }
 
-pub fn environment(overrides: &[(String, String)]) -> Vec<u16> {
-    let mut vars: Vec<(String, String)> = std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
-        .filter(|(k, _)| !k.eq_ignore_ascii_case("TERM_PROGRAM") && !k.eq_ignore_ascii_case("TERM_PROGRAM_VERSION")).collect();
-    for (k, v) in overrides {
-        vars.retain(|(name, _)| !name.eq_ignore_ascii_case(k));
-        vars.push((k.clone(), v.clone()));
+fn environment(overrides: &[(String, String)], local: Option<&aster_core::environment::LocalEnvironment>) -> Vec<u16> {
+    let mut inherited: aster_core::environment::Variables = std::env::vars_os()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect();
+    if local.is_some_and(|spec| spec.refresh) {
+        inherited = crate::environment::refresh(inherited);
     }
-    vars.sort_by_key(|(k, _)| k.to_uppercase());
+    inherited.retain(|key, _| !key.eq_ignore_ascii_case("TERM_PROGRAM") && !key.eq_ignore_ascii_case("TERM_PROGRAM_VERSION"));
+    let vars = if let Some(spec) = local {
+        spec.apply(inherited, overrides, true)
+    } else {
+        for (key, value) in overrides {
+            inherited.retain(|name, _| !name.eq_ignore_ascii_case(key));
+            inherited.insert(key.clone(), value.clone());
+        }
+        inherited
+    };
+    let mut vars: Vec<_> = vars.into_iter().collect();
+    vars.sort_by_key(|(key, _)| key.to_uppercase());
     let mut block: Vec<u16> = Vec::new();
-    for (k, v) in vars {
-        block.extend(format!("{k}={v}").encode_utf16());
+    for (key, value) in vars {
+        block.extend(format!("{key}={value}").encode_utf16());
+        block.push(0);
+    }
+    if block.is_empty() {
         block.push(0);
     }
     block.push(0);
@@ -176,7 +189,7 @@ unsafe fn launch(req: &SpawnRequest, pcon: HPCON) -> Result<(HANDLE, u32), Platf
         si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         si.lpAttributeList = list;
         let mut cmd: Vec<u16> = command_line(&req.command, &req.args).encode_utf16().chain([0]).collect();
-        let env = environment(&req.env);
+        let env = environment(&req.env, req.local_environment.as_deref());
         let cwd: Option<Vec<u16>> = req.cwd.as_ref().filter(|p| p.is_dir()).map(|p| p.as_os_str().to_string_lossy().encode_utf16().chain([0]).collect());
         let mut pi = PROCESS_INFORMATION::default();
         CreateProcessW(

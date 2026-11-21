@@ -1166,3 +1166,24 @@ fn hidden_palette_commands_can_be_edited_and_saved_as_an_action_id_list() {
     key(&mut a, Key::Enter);
     assert_eq!(saved(&mut a).unwrap().palette.hidden_commands, ["close-other-tabs", "profile.shell"]);
 }
+
+#[test]
+fn edits_global_environment_rows_and_reads_the_legacy_table() {
+    let old = Config::parse("[terminal.environment]\nLEGACY = \"previous\"").unwrap();
+    assert_eq!(old.terminal.environment["LEGACY"], "previous");
+    assert!(old.to_text().contains("[terminal.env]"));
+
+    let mut a = app();
+    a.run(Action::Settings);
+    typed(&mut a, "environment variables");
+    assert_eq!(a.settings.as_ref().unwrap().current().unwrap().key, "terminal.env");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "FIRST=$PATH");
+    key(&mut a, Key::Enter);
+    typed(&mut a, "SECOND=a=b");
+    a.on_event(Event::Key { key: Key::Enter, mods: Mods { ctrl: true, ..Mods::NONE }, pressed: true });
+    let config = saved(&mut a).unwrap();
+    assert_eq!(config.terminal.environment["FIRST"], "$PATH");
+    assert_eq!(config.terminal.environment["SECOND"], "a=b");
+    assert!(config.terminal.refresh_environment);
+}

@@ -82,6 +82,8 @@ pub enum Action {
     ExportBuffer,
     NotifyCommand,
     OpenLog,
+    StartMenuShortcut,
+    EditEnvironment,
     OpenConfigFile,
     OpenConfigFolder,
     ShowDefaultConfig,
@@ -177,6 +179,9 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::ExportBuffer, "export-buffer", "Save the buffer to a file"),
     (Action::NotifyCommand, "notify-command", "Notify when the command finishes"),
     (Action::OpenLog, "open-log", "Open the log folder"),
+    (Action::EditEnvironment, "edit-environment", "Edit environment variables"),
+    #[cfg(windows)]
+    (Action::StartMenuShortcut, "start-menu-shortcut", "Toggle Start menu shortcut"),
     (Action::OpenConfigFile, "open-config-file", "Open the config file in an editor"),
     (Action::OpenConfigFolder, "open-config-folder", "Open the config folder"),
     (Action::ShowDefaultConfig, "show-default-config", "Show the defaults"),

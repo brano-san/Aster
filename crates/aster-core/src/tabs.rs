@@ -259,6 +259,13 @@ impl App {
         self.dirty = true;
     }
 
+    pub fn open_named_profile(&mut self, name: &str) -> bool {
+        let Some(profile) = self.find_profile(name) else { return false };
+        self.note_recent(&profile.id);
+        self.open_tab(profile);
+        true
+    }
+
     pub fn find_profile(&self, name: &str) -> Option<crate::profile::Profile> {
         let name = name.trim();
         self.profiles.iter().find(|p| p.id == name).or_else(|| self.profiles.iter().find(|p| p.name.eq_ignore_ascii_case(name))).cloned()

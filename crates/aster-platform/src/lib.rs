@@ -171,6 +171,7 @@ pub struct SpawnRequest {
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub env: Vec<(String, String)>,
+    pub local_environment: Option<Box<aster_core::environment::LocalEnvironment>>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -208,6 +209,10 @@ pub trait Platform: 'static {
     fn set_explorer_menu(label: &str, enabled: bool) -> bool;
     fn update_launcher(_profiles: &[String], _install: Option<bool>) -> std::io::Result<bool> { Ok(false) }
     fn set_autostart(enabled: bool, args: &[&str]) -> std::io::Result<()>;
+    fn set_explorer_paste_menu(_label: &str, _enabled: bool) -> bool { true }
+    fn start_menu_shortcut(_change: Option<bool>) -> Result<bool, PlatformError> { Ok(false) }
+    fn set_url_scheme(_enabled: bool) -> bool { true }
+    fn set_jump_list(_list: &aster_core::jump_list::JumpList) -> Result<(), PlatformError> { Ok(()) }
     fn beep() -> bool;
     fn can_elevate() -> bool;
     fn spawn_elevated(req: &SpawnRequest) -> Result<Spawned, PlatformError>;

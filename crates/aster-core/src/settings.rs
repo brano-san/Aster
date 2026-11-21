@@ -77,6 +77,11 @@ pub const SETTINGS: &[Setting] = &[
     item(PROFILES, "picker.quick-connect", "Default quick connect provider", "Protocol used when an address has no prefix", Control::Choice(QUICK_CONNECT)),
     item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
     item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
+    item(TERMINAL, "terminal.env", "Environment variables", "Set key=value entries for all local shells", Control::Run(&Action::EditEnvironment)),
+    #[cfg(windows)]
+    item(TERMINAL, "terminal.refresh-environment", "Refresh environment", "Read Windows environment variables for every new local session", Control::Toggle),
+    #[cfg(windows)]
+    item(TERMINAL, "terminal.set-comspec", "Aster environment marker", "Set ASTER=1 in new local shells and preserve COMSPEC", Control::Toggle),
     item(TERMINAL, "terminal.identification", "Terminal identification", "Report the Aster name and version to new shells", Control::Choice(IDENTIFICATION)),
     item(TERMINAL, "terminal.recover-tabs", "Restore tabs", "Reopen tabs, splits and their folders on start", Control::Toggle),
     item(TERMINAL, "terminal.confirm-close", "Confirm closing running programs", "Ask before closing a tab, pane or window where a program is still running", Control::Toggle),
@@ -146,10 +151,17 @@ pub const SETTINGS: &[Setting] = &[
     item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run(&Action::OpenLog)),
     item(SYSTEM, "action.open-config-file", "Config file", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
     item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
+    #[cfg(not(windows))]
     item(SYSTEM, "system.explorer-menu", "File manager menu", "Add \"Open in Aster\" to the context menu for folders", Control::Toggle),
+    #[cfg(windows)]
+    item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add Aster commands to file and folder menus in Windows Explorer", Control::Toggle),
     item(SYSTEM, "system.autostart", "Start at sign-in", "Launch Aster automatically for your user account", Control::Toggle),
     item(SYSTEM, "action.install-launcher", "Add to the applications menu", "Create a launcher for Aster and its profiles", Control::Run(&Action::ApplicationsMenu(true))),
     item(SYSTEM, "action.remove-launcher", "Remove from the applications menu", "Remove the launcher and its icon", Control::Run(&Action::ApplicationsMenu(false))),
+    #[cfg(windows)]
+    item(SYSTEM, "system.url-scheme", "Aster links", "Allow aster:// links to open profiles and folders", Control::Toggle),
+    #[cfg(windows)]
+    item(SYSTEM, "action.start-menu-shortcut", "Start menu shortcut", "Show Aster in the Windows Start menu", Control::Run(&Action::StartMenuShortcut)),
     item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run(&Action::ReportProblem)),
     item(CONFIG_FILE, "info.config-path", "File path", "Location of the active configuration", Control::ReadOnly(Info::ConfigPath)),
     item(CONFIG_FILE, "action.edit-config", "Open in the editor", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
@@ -956,6 +968,20 @@ impl App {
         self.dirty = true;
     }
 
+    pub fn set_start_menu_shortcut(&mut self, exists: bool) {
+        if self.start_menu_shortcut != exists {
+            self.start_menu_shortcut = exists;
+            self.dirty = true;
+        }
+    }
+
+    pub fn start_menu_shortcut_error(&mut self, error: &str) {
+        if let Some(page) = self.settings.as_mut() {
+            page.notice = Some(tf("Could not update the shortcut: {error}", &[("error", error)]));
+            self.dirty = true;
+        }
+    }
+
     pub fn set_config_status(&mut self, error: Option<String>) {
         self.config_status = Some(error.map_or(Ok(()), Err));
         self.dirty = true;
@@ -1592,6 +1618,10 @@ impl App {
 
 pub fn explorer_label() -> &'static str {
     t("Open in Aster")
+}
+
+pub fn explorer_paste_label() -> &'static str {
+    t("Paste path")
 }
 
 pub(crate) const TRAY_MENU: [(&str, Action); 2] = [("New window", Action::NewWindow), ("Quit", Action::Quit)];

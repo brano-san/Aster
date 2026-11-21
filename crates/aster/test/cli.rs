@@ -12,6 +12,7 @@ fn parsed(list: &[&str]) -> Parsed {
 #[test]
 fn no_arguments_open_a_window_and_flags_print_information() {
     assert_eq!(parsed(&[]), Parsed::Request(Command::Window));
+    assert_eq!(parsed(&["--new-window"]), Parsed::Request(Command::Window));
     assert_eq!(parsed(&["--version"]), Parsed::Version);
     assert_eq!(parsed(&["-h"]), Parsed::Help);
     assert!(matches!(parsed(&["--bogus"]), Parsed::Error(_)));
@@ -79,4 +80,24 @@ fn requests_survive_the_trip_between_instances() {
     assert_eq!(Request::decode(r#"{"cwd":"/tmp","command":{"kind":"run","command":["ls","-la"]}}"#), Some(request.clone()));
     assert_eq!(Request::decode(&request.encode()), Some(request));
     assert_eq!(Request::decode("garbage"), None);
+}
+
+#[test]
+fn paste_path_takes_one_literal_path_and_forwards_it() {
+    let path = r"C:\Work & Notes\plan.txt";
+    let command = Command::PastePath { path: path.into() };
+    assert_eq!(parsed(&["paste-path", path]), Parsed::Request(command.clone()));
+    let request = Request { cwd: None, command };
+    assert_eq!(Request::decode(&request.encode()), Some(request));
+    for invalid in [&["paste-path"][..], &["paste-path", ""][..], &["paste-path", "a", "b"][..], &["paste-path", "a\rb"][..]] {
+        assert!(matches!(parsed(invalid), Parsed::Error(_)));
+    }
+}
+
+#[test]
+fn url_commands_use_the_existing_instance_requests() {
+    assert_eq!(parsed(&["url", "aster://profile?profileName=My%20Shell"]), Parsed::Request(Command::Profile { name: "My Shell".into() }));
+    let dir = PathBuf::from("/home/me").join("work notes").to_string_lossy().into_owned();
+    assert_eq!(parsed(&["url", "aster://open?path=work%20notes"]), Parsed::Request(Command::Open { dir }));
+    assert!(matches!(parsed(&["url", "aster://profile?profileName=X", "extra"]), Parsed::Error(_)));
 }

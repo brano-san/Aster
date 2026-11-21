@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 
 fn cmd(script: &str) -> SpawnRequest {
     let system = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    SpawnRequest { command: format!(r"{system}\System32\cmd.exe"), args: vec!["/c".into(), script.into()], cwd: None, env: Vec::new(), cols: 80, rows: 24 }
+    SpawnRequest { command: format!(r"{system}\System32\cmd.exe"), args: vec!["/c".into(), script.into()], cols: 80, rows: 24, ..Default::default() }
 }
 
 fn delayed(script: &str) -> SpawnRequest {

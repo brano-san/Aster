@@ -197,8 +197,21 @@ impl ProfileEditor {
         Self { original, error: None, tab: 0, focus: 0, tabs, source: p, defaults, kind, groups: config.groups.clone(), global: config.profile_defaults.clone() }
     }
 
+    pub(crate) fn global_environment(env: &BTreeMap<String, String>) -> Self {
+        Self {
+            original: None, error: None, tab: 0, focus: 0, tabs: vec![EditorTab::new("Environment variables", env_fields(env).collect())],
+            source: Profile::default(), defaults: None, kind: "environment", groups: Vec::new(), global: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn is_global_environment(&self) -> bool {
+        self.kind == "environment"
+    }
+
     pub fn title(&self) -> String {
-        if self.defaults.is_some() {
+        if self.is_global_environment() {
+            t("Environment variables").into()
+        } else if self.defaults.is_some() {
             let kind = match self.kind { "ssh" => "SSH", "serial" => t("Serial"), "socket" => t("Network"), _ => t("Local") };
             tf("{type} defaults", &[("type", kind)])
         } else if self.original.is_some() {
@@ -294,13 +307,16 @@ impl ProfileEditor {
     fn flag(&self, id: Field) -> Option<bool> { self.value(id).parse().ok() }
 }
 
+fn env_fields(env: &BTreeMap<String, String>) -> impl Iterator<Item = EditorField> + '_ {
+    env.iter().map(|(k, v)| Field::Env.text(format!("{k}={v}"))).chain(std::iter::once(Field::Env.text("")))
+}
+
 fn command_tab(p: &Profile, defaults: bool) -> EditorTab {
     let mut fields = Vec::new();
     if !defaults { fields.push(Field::Command.text(command_line(p))); }
     fields.push(Field::Cwd.text(optional(p.cwd.as_ref())));
     if cfg!(windows) { fields.push(Field::Admin.toggle(p.admin.or(p.elevated.then_some(true)), true)); }
-    fields.extend(p.env.iter().map(|(k, v)| Field::Env.text(format!("{k}={v}"))));
-    fields.push(Field::Env.text(""));
+    fields.extend(env_fields(&p.env));
     EditorTab::new("Command", fields)
 }
 
@@ -385,12 +401,13 @@ impl ProfileEditor {
         Ok(options)
     }
 
-    fn environment(&self) -> Result<BTreeMap<String, String>, String> {
+    pub(crate) fn environment(&self) -> Result<BTreeMap<String, String>, String> {
         let mut env = BTreeMap::new();
         for field in self.fields().filter(|f| f.id == Field::Env && !f.value.trim().is_empty()) {
             let (name, value) = field.value.split_once('=').filter(|(name, _)| !name.trim().is_empty())
                 .ok_or_else(|| t("Enter each environment variable as key=value").to_owned())?;
-            if env.insert(name.trim().into(), value.into()).is_some() {
+            if (cfg!(windows) && env.keys().any(|key: &String| key.to_uppercase() == name.trim().to_uppercase()))
+                || env.insert(name.trim().into(), value.into()).is_some() {
                 return Err(tf("Duplicate environment variable: {name}", &[("name", name.trim())]));
             }
         }

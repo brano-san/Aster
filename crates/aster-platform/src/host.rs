@@ -59,6 +59,14 @@ fn take(input: &mut &[u8]) -> Option<String> {
     Some(value)
 }
 
+fn put_env<'a>(out: &mut Vec<u8>, values: impl ExactSizeIterator<Item = (&'a String, &'a String)>) {
+    out.extend_from_slice(&(values.len() as u32).to_le_bytes());
+    for (key, value) in values {
+        put(out, key);
+        put(out, value);
+    }
+}
+
 pub fn encode_request(req: &SpawnRequest) -> Vec<u8> {
     let mut out = Vec::new();
     put(&mut out, &req.command);
@@ -67,13 +75,14 @@ pub fn encode_request(req: &SpawnRequest) -> Vec<u8> {
         put(&mut out, a);
     }
     put(&mut out, &req.cwd.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
-    out.extend_from_slice(&(req.env.len() as u32).to_le_bytes());
-    for (k, v) in &req.env {
-        put(&mut out, k);
-        put(&mut out, v);
-    }
+    put_env(&mut out, req.env.iter().map(|(key, value)| (key, value)));
     out.extend_from_slice(&req.cols.to_le_bytes());
     out.extend_from_slice(&req.rows.to_le_bytes());
+    if let Some(environment) = &req.local_environment {
+        out.push(u8::from(environment.refresh) | (u8::from(environment.set_comspec) << 1));
+        put_env(&mut out, environment.global.iter());
+        put_env(&mut out, environment.profile.iter());
+    }
     out
 }
 
@@ -90,7 +99,19 @@ pub fn decode_request(mut input: &[u8]) -> Option<SpawnRequest> {
     let env = (0..count(input)?).map(|_| Some((take(input)?, take(input)?))).collect::<Option<Vec<_>>>()?;
     let cols = u16::from_le_bytes(input.get(..2)?.try_into().ok()?);
     let rows = u16::from_le_bytes(input.get(2..4)?.try_into().ok()?);
-    Some(SpawnRequest { command, args, cwd: (!cwd.is_empty()).then(|| PathBuf::from(cwd)), env, cols, rows })
+    let mut extra = input.get(4..)?;
+    let local_environment = match extra.split_first() {
+        None => None,
+        Some((&flags, rest)) if flags <= 3 => {
+            extra = rest;
+            let global = (0..count(&mut extra)?).map(|_| Some((take(&mut extra)?, take(&mut extra)?))).collect::<Option<_>>()?;
+            let profile = (0..count(&mut extra)?).map(|_| Some((take(&mut extra)?, take(&mut extra)?))).collect::<Option<_>>()?;
+            if !extra.is_empty() { return None; }
+            Some(Box::new(aster_core::environment::LocalEnvironment { global, profile, refresh: flags & 1 != 0, set_comspec: flags & 2 != 0 }))
+        }
+        _ => return None,
+    };
+    Some(SpawnRequest { command, args, cwd: (!cwd.is_empty()).then(|| PathBuf::from(cwd)), env, local_environment, cols, rows })
 }
 
 type Shared = Arc<Mutex<Writer>>;

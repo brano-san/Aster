@@ -139,7 +139,10 @@ pub struct Terminal {
     pub word_separator: String,
     pub scroll_on_input: bool,
     pub profile: String,
+    #[serde(rename = "env", alias = "environment")]
     pub environment: BTreeMap<String, String>,
+    pub refresh_environment: bool,
+    pub set_comspec: bool,
     pub identification: Identification,
     pub search_options: SearchOptions,
     pub recover_tabs: bool,
@@ -180,6 +183,8 @@ impl Default for Terminal {
             scroll_on_input: true,
             profile: String::new(),
             environment: BTreeMap::new(),
+            refresh_environment: true,
+            set_comspec: false,
             identification: Identification::Aster,
             search_options: SearchOptions::default(),
             recover_tabs: true,
@@ -295,6 +300,7 @@ pub struct CustomScheme {
 pub struct System {
     pub explorer_menu: bool,
     pub autostart: bool,
+    pub url_scheme: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

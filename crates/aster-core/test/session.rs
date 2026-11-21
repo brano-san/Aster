@@ -47,11 +47,13 @@ fn tabs_splits_profiles_folders_and_buffers_survive_a_restart() {
     a.frame(&mut g, false);
     a.take_effects();
 
-    let state = SessionState { windows: vec![a.snapshot()], recent: Vec::new() };
+    let state = SessionState { windows: vec![a.snapshot()], recent_folders: vec!["D:/work".into()], ..SessionState::default() };
     let text = state.to_text();
     assert!(!text.contains("needle"));
     let parsed = SessionState::parse(&text).unwrap();
     assert_eq!(parsed.to_text(), text);
+    assert_eq!(parsed.recent_folders, ["D:/work"]);
+    assert!(SessionState::parse(r#"{"recent":[]}"#).unwrap().recent_folders.is_empty());
 
     let (mut fresh, mut g2) = app();
     assert!(fresh.restore(&parsed.windows[0]));

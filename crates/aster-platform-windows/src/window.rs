@@ -879,6 +879,9 @@ impl WindowSystem for Win32 {
     type Waker = Win32Waker;
 
     fn new() -> Result<Self, PlatformError> {
+        if let Err(error) = crate::shell_link::set_process_id() {
+            tracing::warn!("could not set the application ID: {error}");
+        }
         unsafe {
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let hinst: HINSTANCE = GetModuleHandleW(None).map_err(err)?.into();

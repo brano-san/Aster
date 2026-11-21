@@ -19,8 +19,6 @@ use std::time::SystemTime;
 
 const ATLAS: u32 = 2048;
 
-type Elevated = (WindowId, PaneId, Result<aster_platform::Spawned, aster_platform::PlatformError>, aster_core::app::Shared);
-
 type Win<P> = <<P as Platform>::Windows as WindowSystem>::Window;
 type Device<P> = <<P as Platform>::Renderer as Renderer>::Device;
 
@@ -39,6 +37,7 @@ enum StoreEvent {
     Vault(VaultUpdate),
     Config(u64, Option<SystemTime>, Result<Box<Config>, String>),
     ConfigStatus(u64, Option<String>),
+    StartMenuShortcut(Option<WindowId>, Result<bool, aster_platform::PlatformError>),
     DefaultConfig(WindowId, std::io::Result<PathBuf>),
     Known { window: WindowId, pane: PaneId, key: String, line: usize, known: bool },
     Fill { window: WindowId, pane: PaneId, key: String, request: u64, secret: Option<String> },
@@ -75,8 +74,7 @@ pub struct Handler<P: Platform> {
     file_rx: Receiver<(WindowId, PaneId, aster_core::files::FileReply)>,
     note_tx: Sender<crate::session::TransferNote>,
     note_rx: Receiver<crate::session::TransferNote>,
-    elevated_tx: Sender<Elevated>,
-    elevated_rx: Receiver<Elevated>,
+    local_spawns: crate::local_spawn::LocalSpawns,
     exit_tx: Sender<Exit>,
     config_path: Option<PathBuf>,
     config_stamp: Option<SystemTime>,
@@ -94,8 +92,12 @@ pub struct Handler<P: Platform> {
     startup: Option<crate::cli::Request>,
     last_focused: Option<WindowId>,
     recent: Vec<String>,
+    recent_folders: Vec<String>,
+    jump_list: Option<aster_core::jump_list::JumpList>,
     updates: crate::update::UpdateWorker,
     update_window: Option<WindowId>,
+    shell_integration: crate::shell_integration::ShellIntegration,
+    start_menu_shortcut: bool,
     restarting: bool,
 }
 
@@ -152,7 +154,7 @@ impl<P: Platform> Handler<P> {
         let (exit_tx, exits) = unbounded();
         let (file_tx, file_rx) = unbounded();
         let (note_tx, note_rx) = unbounded();
-        let (elevated_tx, elevated_rx) = unbounded();
+        let local_spawns = crate::local_spawn::LocalSpawns::new()?;
         let config_path = crate::config_path::<P>();
         let path = config_path.clone();
         let (tx, store_rx) = unbounded();
@@ -177,12 +179,18 @@ impl<P: Platform> Handler<P> {
         }, move |update| events.post(StoreEvent::Vault(update)))?;
         let saved = load_session::<P>();
         let recent = saved.recent;
+        let recent_folders = saved.recent_folders;
         let pending = if config.terminal.recover_tabs || crate::update::restarted() { saved.windows } else { Vec::new() };
         let update_waker = waker.clone();
         let updates = crate::update::UpdateWorker::start::<P>(Arc::new(move || update_waker.wake()))?;
         let desktop = crate::desktop::Worker::start()?;
         let launcher_installed = cfg!(target_os = "linux").then_some(false);
-        let handler = Self { desktop, launcher_installed, font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, elevated_tx, elevated_rx, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, updates, update_window: None, restarting: false };
+        let shell_integration = crate::shell_integration::ShellIntegration::start::<P>()?;
+        if cfg!(windows) && !capturing() {
+            let events = store_events.clone();
+            shell_integration.shortcut(None, move |result| events.post(StoreEvent::StartMenuShortcut(None, result)));
+        }
+        let handler = Self { desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_stamp: None, settings_revision: 0, secrets, vault_view, store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false };
         handler.update_launcher(&handler.config, None);
         handler.apply_autostart(&handler.config);
         Ok((handler, worker))
@@ -208,11 +216,13 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Command::Run { command, dir } => app.run_command(&command, dir.or(request.cwd)),
-            Command::Profile { name } => match app.find_profile(&name) {
-                Some(profile) => app.open_tab(profile),
-                None => tracing::warn!("no profile named {name}"),
-            },
+            Command::Profile { name } => {
+                if !app.open_named_profile(&name) {
+                    tracing::warn!("no profile named {name}");
+                }
+            }
             Command::Paste { text } => app.paste(text),
+            Command::PastePath { path } => app.paste_path(&path),
         }
         true
     }
@@ -283,11 +293,25 @@ impl<P: Platform> Handler<P> {
         if config.system.autostart != self.config.system.autostart || (config.system.autostart && crate::background_mode(&config) != crate::background_mode(&self.config)) {
             self.apply_autostart(&config);
         }
+        if config.system.url_scheme != self.config.system.url_scheme {
+            self.shell_integration.url_scheme(config.system.url_scheme);
+        }
         if config.appearance != self.config.appearance {
             self.window_prefs_dirty = true;
             self.waker.wake();
         }
         self.config = config;
+        self.refresh_jump_list();
+    }
+
+    fn refresh_jump_list(&mut self) {
+        if cfg!(windows) && !capturing() {
+            let next = aster_core::jump_list::build(&self.config, &self.profiles, &self.recent, &self.recent_folders);
+            if self.jump_list.as_ref() != Some(&next) {
+                self.shell_integration.jump_list(next.clone());
+                self.jump_list = Some(next);
+            }
+        }
     }
 
     fn update_launcher(&self, config: &Config, change: Option<(WindowId, bool)>) {
@@ -307,6 +331,10 @@ impl<P: Platform> Handler<P> {
             return;
         }
         let label = aster_core::settings::explorer_label();
+        if cfg!(windows) {
+            self.shell_integration.explorer(label, aster_core::settings::explorer_paste_label(), enabled);
+            return;
+        }
         self.desktop.send(move || {
             if !P::set_explorer_menu(label, enabled) {
                 tracing::warn!("could not update the file manager menu");
@@ -441,35 +469,16 @@ impl<P: Platform> Handler<P> {
                     args: launch.args,
                     cwd: launch.cwd.map(PathBuf::from),
                     env: launch.env.into_iter().collect(),
+                    local_environment: launch.local_environment,
                     cols: launch.cols,
                     rows: launch.rows,
                 };
-                if launch.elevated {
-                    let (tx, waker) = (self.elevated_tx.clone(), self.waker.clone());
-                    let started = std::thread::Builder::new().name("aster-elevate".into()).spawn(move || {
-                        let result = P::spawn_elevated(&req);
-                        let _ = tx.send((id, pane, result, terminal));
-                        waker.wake();
-                    });
-                    if let Err(e) = started {
-                        tracing::error!("elevated spawn thread: {e}");
-                    }
-                    return;
-                }
-                match P::spawn(&req) {
-                    Ok(spawned) => {
-                        let pid = spawned.pty.pid();
-                        if let Some(s) = self.windows.get_mut(&id) {
-                            s.app.set_pane_pid(pane, pid);
-                        }
-                        let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal);
-                        self.sessions.insert((id, pane), session);
-                    }
-                    Err(e) => {
-                        tracing::error!("spawn {}: {e}", req.command);
-                        if let Some(s) = self.windows.get_mut(&id) {
-                            s.app.spawn_failed(pane, &e.message);
-                        }
+                let request = crate::local_spawn::Request { key: (id, pane), request: req, terminal, stream: launch.stream, elevated: launch.elevated };
+                let waker = self.waker.clone();
+                if let Err(error) = self.local_spawns.launch::<P>(request, move || waker.wake()) {
+                    tracing::error!("local spawn worker: {error}");
+                    if let Some(s) = self.windows.get_mut(&id) {
+                        s.app.spawn_failed(pane, &error.to_string());
                     }
                 }
             }
@@ -490,6 +499,8 @@ impl<P: Platform> Handler<P> {
                     Some(KeysAction::Write) | None => {
                         if let Some(s) = self.sessions.get(&(id, pane)) {
                             s.write(bytes);
+                        } else if let Some(pending) = self.local_spawns.pending((id, pane)) {
+                            pending.input.push(bytes);
                         }
                     }
                 }
@@ -502,9 +513,12 @@ impl<P: Platform> Handler<P> {
             Effect::Resize { pane, cols, rows } => {
                 if let Some(s) = self.sessions.get(&(id, pane)) {
                     s.pty.resize(cols, rows);
+                } else if let Some(pending) = self.local_spawns.pending((id, pane)) {
+                    pending.size = Some((cols, rows));
                 }
             }
             Effect::Kill { pane } => {
+                self.local_spawns.take_pending((id, pane));
                 self.serials.remove(&(id, pane));
                 if let Some(s) = self.sessions.remove(&(id, pane)) {
                     s.pty.kill();
@@ -540,11 +554,16 @@ impl<P: Platform> Handler<P> {
                     s.app.set_recent(recent.clone());
                 }
                 self.recent = recent;
+                self.refresh_jump_list();
             }
             Effect::OpenConfigFile => {
                 if let Some(path) = &self.config_path {
                     P::open(&path.to_string_lossy());
                 }
+            }
+            Effect::StartMenuShortcut(create) => {
+                let events = self.store_events.clone();
+                self.shell_integration.shortcut(Some(create), move |result| events.post(StoreEvent::StartMenuShortcut(Some(id), result)));
             }
             Effect::OpenLog | Effect::OpenConfigFolder => {
                 if let Some(dir) = self.config_path.as_deref().and_then(|p| p.parent()) {
@@ -714,7 +733,7 @@ impl<P: Platform> Handler<P> {
             return;
         }
         let Some(path) = crate::session_path::<P>() else { return };
-        let state = SessionState { windows: self.windows.values().map(|s| s.app.session_snapshot()).filter(|w| !w.tabs.is_empty()).collect(), recent: self.recent.clone() };
+        let state = SessionState { windows: self.windows.values().map(|s| s.app.session_snapshot()).filter(|w| !w.tabs.is_empty()).collect(), recent: self.recent.clone(), recent_folders: self.recent_folders.clone() };
         let tmp = path.with_extension("tmp");
         if let Err(e) = std::fs::write(&tmp, state.to_text()).and_then(|_| std::fs::rename(&tmp, &path)) {
             tracing::warn!("{}: {e}", path.display());
@@ -802,6 +821,20 @@ impl<P: Platform> Handler<P> {
                         }
                     }
                 }
+                StoreEvent::StartMenuShortcut(window, result) => match result {
+                    Ok(exists) => {
+                        self.start_menu_shortcut = exists;
+                        for state in self.windows.values_mut() {
+                            state.app.set_start_menu_shortcut(exists);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("Start menu shortcut: {error}");
+                        if let Some(state) = window.and_then(|id| self.windows.get_mut(&id)) {
+                            state.app.start_menu_shortcut_error(&error.to_string());
+                        }
+                    }
+                },
                 StoreEvent::ConfigStatus(revision, error) => {
                     if self.settings_revision == revision {
                         self.show_config_status(error);
@@ -867,28 +900,36 @@ impl<P: Platform> Handler<P> {
         window.close();
     }
 
-    fn drain_elevated(&mut self) {
-        while let Ok((id, pane, result, terminal)) = self.elevated_rx.try_recv() {
-            match result {
-                Ok(spawned) if self.windows.get(&id).and_then(|s| s.app.terminal(pane)).is_none() => spawned.pty.kill(),
+    fn drain_local_spawns(&mut self) {
+        while let Some(mut ready) = self.local_spawns.next() {
+            let (id, pane) = ready.key;
+            let Some(mut pending) = self.local_spawns.take_pending((id, pane)) else { continue };
+            let Some(state) = self.windows.get_mut(&id) else { continue };
+            if state.app.terminal(pane).is_none() {
+                continue;
+            }
+            match ready.take() {
                 Ok(spawned) => {
-                    if let Some(state) = self.windows.get_mut(&id) {
-                        state.app.set_pane_pid(pane, spawned.pty.pid());
+                    state.app.set_pane_pid(pane, spawned.pty.pid());
+                    if let Some((cols, rows)) = pending.size {
+                        spawned.pty.resize(cols, rows);
                     }
-                    let session = Session::start(self.session_start(id, pane), spawned, terminal);
+                    let session = Session::start(self.session_start(id, pane), spawned, ready.terminal.clone());
+                    for input in std::mem::take(&mut pending.input) {
+                        session.write(input);
+                    }
                     self.sessions.insert((id, pane), session);
                 }
-                Err(e) => {
-                    if let Some(s) = self.windows.get_mut(&id) {
-                        s.app.spawn_failed(pane, &e.message);
-                    }
+                Err(error) => {
+                    tracing::error!("local shell: {error}");
+                    state.app.spawn_failed(pane, &error.message);
                 }
             }
         }
     }
 
     fn drain_exits(&mut self) {
-        self.drain_elevated();
+        self.drain_local_spawns();
         while let Ok((wid, pane, note)) = self.note_rx.try_recv() {
             if let Some(s) = self.windows.get_mut(&wid) {
                 let state = match note {
@@ -978,6 +1019,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         if let Some(installed) = self.launcher_installed {
             app.set_launcher_installed(installed);
         }
+        app.set_start_menu_shortcut(self.start_menu_shortcut);
         app.set_system_language(&P::ui_language());
         app.vault_state(self.vault_view.clone());
         app.set_cwd_probe(Arc::new(P::process_cwd));
@@ -1006,6 +1048,10 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             self.applied = None;
             self.waker.wake();
             self.apply_window_prefs(window);
+            self.refresh_jump_list();
+            if self.config.system.url_scheme || !capturing() {
+                self.shell_integration.url_scheme(self.config.system.url_scheme);
+            }
             if self.config.system.explorer_menu || cfg!(target_os = "linux") {
                 self.apply_explorer_menu(self.config.system.explorer_menu);
             }
@@ -1118,11 +1164,18 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         if let Some(s) = self.windows.get_mut(&window.id()) {
             s.app.woken();
         }
+        if cfg!(windows) && self.request_target() == Some(window.id())
+            && self.windows.get(&window.id()).and_then(|s| s.app.reported_local_cwd())
+                .is_some_and(|folder| aster_core::jump_list::remember_folder(&mut self.recent_folders, &folder))
+        {
+            self.refresh_jump_list();
+        }
         self.apply(window);
     }
 
     fn destroyed(&mut self, window: &Win<P>) {
         let id = window.id();
+        self.local_spawns.cancel_window(id);
         if let Some(mut s) = self.windows.remove(&id) {
             s.app.close_all();
             for e in s.app.take_effects() {
