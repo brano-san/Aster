@@ -35,6 +35,91 @@ fn spawns(effects: &[Effect]) -> Vec<(PaneId, Launch)> {
     effects.iter().filter_map(|e| if let Effect::Spawn { pane, launch, .. } = e { Some((*pane, launch.clone())) } else { None }).collect()
 }
 
+fn take_command_probe(a: &mut App) -> (u64, Vec<u32>) {
+    a.take_effects().into_iter().find_map(|e| match e {
+        Effect::ProbeCommand { request, pids } => Some((request, pids)),
+        _ => None,
+    }).expect("a scheduled command probe")
+}
+
+#[test]
+fn command_notification_polls_until_busy_then_idle_only_once() {
+    let (mut a, _) = app();
+    a.config.terminal.cursor_blink = false;
+    a.open_default_tab();
+    a.set_pane_pid(a.focused_pane().unwrap(), 72);
+    a.run(Action::SplitRight);
+    a.set_pane_pid(a.focused_pane().unwrap(), 91);
+    a.run(Action::NotifyCommand);
+    let (request, pids) = take_command_probe(&mut a);
+    assert_eq!(pids, [72, 91]);
+    let before = Instant::now();
+    a.command_probe_finished(request, Some(false));
+    let effects = a.take_effects();
+    assert!(effects.iter().any(|e| matches!(e, Effect::Timer(1..=2000))));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Attention)));
+    let next = a.tabs[0].command_watch.deadline().unwrap();
+    assert!(next >= before + Duration::from_secs(2));
+    a.poll_commands(next - Duration::from_millis(1));
+    assert!(a.take_effects().is_empty());
+    a.poll_commands(next);
+    let (request, _) = take_command_probe(&mut a);
+    a.command_probe_finished(request, Some(true));
+    a.open_default_tab();
+    a.poll_commands(a.tabs[0].command_watch.deadline().unwrap());
+    let (request, _) = take_command_probe(&mut a);
+    a.command_probe_finished(request, Some(false));
+    assert!(a.tab_activity(0));
+    a.command_probe_finished(request, Some(false));
+    a.poll_commands(Instant::now() + Duration::from_secs(5));
+    let effects = a.take_effects();
+    assert_eq!(effects.iter().filter(|e| matches!(e, Effect::Attention)).count(), 1);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::ProbeCommand { .. })));
+    a.activate(0);
+    assert!(!a.tab_activity(0));
+}
+
+#[test]
+fn command_notification_discards_cancelled_and_closed_tab_replies() {
+    let (mut a, _) = app();
+    a.open_default_tab();
+    a.set_pane_pid(a.focused_pane().unwrap(), 44);
+    a.run(Action::NotifyCommand);
+    let (first, _) = take_command_probe(&mut a);
+    a.run(Action::NotifyCommand);
+    a.run(Action::NotifyCommand);
+    let (second, _) = take_command_probe(&mut a);
+    a.command_probe_finished(first, Some(true));
+    a.command_probe_finished(second, Some(false));
+    assert!(!a.tab_activity(0));
+    a.poll_commands(a.tabs[0].command_watch.deadline().unwrap());
+    let (request, _) = take_command_probe(&mut a);
+    a.open_default_tab();
+    a.close_tab(0);
+    a.command_probe_finished(request, Some(true));
+    assert!(!a.tabs[0].command_watch.armed());
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Attention)));
+}
+
+#[test]
+fn failed_command_probe_retries_without_clearing_the_busy_state() {
+    let (mut a, _) = app();
+    a.open_default_tab();
+    a.set_pane_pid(a.focused_pane().unwrap(), 10);
+    a.run(Action::NotifyCommand);
+    let (request, _) = take_command_probe(&mut a);
+    a.command_probe_finished(request, Some(true));
+    a.poll_commands(a.tabs[0].command_watch.deadline().unwrap());
+    let (request, _) = take_command_probe(&mut a);
+    a.command_probe_finished(request, None);
+    assert!(!a.tab_activity(0));
+    a.poll_commands(a.tabs[0].command_watch.deadline().unwrap());
+    let (request, _) = take_command_probe(&mut a);
+    a.command_probe_finished(request, Some(false));
+    assert!(a.tab_activity(0));
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Attention)));
+}
+
 #[test]
 fn turning_animations_off_clears_transients_and_stops_the_cursor_timer() {
     let (mut a, mut gfx) = app();

@@ -10,8 +10,8 @@ fn ssh_app() -> (App, PaneId) {
     profile.ssh = Some("box".into());
     let mut a = App::new(Config::default(), vec![profile], true, None, Arc::new(|| {}));
     a.set_viewport(1000, 700, 1.0);
-    a.chrome = crate::view::chrome(1000.0, 700.0, 1.0, 1);
     a.open_default_tab();
+    a.chrome = a.tab_chrome();
     let pane = a.focused_pane().unwrap();
     a.take_effects();
     (a, pane)

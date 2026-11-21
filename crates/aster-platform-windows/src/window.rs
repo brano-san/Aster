@@ -1049,6 +1049,7 @@ fn map_key(vk: u16) -> Key {
         VK_DELETE => Key::Delete,
         VK_INSERT => Key::Insert,
         VK_TAB => Key::Tab,
+        VK_CONTROL | VK_LCONTROL | VK_RCONTROL => Key::Control,
         VK_SPACE => Key::Space,
         VK_APPS => Key::Apps,
         VK_OEM_1 => Key::Char(';'),

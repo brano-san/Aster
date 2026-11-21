@@ -2,9 +2,32 @@ use crate::app::{App, Effect};
 use crate::input::Key;
 use crate::panes::PaneId;
 use aster_gfx::render::Rect;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 pub const BUTTONS: [&str; 2] = ["Close", "Cancel"];
 pub const LISTED: usize = 6;
+
+const COMMAND_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CommandWatch {
+    #[default]
+    Off,
+    Waiting { busy: bool, next: Instant },
+    Polling { busy: bool, request: u64 },
+    Finished,
+}
+
+impl CommandWatch {
+    pub(crate) fn deadline(self) -> Option<Instant> {
+        if let Self::Waiting { next, .. } = self { Some(next) } else { None }
+    }
+
+    pub(crate) fn armed(self) -> bool {
+        matches!(self, Self::Waiting { .. } | Self::Polling { .. })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloseTarget {
@@ -67,12 +90,19 @@ impl App {
         }
     }
 
+    fn live_shells<'a>(&'a self, panes: &'a [PaneId]) -> impl Iterator<Item = (&'a crate::profile::Profile, u32)> + 'a {
+        panes.iter().filter_map(|id| self.panes.get(id)).filter(|p| p.exited.is_none())
+            .filter_map(|p| Some((&p.profile, p.pid.filter(|&pid| pid != 0)?)))
+    }
+
+    fn command_pids(&self, tab: &crate::app::Tab) -> Vec<u32> {
+        self.live_shells(&tab.root.panes()).filter(|(profile, _)| profile.is_local()).map(|(_, pid)| pid).collect()
+    }
+
     pub(crate) fn busy_programs(&self, panes: &[PaneId]) -> Vec<String> {
         let Some(probe) = self.children_probe.as_ref() else { return Vec::new() };
         let mut out: Vec<String> = Vec::new();
-        for id in panes {
-            let Some(pane) = self.panes.get(id).filter(|p| p.exited.is_none()) else { continue };
-            let Some(pid) = pane.pid.filter(|&p| p != 0) else { continue };
+        for (_, pid) in self.live_shells(panes) {
             for name in probe(pid) {
                 if !out.contains(&name) {
                     out.push(name);
@@ -82,9 +112,61 @@ impl App {
         out
     }
 
+    pub(crate) fn can_watch_command(&self, index: usize) -> bool {
+        self.tabs.get(index).is_some_and(|t| t.command_watch.armed() || !self.command_pids(t).is_empty())
+    }
+
+    pub(crate) fn toggle_command_watch(&mut self) {
+        if !self.can_watch_command(self.active) {
+            return;
+        }
+        let now = Instant::now();
+        let watch = &mut self.tabs[self.active].command_watch;
+        *watch = if watch.armed() { CommandWatch::Off } else { CommandWatch::Waiting { busy: false, next: now } };
+        self.poll_commands(now);
+        self.dirty = true;
+    }
+
+    pub(crate) fn poll_commands(&mut self, now: Instant) {
+        static REQUEST: AtomicU64 = AtomicU64::new(1);
+        for i in 0..self.tabs.len() {
+            let tab = &self.tabs[i];
+            let CommandWatch::Waiting { busy, next } = tab.command_watch else { continue };
+            if now < next {
+                continue;
+            }
+            let pids = self.command_pids(tab);
+            if pids.is_empty() {
+                self.tabs[i].command_watch = if busy { CommandWatch::Finished } else { CommandWatch::Off };
+                if busy {
+                    self.push(Effect::Attention);
+                }
+                self.dirty = true;
+            } else {
+                let request = REQUEST.fetch_add(1, Ordering::Relaxed);
+                self.tabs[i].command_watch = CommandWatch::Polling { busy, request };
+                self.push(Effect::ProbeCommand { request, pids });
+            }
+        }
+    }
+
+    pub fn command_probe_finished(&mut self, request: u64, result: Option<bool>) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| matches!(t.command_watch, CommandWatch::Polling { request: r, .. } if r == request)) else { return };
+        let CommandWatch::Polling { busy, .. } = tab.command_watch else { return };
+        if busy && result == Some(false) {
+            tab.command_watch = CommandWatch::Finished;
+            self.push(Effect::Attention);
+            self.dirty = true;
+        } else {
+            tab.command_watch = CommandWatch::Waiting { busy: result.unwrap_or(busy), next: Instant::now() + COMMAND_INTERVAL };
+            self.schedule_timer();
+        }
+    }
+
     pub(crate) fn request_close(&mut self, target: CloseTarget) {
         let programs = if self.config.terminal.confirm_close { self.busy_programs(&self.target_panes(&target)) } else { Vec::new() };
-        if programs.is_empty() {
+        let pinned = matches!(&target, CloseTarget::Tabs(reps) if self.tabs.iter().any(|tab| tab.pinned && reps.contains(&tab.focus)));
+        if programs.is_empty() && !pinned {
             return self.close_now(target);
         }
         self.overlay = None;

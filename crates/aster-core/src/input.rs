@@ -47,6 +47,7 @@ pub enum Key {
     NumStar,
     NumSlash,
     Apps,
+    Control,
     Other,
 }
 

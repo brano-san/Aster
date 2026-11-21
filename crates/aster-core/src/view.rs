@@ -8,12 +8,7 @@ use aster_gfx::render::{Color, Rect};
 use aster_gfx::text::{FontFamily, FontStyle, Gfx, TextBackend};
 use aster_vt::{CursorShape, Flags, Rgb, Size};
 
-pub const TAB_H: f32 = 36.0;
-const CAPTION_W: f32 = 46.0;
-const PLUS_W: f32 = 36.0;
-const TAB_MAX: f32 = 220.0;
-const TAB_MIN: f32 = 84.0;
-const TAB_TOP: f32 = 6.0;
+pub use crate::tabs::{bare_chrome, chrome, Chrome, TabSlot, TAB_H};
 const PAD: f32 = 6.0;
 const G_CLOSE: &str = "\u{E8BB}";
 const G_PLUS: &str = "\u{E710}";
@@ -71,50 +66,6 @@ impl CellRun {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct TabSlot {
-    pub rect: Rect,
-    pub close: Rect,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Chrome {
-    pub tab_bar: Rect,
-    pub tabs: Vec<TabSlot>,
-    pub plus: Rect,
-    pub min: Rect,
-    pub max: Rect,
-    pub close: Rect,
-    pub content: Rect,
-}
-
-pub fn chrome(w: f32, h: f32, s: f32, tabs: usize) -> Chrome {
-    let bar_h = (TAB_H * s).round();
-    let cw = (CAPTION_W * s).round();
-    let close = Rect::new(w - cw, 0.0, cw, bar_h);
-    let max = Rect::new(w - 2.0 * cw, 0.0, cw, bar_h);
-    let min = Rect::new(w - 3.0 * cw, 0.0, cw, bar_h);
-    let left = (8.0 * s).round();
-    let plus_w = (PLUS_W * s).round();
-    let avail = (min.x - left - plus_w - 16.0 * s).max(0.0);
-    let tab_w = if tabs == 0 { 0.0 } else { (avail / tabs as f32).clamp(TAB_MIN * s, TAB_MAX * s).floor() };
-    let top = (TAB_TOP * s).round();
-    let close_w = (24.0 * s).round();
-    let slots: Vec<TabSlot> = (0..tabs)
-        .map(|i| {
-            let rect = Rect::new(left + i as f32 * tab_w, top, tab_w, bar_h - top);
-            let close = Rect::new(rect.right() - close_w - (6.0 * s).round(), rect.y + ((rect.h - close_w) / 2.0).round(), close_w, close_w);
-            TabSlot { rect, close }
-        })
-        .collect();
-    let plus_x = (left + tabs as f32 * tab_w + 4.0 * s).min(min.x - plus_w);
-    let plus = Rect::new(plus_x, top + ((bar_h - top - plus_w * 0.8) / 2.0).round(), plus_w, (plus_w * 0.8).round());
-    Chrome { tab_bar: Rect::new(0.0, 0.0, w, bar_h), tabs: slots, plus, min, max, close, content: Rect::new(0.0, bar_h, w, (h - bar_h).max(0.0)) }
-}
-
-pub fn bare_chrome(w: f32, h: f32) -> Chrome {
-    Chrome { tab_bar: Rect::new(0.0, 0.0, w, 0.0), content: Rect::new(0.0, 0.0, w, h), ..Chrome::default() }
-}
 
 pub fn pane_inner_with(r: Rect, s: f32, padding: f32) -> Rect {
     let p = (padding.clamp(0.0, 64.0) * s).round();
@@ -150,11 +101,11 @@ pub struct OverlayGeometry {
 
 pub fn overlay_geometry(app: &App, o: &Overlay) -> OverlayGeometry {
     let s = app.ui();
-    let (w, _) = app.size;
+    let content = app.chrome.content;
     let profiles = o.kind == OverlayKind::Profiles;
-    let width = (if profiles { 520.0 } else { 560.0 } * s).min(w - 32.0 * s).max(200.0 * s).round();
-    let x = ((w - width) / 2.0).round();
-    let y = app.chrome.content.y + (10.0 * s).round();
+    let width = (if profiles { 520.0 } else { 560.0 } * s).min((content.w - 32.0 * s).max(200.0 * s)).min(content.w).round();
+    let x = (content.x + (content.w - width) / 2.0).round();
+    let y = content.y + (10.0 * s).round();
     let input_h = (if profiles { 44.0 } else { 40.0 } * s).round();
     let item_h = (if profiles { 34.0 } else { 30.0 } * s).round();
     let header_h = (30.0 * s).round();
@@ -213,8 +164,7 @@ impl App {
         let m = self.metrics_for(g);
         self.metrics = Some(m);
         let s = self.ui();
-        let (w, h) = self.size;
-        self.chrome = if self.tab_bar_hidden() { bare_chrome(w, h) } else { chrome(w, h, s, self.tabs.len()) };
+        self.chrome = self.tab_chrome();
         self.mark_seen();
         let progress = self.tab_progress(self.active);
         if progress != self.shown_progress {
@@ -223,8 +173,11 @@ impl App {
         }
         let theme = self.theme;
         g.begin(Color::rgba(0));
-        g.dl.rect(self.chrome.tab_bar, theme.chrome);
         if !self.tab_bar_hidden() {
+            g.dl.rect(self.chrome.tab_bar, theme.chrome);
+            if self.chrome.caption != self.chrome.tab_bar {
+                g.dl.rect(self.chrome.caption, theme.chrome);
+            }
             self.draw_tab_bar(g, maximized);
         }
         let content = self.chrome.content;
@@ -275,6 +228,7 @@ impl App {
         if self.tabs.is_empty() {
             self.draw_start_page(g);
         }
+        let content_layers = g.dl.instances.len();
         self.draw_search(g);
         self.draw_settings(g);
         self.draw_files(g);
@@ -284,7 +238,9 @@ impl App {
         self.draw_paste(g, m);
         self.draw_close(g);
         self.draw_tab_toast(g);
+        g.dl.confine(content_layers, content);
         self.draw_menu(g);
+        self.draw_mru(g);
         self.mark_drawn();
     }
 
@@ -352,24 +308,32 @@ impl App {
         let icons = FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false);
         let (mx, my) = self.mouse;
         let radius = (8.0 * s).round();
-        g.dl.set_clip(Some(c.tab_bar));
         for (i, slot) in c.tabs.iter().enumerate() {
+            let r = slot.rect;
+            if r.w <= 0.0 || r.h <= 0.0 {
+                continue;
+            }
+            g.dl.set_clip(Some(r));
             let active = i == self.active;
             let hovered = slot.rect.contains(mx, my);
             let dragging = matches!(self.drag, Drag::Tab { index, moved: true, .. } if index == i);
-            let r = slot.rect;
             if active || dragging {
-                g.dl.round_rect(Rect::new(r.x, r.y, r.w, r.h + radius), theme.tab_active, radius);
+                let shape = match self.config.appearance.tab_bar_position {
+                    crate::config::TabBarPosition::Top => Rect::new(r.x, r.y, r.w, r.h + radius),
+                    crate::config::TabBarPosition::Bottom => Rect::new(r.x, r.y - radius, r.w, r.h + radius),
+                    _ => r.inset(0.0, (2.0 * s).round()),
+                };
+                g.dl.round_rect(shape, theme.tab_active, radius);
             } else if hovered {
                 g.dl.round_rect(Rect::new(r.x + 2.0 * s, r.y + 2.0 * s, r.w - 4.0 * s, r.h - 6.0 * s), theme.tab_hover, (6.0 * s).round());
-            } else if i + 1 != self.active && i + 1 < c.tabs.len() {
+            } else if !c.vertical && i + 1 != self.active && i + 1 < c.tabs.len() {
                 let lh = (16.0 * s).round();
                 g.dl.rect(Rect::new(r.right() - 1.0, r.y + ((r.h - lh) / 2.0).round(), (1.0 * s).max(1.0), lh), theme.divider);
             }
             if let Some(ink) = self.tab_color(i) {
                 g.dl.round_rect(Rect::new(r.x + (10.0 * s).round(), r.y + (3.0 * s).round(), r.w - (20.0 * s).round(), (3.0 * s).round().max(2.0)), ink, (1.5 * s).round());
             }
-            let show_close = active || hovered;
+            let show_close = slot.close.w > 0.0 && (active || hovered);
             let text_x = r.x + (12.0 * s).round();
             let text_end = if show_close { slot.close.x - 4.0 * s } else { r.right() - 12.0 * s };
             let y = baseline(g, r, ui);
@@ -382,8 +346,9 @@ impl App {
                     let caret_h = (14.0 * s).round();
                     g.dl.rect(Rect::new(text_x + w + 1.0, field.y + ((field.h - caret_h) / 2.0).round(), (1.0 * s).round().max(1.0), caret_h), theme.accent);
                 }
+                None if self.tabs[i].pinned => self.draw_pinned_tab(g, i, r, ui),
                 None => {
-                    let title = self.tab_title(i);
+                    let title = self.tab_label(i);
                     let mut x = text_x;
                     if self.tab_activity(i) {
                         let d = (6.0 * s).round();
@@ -412,10 +377,12 @@ impl App {
                 centered(g, slot.close, G_CLOSE, FontStyle::new(FontFamily::Icons, (8.0 * s).round(), false), if active { theme.text } else { theme.text_dim });
             }
         }
+        g.dl.set_clip(Some(c.tab_bar));
         if c.plus.contains(mx, my) {
             g.dl.round_rect(c.plus, theme.button_hover, (6.0 * s).round());
         }
         centered(g, c.plus, G_PLUS, icons, theme.text_dim);
+        g.dl.set_clip(Some(c.caption));
         for (r, glyph, area) in [(c.min, G_MIN, HitArea::Minimize), (c.max, if maximized { G_RESTORE } else { G_MAX }, HitArea::Maximize), (c.close, G_CLOSE, HitArea::Close)] {
             let hot = self.hover == area;
             let pressed = self.drag == Drag::Button(area);
@@ -431,6 +398,31 @@ impl App {
             centered(g, r, glyph, icons, ink);
         }
         g.dl.set_clip(None);
+    }
+
+    fn draw_pinned_tab<B: TextBackend>(&self, g: &mut Gfx<B>, index: usize, r: Rect, ui: FontStyle) {
+        let s = self.ui();
+        let number = self.tab_label(index);
+        let ink = if self.active == index { self.theme.text } else { self.theme.text_dim };
+        let Some(pane) = self.panes.get(&self.tabs[index].focus) else {
+            centered(g, r, &number, ui, ink);
+            return;
+        };
+        let (label, tint) = crate::picker::badge(&pane.profile);
+        let small = FontStyle::new(FontFamily::Ui, (8.5 * s).round(), true);
+        let badge_w = (g.measure(&label, small) + 6.0 * s).round();
+        let number_w = g.measure(&number, ui);
+        let gap = (3.0 * s).round();
+        let x = (r.x + (r.w - number_w - gap - badge_w) / 2.0).round();
+        let badge = Rect::new(x + number_w + gap, r.y + ((r.h - 16.0 * s) / 2.0).round(), badge_w, (16.0 * s).round());
+        let y = baseline(g, r, ui);
+        g.text(x, y, &number, ui, ink, number_w + 1.0);
+        g.dl.round_rect(badge, Color::rgb(tint), (3.0 * s).round());
+        centered(g, badge, &label, small, Color::rgb(0xFFFFFF));
+        if self.tab_activity(index) {
+            let diameter = (6.0 * s).round();
+            g.dl.circle(Rect::new(badge.right() - diameter / 2.0, badge.y - diameter / 2.0, diameter, diameter), self.theme.accent);
+        }
     }
 
     fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, m: Metrics) {
@@ -809,6 +801,7 @@ impl App {
         let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
         let heading = match confirm.target {
             CloseTarget::Pane(_) => t("Close the pane? These programs are still running:"),
+            CloseTarget::Tabs(_) if confirm.programs.is_empty() => t("Close the pinned tab?"),
             CloseTarget::Tabs(ref reps) if reps.len() > 1 => t("Close the tabs? These programs are still running:"),
             CloseTarget::Tabs(_) => t("Close the tab? These programs are still running:"),
             CloseTarget::Window => t("Close the window? These programs are still running:"),
@@ -845,13 +838,45 @@ impl App {
         let s = self.ui();
         let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
-        let w = (g.measure(&text, ui) + 28.0 * s).min(self.size.0 - 24.0 * s).round();
+        let content = self.chrome.content;
+        let w = (g.measure(&text, ui) + 28.0 * s).min((content.w - 24.0 * s).max(0.0)).round();
         let h = (32.0 * s).round();
-        let r = Rect::new(((self.size.0 - w) / 2.0).round(), (14.0 * s).round(), w, h);
+        let r = Rect::new((content.x + (content.w - w) / 2.0).round(), content.y + (14.0 * s).round(), w, h);
         g.dl.shadow(Rect::new(r.x, r.y + 3.0 * s, r.w, r.h), theme.shadow, (8.0 * s).round(), (12.0 * s).round());
         g.dl.round_rect(r, theme.overlay, (8.0 * s).round());
         g.dl.outline(r, theme.overlay_border, (8.0 * s).round(), (1.0 * s).round().max(1.0));
         centered(g, r, &text, ui, theme.text);
+    }
+
+    fn draw_mru<B: TextBackend>(&self, g: &mut Gfx<B>) {
+        let Some((order, selected)) = self.mru.selection() else { return };
+        let s = self.ui();
+        let (w, h) = self.size;
+        let row_h = (30.0 * s).round().max(1.0);
+        let pad = (6.0 * s).round();
+        let count = order.len().min(8).min(((h - 4.0 * pad) / row_h) as usize);
+        if count == 0 || w < 6.0 * pad {
+            return;
+        }
+        let first = selected.saturating_sub(count / 2).min(order.len() - count);
+        let width = (320.0 * s).round().min(w - 2.0 * pad);
+        let height = count as f32 * row_h + 2.0 * pad;
+        let frame = Rect::new(((w - width) / 2.0).round(), ((h - height) / 2.0).round(), width, height);
+        let radius = (8.0 * s).round();
+        let theme = self.theme;
+        g.dl.shadow(Rect::new(frame.x, frame.y + 4.0 * s, width, height), theme.shadow, radius, (14.0 * s).round());
+        g.dl.round_rect(frame, theme.overlay, radius);
+        g.dl.outline(frame, theme.overlay_border, radius, (1.0 * s).round().max(1.0));
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        for (i, key) in order[first..first + count].iter().enumerate() {
+            let Some(tab) = self.tabs.iter().position(|tab| tab.key == *key) else { continue };
+            let row = Rect::new(frame.x + pad, frame.y + pad + row_h * i as f32, width - 2.0 * pad, row_h);
+            if first + i == selected {
+                g.dl.round_rect(row, theme.accent.alpha(0x38), (4.0 * s).round());
+            }
+            let y = baseline(g, row, ui);
+            g.text(row.x + pad, y, &self.tab_title(tab), ui, theme.text, row.w - 2.0 * pad);
+        }
     }
 
     fn draw_menu<B: TextBackend>(&mut self, g: &mut Gfx<B>) {

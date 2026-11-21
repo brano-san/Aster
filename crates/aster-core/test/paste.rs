@@ -8,8 +8,8 @@ use std::sync::Arc;
 fn app() -> App {
     let mut a = App::new(Config::default(), vec![Profile::new("local:a", "A", "a.exe", &[])], true, None, Arc::new(|| {}));
     a.set_viewport(1000, 700, 1.0);
-    a.chrome = crate::view::chrome(1000.0, 700.0, 1.0, 1);
     a.open_default_tab();
+    a.chrome = a.tab_chrome();
     let pane = a.focused_pane().unwrap();
     a.panes.get_mut(&pane).unwrap().pending = None;
     a.take_effects();

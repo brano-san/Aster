@@ -65,10 +65,14 @@ impl Menu {
 }
 
 pub fn geometry(menu: &Menu, s: f32, bounds: (f32, f32)) -> MenuGeometry {
-    let w = (WIDTH * s).round();
-    let pad = (PAD * s).round();
-    let item_h = (ITEM_H * s).round();
-    let sep_h = (SEPARATOR_H * s).round();
+    let w = (WIDTH * s).round().min(bounds.0);
+    let items = menu.entries.iter().filter(|e| matches!(e, Entry::Item { .. })).count();
+    let separators = menu.entries.len() - items;
+    let natural_height = 2.0 * PAD + items as f32 * ITEM_H + separators as f32 * SEPARATOR_H;
+    let row_scale = s.min(bounds.1 / natural_height);
+    let pad = (PAD * row_scale).floor();
+    let item_h = (ITEM_H * row_scale).floor();
+    let sep_h = (SEPARATOR_H * row_scale).floor();
     let h = 2.0 * pad + menu.entries.iter().map(|e| if matches!(e, Entry::Separator) { sep_h } else { item_h }).sum::<f32>();
     let x = menu.at.0.min(bounds.0 - w - 4.0 * s).max(0.0).round();
     let y = if menu.at.1 + h > bounds.1 { (menu.at.1 - h).max(0.0) } else { menu.at.1 }.round();
@@ -109,24 +113,31 @@ impl App {
     }
 
     pub(crate) fn open_tab_menu(&mut self, index: usize, x: f32, y: f32) {
+        if index >= self.tabs.len() {
+            return;
+        }
         self.activate(index);
         let n = self.tabs.len();
+        let left = self.tabs[..index].iter().any(|t| !t.pinned);
+        let right = self.tabs[index + 1..].iter().any(|t| !t.pinned);
         let entries = vec![
             item("New tab", Action::NewTab, true),
             item("Duplicate", Action::DuplicateTab, true),
             item("Duplicate as administrator", Action::DuplicateAsAdmin, self.can_elevate() && self.focused_pane().and_then(|p| self.panes.get(&p)).is_some_and(|p| p.profile.is_local())),
             item("Rename", Action::RenameTab, true),
+            item(if self.tabs[index].pinned { "Unpin tab" } else { "Pin tab" }, Action::PinTab, true),
             item("Color", Action::SetTabColor, true),
+            item(if self.tabs[index].command_watch.armed() { "Cancel command notification" } else { "Notify when the command finishes" }, Action::NotifyCommand, self.can_watch_command(index)),
             Entry::Separator,
-            item("Move left", Action::MoveTabLeft, index > 0),
-            item("Move right", Action::MoveTabRight, index + 1 < n),
+            item("Move left", Action::MoveTabLeft, index > 0 && self.can_move_tab(index, index - 1)),
+            item("Move right", Action::MoveTabRight, self.can_move_tab(index, index + 1)),
             item("Panes to separate tabs", Action::ExplodeTab, self.tabs.get(index).is_some_and(|t| t.root.panes().len() > 1)),
             item("Combine all tabs", Action::CombineTabs, n > 1),
             Entry::Separator,
             item("Close", Action::CloseTab, true),
-            item("Close other tabs", Action::CloseOtherTabs, n > 1),
-            item("Close tabs to the right", Action::CloseTabsToRight, index + 1 < n),
-            item("Close tabs to the left", Action::CloseTabsToLeft, index > 0),
+            item("Close other tabs", Action::CloseOtherTabs, left || right),
+            item("Close tabs to the right", Action::CloseTabsToRight, right),
+            item("Close tabs to the left", Action::CloseTabsToLeft, left),
             item("Reopen closed tab", Action::ReopenTab, !self.closed_tabs.is_empty()),
         ];
         self.open_menu(entries, x, y);

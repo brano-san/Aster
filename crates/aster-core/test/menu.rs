@@ -8,10 +8,10 @@ use std::sync::Arc;
 fn app(tabs: usize) -> App {
     let mut a = App::new(Config::default(), vec![Profile::new("local:a", "A", "a.exe", &[])], true, None, Arc::new(|| {}));
     a.set_viewport(1000, 700, 1.0);
-    a.chrome = crate::view::chrome(1000.0, 700.0, 1.0, tabs);
     for _ in 0..tabs {
         a.open_default_tab();
     }
+    a.chrome = a.tab_chrome();
     a.take_effects();
     a
 }
@@ -45,13 +45,11 @@ fn keyboard_navigation_skips_separators_and_disabled_items() {
     let mut a = app(1);
     let r = a.chrome.tabs[0].rect;
     right_click(&mut a, r.x + 10.0, r.y + 10.0);
-    key(&mut a, Key::Down);
-    key(&mut a, Key::Down);
-    key(&mut a, Key::Down);
-    key(&mut a, Key::Down);
-    key(&mut a, Key::Down);
-    let m = a.menu.as_ref().unwrap();
-    assert_eq!(m.action(m.selected.unwrap()), Some(Action::CloseTab), "moving and other closing items are disabled with one tab");
+    for action in [Action::NewTab, Action::DuplicateTab, Action::RenameTab, Action::PinTab, Action::SetTabColor, Action::CloseTab] {
+        key(&mut a, Key::Down);
+        let m = a.menu.as_ref().unwrap();
+        assert_eq!(m.action(m.selected.unwrap()), Some(action));
+    }
     key(&mut a, Key::Up);
     let m = a.menu.as_ref().unwrap();
     assert_eq!(m.action(m.selected.unwrap()), Some(Action::SetTabColor));
@@ -82,10 +80,43 @@ fn a_click_outside_only_closes_the_menu() {
 }
 
 #[test]
+fn the_pin_menu_reflects_state_and_skips_protected_close_targets() {
+    let mut a = app(3);
+    a.open_tab_menu(2, 20.0, 20.0);
+    assert!(labels(&a).contains(&("Pin tab", true)));
+    a.run(Action::PinTab);
+    a.open_tab_menu(0, 20.0, 20.0);
+    assert!(labels(&a).contains(&("Unpin tab", true)));
+    assert!(labels(&a).contains(&("Move right", false)));
+    a.open_tab_menu(1, 20.0, 20.0);
+    assert!(labels(&a).contains(&("Close tabs to the left", false)));
+}
+
+#[test]
 fn the_menu_stays_inside_the_window() {
     let menu = Menu { entries: vec![Entry::Separator; 3], at: (990.0, 690.0), selected: None };
     let geo = geometry(&menu, 1.0, (1000.0, 700.0));
     assert!(geo.frame.right() <= 1000.0 && geo.frame.bottom() <= 700.0);
+}
+
+#[test]
+fn a_sidebar_menu_fits_a_short_window_and_owns_caption_clicks() {
+    use crate::input::HitArea;
+    let mut a = app(1);
+    a.config.appearance.tab_bar_position = crate::config::TabBarPosition::Right;
+    a.set_viewport(720, 350, 1.0);
+    a.chrome = a.tab_chrome();
+    let r = a.chrome.tabs[0].rect;
+    right_click(&mut a, r.right() - 2.0, r.y + 12.0);
+    let geo = a.menu_geometry().unwrap();
+    assert!(geo.frame.right() <= 720.0 && geo.frame.bottom() <= 350.0);
+    assert!(geo.rows.iter().all(|(_, row)| row.h >= 16.0 && row.bottom() <= geo.frame.bottom()));
+    let (_, first) = geo.rows[0];
+    let (x, y) = (first.right() - 4.0, first.y + first.h / 2.0);
+    assert!(a.chrome.close.contains(x, y));
+    assert_eq!(a.hit_test(x, y), HitArea::Client);
+    a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+    assert_eq!(a.tab_count(), 2);
 }
 
 #[test]
@@ -99,6 +130,20 @@ fn the_terminal_menu_appears_when_right_click_is_set_to_menu() {
     right_click(&mut a, 500.0, 400.0);
     assert_eq!(labels(&a)[0], ("Copy", false));
     assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::RequestPaste)));
+}
+
+#[test]
+fn command_notification_menu_follows_the_tab_shell_and_watch_state() {
+    let mut a = app(1);
+    a.open_tab_menu(0, 25.0, 20.0);
+    assert!(labels(&a).contains(&("Notify when the command finishes", false)));
+    a.set_pane_pid(a.focused_pane().unwrap(), 56);
+    a.open_tab_menu(0, 25.0, 20.0);
+    assert!(labels(&a).contains(&("Notify when the command finishes", true)));
+    let i = a.menu.as_ref().unwrap().entries.iter().position(|e| matches!(e, Entry::Item { action: Action::NotifyCommand, .. })).unwrap();
+    a.run_menu(i);
+    a.open_tab_menu(0, 25.0, 20.0);
+    assert!(labels(&a).contains(&("Cancel command notification", true)));
 }
 
 #[test]

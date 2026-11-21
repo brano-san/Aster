@@ -33,6 +33,7 @@ struct State<P: Platform> {
 }
 
 enum StoreEvent {
+    CommandProbe { window: WindowId, request: u64, busy: bool },
     Vault(VaultUpdate),
     Config(u64, Option<SystemTime>, Box<Config>),
     Known { window: WindowId, pane: PaneId, key: String, line: usize, known: bool },
@@ -462,7 +463,12 @@ impl<P: Platform> Handler<P> {
             Effect::Cursor(c) => window.set_cursor(c),
             Effect::Minimize => window.minimize(),
             Effect::ToggleMaximize => window.toggle_maximize(),
-            Effect::ToggleFullscreen => window.toggle_fullscreen(),
+            Effect::ToggleFullscreen => {
+                window.toggle_fullscreen();
+                if let Some(s) = self.windows.get_mut(&id) {
+                    s.app.set_fullscreen(window.is_fullscreen());
+                }
+            }
             Effect::Progress(progress) => window.set_progress(progress),
             Effect::Close => {
                 if self.windows.len() == 1 && !std::mem::take(&mut self.session_saved) {
@@ -473,6 +479,19 @@ impl<P: Platform> Handler<P> {
             Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()) }),
             Effect::Timer(ms) => window.set_timer(ms),
             Effect::Attention => window.request_attention(),
+            Effect::ProbeCommand { request, pids } => {
+                let events = self.store_events.clone();
+                let started = std::thread::Builder::new().name("aster-command-probe".into()).spawn(move || {
+                    let busy = pids.into_iter().any(|pid| !P::child_processes(pid).is_empty());
+                    events.post(StoreEvent::CommandProbe { window: id, request, busy });
+                });
+                if let Err(e) = started {
+                    tracing::error!("command probe: {e}");
+                    if let Some(state) = self.windows.get_mut(&id) {
+                        state.app.command_probe_finished(request, None);
+                    }
+                }
+            }
             Effect::CheckSecret { pane, key } => {
                 if let Some(prompt) = self.windows.get(&id).and_then(|s| s.app.password_prompt(pane)) {
                     let line = prompt.line;
@@ -631,6 +650,11 @@ impl<P: Platform> Handler<P> {
     fn drain_store(&mut self) {
         while let Ok(event) = self.store_rx.try_recv() {
             match event {
+                StoreEvent::CommandProbe { window, request, busy } => {
+                    if let Some(state) = self.windows.get_mut(&window) {
+                        state.app.command_probe_finished(request, Some(busy));
+                    }
+                }
                 StoreEvent::Vault(update) => {
                     if let Some(sealed) = update.sealed {
                         let mut config = self.config.clone();
@@ -672,6 +696,9 @@ impl<P: Platform> Handler<P> {
             match result {
                 Ok(spawned) if self.windows.get(&id).and_then(|s| s.app.terminal(pane)).is_none() => spawned.pty.kill(),
                 Ok(spawned) => {
+                    if let Some(state) = self.windows.get_mut(&id) {
+                        state.app.set_pane_pid(pane, spawned.pty.pid());
+                    }
                     let session = Session::start(self.session_start(id, pane), spawned, terminal);
                     self.sessions.insert((id, pane), session);
                 }
@@ -830,6 +857,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             }
         }
         if let Some(s) = self.windows.get_mut(&window.id()) {
+            if matches!(event, Event::Resized { .. }) {
+                s.app.set_fullscreen(window.is_fullscreen());
+            }
             s.app.on_event(event);
         }
         self.apply(window);
