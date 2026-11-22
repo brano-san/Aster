@@ -57,7 +57,7 @@ impl ProfileLayout {
                 if cwd.is_some() {
                     source.cwd.clone_from(cwd);
                 }
-                NodeState::Pane(Box::new(PaneState { profile: source, cwd: cwd.clone(), buffer: Vec::new(), name: None }))
+                NodeState::Pane(Box::new(PaneState { profile: source, cwd: cwd.clone(), buffer: Vec::new(), name: None, host_id: None }))
             }
             Self::Split { vertical, ratio, a, b } => NodeState::Split {
                 vertical: *vertical, ratio: if ratio.is_finite() { *ratio } else { 0.5 },
@@ -76,6 +76,8 @@ pub struct PaneState {
     pub cwd: Option<String>,
     #[serde(default)]
     pub buffer: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<u64>,
 }
 
 impl SessionState {
@@ -157,15 +159,43 @@ impl App {
         self.select_profile_settings(&id);
     }
 
-    fn node_state(&self, node: &Node) -> Option<NodeState> {
+    pub fn pane_host_id(&self, pane: PaneId) -> Option<u64> {
+        self.panes.get(&pane)?.host_id
+    }
+
+    pub fn set_pane_host_id(&mut self, pane: PaneId, id: Option<u64>) {
+        if let Some(pane) = self.panes.get_mut(&pane) { pane.host_id = id; }
+    }
+
+    pub fn pane_profile_name(&self, pane: PaneId) -> Option<&str> {
+        self.panes.get(&pane).map(|pane| pane.profile.name.as_str())
+    }
+
+    pub fn finish_pane_restore(&mut self, id: PaneId, reattached: bool) {
+        let Some(pane) = self.panes.get_mut(&id) else { return };
+        if let Some(buffer) = pane.restore_buffer.take().filter(|_| !reattached) {
+            let mut terminal = pane.terminal.lock();
+            terminal.feed(&restore_text(&buffer));
+            pane.seen = terminal.output_seq();
+            pane.activity_seq = pane.seen;
+        }
+    }
+
+    fn node_state(&self, node: &Node, checkpoint: bool) -> Option<NodeState> {
         Some(match node {
             Node::Leaf(id) => {
                 let pane = self.panes.get(id).filter(|p| !p.profile.hold)?;
-                let cwd = self.pane_cwd(*id);
-                let t = pane.terminal.lock();
-                NodeState::Pane(Box::new(PaneState { profile: pane.source_profile.clone(), name: pane.name.clone(), cwd, buffer: t.tail_lines(BUFFER_LINES) }))
+                let (cwd, buffer) = if checkpoint {
+                    let cwd = pane.terminal.lock().cwd().map(str::to_owned).or_else(|| pane.profile.cwd.clone());
+                    (cwd, Vec::new())
+                } else {
+                    let cwd = self.pane_cwd(*id);
+                    let buffer = pane.restore_buffer.clone().unwrap_or_else(|| pane.terminal.lock().tail_lines(BUFFER_LINES));
+                    (cwd, buffer)
+                };
+                NodeState::Pane(Box::new(PaneState { profile: pane.source_profile.clone(), name: pane.name.clone(), cwd, buffer, host_id: pane.host_id }))
             }
-            Node::Split { axis, ratio, a, b } => match (self.node_state(a), self.node_state(b)) {
+            Node::Split { axis, ratio, a, b } => match (self.node_state(a, checkpoint), self.node_state(b, checkpoint)) {
                 (Some(a), Some(b)) => NodeState::Split { vertical: *axis == Axis::Vertical, ratio: *ratio, a: Box::new(a), b: Box::new(b) },
                 (Some(one), None) | (None, Some(one)) => one,
                 (None, None) => return None,
@@ -174,8 +204,12 @@ impl App {
     }
 
     pub(crate) fn tab_state(&self, index: usize) -> Option<TabState> {
+        self.capture_tab(index, false)
+    }
+
+    fn capture_tab(&self, index: usize, checkpoint: bool) -> Option<TabState> {
         let t = self.tabs.get(index)?;
-        let root = self.node_state(&t.root)?;
+        let root = self.node_state(&t.root, checkpoint)?;
         let focus = t.root.panes().iter().position(|p| *p == t.focus).unwrap_or(0);
         Some(TabState { root, focus, title: t.title.clone(), color: t.color.clone(), pinned: t.pinned })
     }
@@ -185,10 +219,18 @@ impl App {
     }
 
     pub fn snapshot(&self) -> WindowState {
+        self.capture_session(false)
+    }
+
+    pub fn session_checkpoint(&self) -> WindowState {
+        self.capture_session(true)
+    }
+
+    fn capture_session(&self, checkpoint: bool) -> WindowState {
         let mut tabs = Vec::new();
         let mut active = 0;
         for index in 0..self.tabs.len() {
-            if let Some(tab) = self.tab_state(index) {
+            if let Some(tab) = self.capture_tab(index, checkpoint) {
                 if index <= self.active {
                     active = tabs.len();
                 }
@@ -199,14 +241,21 @@ impl App {
     }
 
     pub(crate) fn build(&mut self, state: &NodeState) -> Node {
+        self.build_session_node(state, false)
+    }
+
+    fn build_session_node(&mut self, state: &NodeState, hosted: bool) -> Node {
         match state {
             NodeState::Pane(p) => {
                 let profile = Profile { elevated: false, ..p.profile.clone() };
                 let id: PaneId = self.new_pane_in(profile, p.cwd.clone());
                 if let Some(pane) = self.panes.get_mut(&id) {
+                    pane.host_id = p.host_id.filter(|_| hosted && pane.profile.is_local());
                     pane.name = p.name.clone().filter(|name| !name.trim().is_empty());
                     let mut t = pane.terminal.lock();
-                    if !p.buffer.is_empty() {
+                    if !p.buffer.is_empty() && pane.host_id.is_some() {
+                        pane.restore_buffer = Some(p.buffer.clone());
+                    } else if !p.buffer.is_empty() {
                         t.feed(&restore_text(&p.buffer));
                     }
                     let seen = t.output_seq();
@@ -217,8 +266,8 @@ impl App {
                 Node::Leaf(id)
             }
             NodeState::Split { vertical, ratio, a, b } => {
-                let a = self.build(a);
-                let b = self.build(b);
+                let a = self.build_session_node(a, hosted);
+                let b = self.build_session_node(b, hosted);
                 Node::Split { axis: if *vertical { Axis::Vertical } else { Axis::Horizontal }, ratio: ratio.clamp(0.05, 0.95), a: Box::new(a), b: Box::new(b) }
             }
         }
@@ -226,8 +275,9 @@ impl App {
 
     pub fn restore(&mut self, state: &WindowState) -> bool {
         for tab in &state.tabs {
-            let root = self.build(&tab.root);
+            let root = self.build_session_node(&tab.root, self.config.terminal.persistent_sessions);
             let order = root.panes();
+            self.background_launches.extend(order.iter().copied().filter(|id| self.panes[id].host_id.is_some()));
             let focus = order.get(tab.focus).or(order.first()).copied().unwrap_or(0);
             self.tabs.push(Tab { title: tab.title.clone(), color: tab.color.clone(), pinned: tab.pinned, ..Tab::new(root, focus) });
         }

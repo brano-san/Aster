@@ -191,8 +191,15 @@ pub struct SpawnRequest {
 
 pub trait Pty: Send + Sync {
     fn resize(&self, cols: u16, rows: u16);
+    fn force_resize(&self, cols: u16, rows: u16) {
+        self.resize(if cols > 2 { cols - 1 } else { cols + 1 }, rows);
+        self.resize(cols, rows);
+    }
     fn kill(&self);
     fn pid(&self) -> u32;
+    fn host_session_id(&self) -> Option<u64> { None }
+    fn detach(&self) {}
+    fn wait_host_close(&self, _timeout: std::time::Duration) -> bool { true }
 }
 
 pub struct Spawned {
@@ -237,6 +244,11 @@ pub trait Platform: 'static {
     fn can_elevate() -> bool;
     fn spawn_elevated(req: &SpawnRequest) -> Result<Spawned, PlatformError>;
     fn connect_host(base: &str) -> Result<(host::Reader, host::Writer), PlatformError>;
+    fn pty_host_endpoint() -> std::io::Result<String>;
+    fn listen_pty_host(endpoint: &str) -> std::io::Result<Box<dyn host::persistent::Listener>>;
+    fn connect_pty_host(endpoint: &str) -> std::io::Result<host::persistent::Connection>;
+    fn start_pty_host(endpoint: &str) -> std::io::Result<()>;
+    fn create_pty_host_token(path: &std::path::Path) -> std::io::Result<std::fs::File>;
     fn downloads_dir() -> Option<PathBuf>;
     fn secret_get(key: &str) -> Option<String>;
     fn secret_set(key: &str, value: &str) -> bool;

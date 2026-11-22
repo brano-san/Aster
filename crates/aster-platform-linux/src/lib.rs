@@ -11,6 +11,7 @@ mod instance;
 mod monitors;
 mod notifications;
 mod pty;
+mod pty_host;
 pub mod serial;
 mod shells;
 mod text;
@@ -161,6 +162,12 @@ impl Platform for Linux {
     fn connect_host(_base: &str) -> Result<(aster_platform::host::Reader, aster_platform::host::Writer), PlatformError> {
         Err(PlatformError::new(-1, "The terminal host is only available on Windows"))
     }
+
+    fn pty_host_endpoint() -> std::io::Result<String> { pty_host::endpoint() }
+    fn listen_pty_host(endpoint: &str) -> std::io::Result<Box<dyn aster_platform::host::persistent::Listener>> { pty_host::listen(endpoint) }
+    fn connect_pty_host(endpoint: &str) -> std::io::Result<aster_platform::host::persistent::Connection> { pty_host::connect(endpoint) }
+    fn start_pty_host(endpoint: &str) -> std::io::Result<()> { pty_host::start(endpoint) }
+    fn create_pty_host_token(path: &std::path::Path) -> std::io::Result<std::fs::File> { pty_host::create_token(path) }
 
     fn ui_language() -> String {
         ["LC_ALL", "LC_MESSAGES", "LANG"].iter().filter_map(|v| std::env::var(v).ok()).find(|v| !v.trim().is_empty()).unwrap_or_else(|| "en".to_owned())

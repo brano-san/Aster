@@ -21,7 +21,7 @@ use alacritty_terminal::selection::Selection;
 use alacritty_terminal::term::cell::LineLength;
 use alacritty_terminal::term::{Config, Osc52, Term};
 use alacritty_terminal::vte::ansi::{CursorStyle, Processor, StdSyncHandler};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +39,7 @@ pub type Sink = Arc<dyn Fn(VtEvent) + Send + Sync>;
 pub struct Listener {
     sink: Sink,
     cell: Arc<AtomicU32>,
+    replaying: Arc<AtomicBool>,
 }
 
 impl EventListener for Listener {
@@ -56,7 +57,9 @@ impl EventListener for Listener {
             }
             _ => return,
         };
-        (self.sink)(ev);
+        if !self.replaying.load(Ordering::Relaxed) || matches!(ev, VtEvent::Title(_) | VtEvent::ResetTitle) {
+            (self.sink)(ev);
+        }
     }
 }
 
@@ -110,7 +113,8 @@ pub struct Terminal {
     sniffer: osc::Sniffer,
     cwd: Option<String>,
     search: Option<search::Search>,
-    scrollback: usize,
+    options: Options,
+    listener: Listener,
 }
 
 pub struct VisibleCell<'a> {
@@ -131,8 +135,33 @@ pub struct Cursor {
 impl Terminal {
     pub fn new(size: Size, options: Options, sink: Sink) -> Self {
         let cell = Arc::new(AtomicU32::new(0));
-        let listener = Listener { sink, cell: cell.clone() };
-        Self { term: Term::new(config(&options), &size, listener), parser: Processor::new(), size, cell, title: None, seq: 0, output_seq: 0, progress: None, sniffer: osc::Sniffer::default(), cwd: None, search: None, scrollback: options.scrollback }
+        let listener = Listener { sink, cell: cell.clone(), replaying: Arc::default() };
+        Self { term: Term::new(config(&options), &size, listener.clone()), parser: Processor::new(), size, cell, title: None, seq: 0, output_seq: 0, progress: None, sniffer: osc::Sniffer::default(), cwd: None, search: None, options, listener }
+    }
+
+    pub fn blank_for_replay(&self, size: Size) -> Self {
+        let mut fresh = Self::new(size, self.options.clone(), self.listener.sink.clone());
+        fresh.cwd.clone_from(&self.cwd);
+        fresh
+    }
+
+    pub fn feed_replay(&mut self, bytes: &[u8]) {
+        self.listener.replaying.store(true, Ordering::Relaxed);
+        self.feed(bytes);
+        self.listener.replaying.store(false, Ordering::Relaxed);
+    }
+
+    pub fn replace_with_replay(&mut self, mut fresh: Self) {
+        fresh.resize(self.size);
+        if fresh.options != self.options { fresh.set_options(self.options.clone()); }
+        fresh.term.is_focused = self.term.is_focused;
+        fresh.cell.store(self.cell.load(Ordering::Relaxed), Ordering::Relaxed);
+        fresh.title.clone_from(&self.title);
+        fresh.seq = self.seq.wrapping_add(1);
+        fresh.output_seq = self.output_seq.wrapping_add(1);
+        fresh.search = self.search.take();
+        if let Some(found) = fresh.search.as_mut() { found.reset_index(); }
+        *self = fresh;
     }
 
     pub fn next_session(&mut self, options: Options, sink: Sink, cwd: Option<String>) -> Self {
@@ -227,12 +256,12 @@ impl Terminal {
     }
 
     pub fn set_options(&mut self, options: Options) {
-        self.scrollback = options.scrollback;
         self.term.set_options(config(&options));
+        self.options = options;
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        let anchor = self.search.as_ref().map(|_| search::Search::anchor(&self.term, self.scrollback));
+        let anchor = self.search.as_ref().map(|_| search::Search::anchor(&self.term, self.options.scrollback));
         let (cwd, progress) = (&mut self.cwd, &mut self.progress);
         self.sniffer.feed(bytes, |payload| {
             if let Some(dir) = osc::cwd(payload) {

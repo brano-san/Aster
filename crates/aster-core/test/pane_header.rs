@@ -80,5 +80,5 @@ fn changing_a_busy_pane_profile_asks_asynchronously_and_keeps_its_slot() {
     assert_eq!(a.tabs[0].root.layout(a.chrome.content, 1.0).panes[1].1, layout.panes[1].1);
     assert_eq!(a.panes[&new].profile.id, "local:b");
     assert_eq!(a.panes[&new].name.as_deref(), Some("Build output"));
-    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Kill { pane } if *pane == old)));
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Kill { pane, .. } if *pane == old)));
 }

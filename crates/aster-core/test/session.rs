@@ -84,6 +84,51 @@ fn garbage_or_empty_state_restores_nothing() {
 }
 
 #[test]
+fn checkpoint_keeps_host_ids_and_restores_saved_text_only_on_fallback() {
+    let (mut original, _) = app();
+    original.open_default_tab();
+    let pane = original.focused_pane().unwrap();
+    original.set_pane_host_id(pane, Some(u64::MAX));
+    original.terminal(pane).unwrap().lock().feed(b"saved text");
+    let checkpoint = original.session_checkpoint();
+    let NodeState::Pane(p) = &checkpoint.tabs[0].root else { panic!("expected a pane") };
+    assert_eq!(p.host_id, Some(u64::MAX));
+    assert!(p.buffer.is_empty());
+
+    let text = SessionState { windows: vec![original.snapshot()], ..SessionState::default() }.to_text();
+    let state = SessionState::parse(&text).unwrap();
+    for reattached in [false, true] {
+        let (mut restored, _) = app();
+        let mut config = Config::default();
+        config.terminal.persistent_sessions = true;
+        restored.set_config(config);
+        assert!(restored.restore(&state.windows[0]));
+        let pane = restored.focused_pane().unwrap();
+        assert_eq!(restored.pane_host_id(pane), Some(u64::MAX));
+        assert_eq!(restored.terminal(pane).unwrap().lock().screen_text(), "");
+        restored.finish_pane_restore(pane, reattached);
+        assert_eq!(restored.terminal(pane).unwrap().lock().screen_text(), if reattached { "" } else { "saved text" });
+    }
+}
+
+#[test]
+fn saved_host_ids_launch_in_inactive_tabs_during_restore() {
+    let (mut original, _) = app();
+    original.open_default_tab();
+    original.set_pane_host_id(original.focused_pane().unwrap(), Some(10));
+    original.open_tab(original.profiles()[1].clone());
+
+    let (mut restored, mut gfx) = app();
+    let mut config = Config::default();
+    config.terminal.persistent_sessions = true;
+    restored.set_config(config);
+    assert!(restored.restore(&original.snapshot()));
+    restored.frame(&mut gfx, false);
+    let launches = spawns(&restored.take_effects());
+    assert_eq!(launches.iter().map(|(command, _, _)| command.as_str()).collect::<Vec<_>>(), ["a.exe", "b.exe"]);
+}
+
+#[test]
 fn saved_layout_reopens_the_tree_with_current_profiles_and_leaf_folders() {
     use crate::keymap::Action;
     let (mut a, mut gfx) = app();

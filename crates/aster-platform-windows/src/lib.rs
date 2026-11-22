@@ -13,6 +13,7 @@ mod jump_list;
 mod monitors;
 mod notifications;
 mod process;
+mod pty_host;
 mod secrets;
 pub mod serial;
 mod dwrite;
@@ -190,6 +191,12 @@ impl Platform for Windows {
     fn connect_host(base: &str) -> Result<(aster_platform::host::Reader, aster_platform::host::Writer), PlatformError> {
         elevate::connect(base)
     }
+
+    fn pty_host_endpoint() -> std::io::Result<String> { pty_host::endpoint() }
+    fn listen_pty_host(endpoint: &str) -> std::io::Result<Box<dyn aster_platform::host::persistent::Listener>> { pty_host::listen(endpoint) }
+    fn connect_pty_host(endpoint: &str) -> std::io::Result<aster_platform::host::persistent::Connection> { pty_host::connect(endpoint) }
+    fn start_pty_host(endpoint: &str) -> std::io::Result<()> { pty_host::start(endpoint) }
+    fn create_pty_host_token(path: &std::path::Path) -> std::io::Result<std::fs::File> { pty_host::create_token(path) }
 
     fn ui_language() -> String {
         use windows::Win32::Globalization::{GetUserDefaultLocaleName, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};

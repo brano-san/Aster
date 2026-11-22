@@ -19,7 +19,7 @@ fn ssh_toolbar_reserves_its_header_and_reconnects_the_existing_pane() {
     a.take_effects();
     a.on_down(reconnect.x + 1.0, reconnect.y + 1.0, MouseButton::Left, 1);
     let effects = a.take_effects();
-    assert!(effects.iter().any(|effect| matches!(effect, Effect::Kill { pane: target } if *target == pane)));
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Kill { pane: target, .. } if *target == pane)));
     assert!(effects.iter().any(|effect| matches!(effect, Effect::Spawn { pane: target, reconnecting: true, .. } if *target == pane)));
     assert_eq!(a.focused_pane(), Some(pane));
     a.on_down(header.x + 10.0, reconnect.y + 1.0, MouseButton::Left, 2);

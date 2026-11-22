@@ -11,6 +11,7 @@ mod handler;
 mod log;
 mod local_spawn;
 mod net;
+mod pty_host;
 mod remote;
 mod secrets;
 mod serial;
@@ -112,11 +113,13 @@ fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::Pla
     }
     let dark = config.appearance.color_scheme_mode != SchemeMode::Light;
     let placement = state_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| parse_placement(&t));
-    let (mut handler, _vault_worker, extensions) = handler::Handler::<P>::new(config, waker, encrypted)
+    let (mut handler, vault_worker, extensions, local_worker) = handler::Handler::<P>::new(config, waker, encrypted)
         .map_err(|e| aster_platform::PlatformError::new(0, format!("vault worker: {e}")))?;
     handler.set_instance(requests, (!hidden || cfg!(windows)).then_some(request));
     let result = windows.run(WindowOptions { title: "Aster".into(), placement, dark, visible: !hidden }, handler);
+    local_worker.finish();
     drop(extensions);
+    drop(vault_worker);
     update::relaunch_if_requested();
     result
 }
@@ -146,6 +149,13 @@ fn host<P: Platform>(base: &str, token: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let (Some("--pty-host"), Some(endpoint)) = (args.get(1).map(String::as_str), args.get(2)) {
+        #[cfg(windows)]
+        let code = pty_host::run::<aster_platform_windows::Windows>(endpoint);
+        #[cfg(target_os = "linux")]
+        let code = pty_host::run::<aster_platform_linux::Linux>(endpoint);
+        std::process::exit(code);
+    }
     if let (Some("--host"), Some(base), Some(token)) = (args.get(1).map(String::as_str), args.get(2), args.get(3)) {
         #[cfg(windows)]
         let code = host::<aster_platform_windows::Windows>(base, token);

@@ -124,6 +124,7 @@ pub struct Handler<P: Platform> {
     ssh: Option<String>,
     pending: Vec<WindowState>,
     session_saved: bool,
+    checkpoint: Option<SessionState>,
     applied: Option<(String, Option<DockSpec>)>,
     window_prefs_dirty: bool,
     requests: Option<std::sync::mpsc::Receiver<String>>,
@@ -239,7 +240,7 @@ fn load_session<P: Platform>() -> SessionState {
 }
 
 impl<P: Platform> Handler<P> {
-    pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker, encrypted: bool) -> std::io::Result<(Self, VaultWorker, crate::extensions::Worker)> {
+    pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker, encrypted: bool) -> std::io::Result<(Self, VaultWorker, crate::extensions::Worker, crate::local_spawn::Worker)> {
         let mut profiles = P::shells();
         let ssh = P::ssh_command().or_else(|| (config.ssh.client == SshClient::Native).then(|| "ssh".to_owned()));
         if let Some(cmd) = &ssh {
@@ -249,7 +250,7 @@ impl<P: Platform> Handler<P> {
         let (exit_tx, exits) = unbounded();
         let (file_tx, file_rx) = unbounded();
         let (note_tx, note_rx) = unbounded();
-        let local_spawns = crate::local_spawn::LocalSpawns::new()?;
+        let (local_spawns, local_worker) = crate::local_spawn::LocalSpawns::new()?;
         let config_path = crate::config_path::<P>();
         let path = config_path.clone();
         let config_access = Arc::new(Mutex::new(ConfigAccess::default()));
@@ -282,7 +283,10 @@ impl<P: Platform> Handler<P> {
         let saved = load_session::<P>();
         let recent = saved.recent;
         let recent_folders = saved.recent_folders;
-        let pending = if encrypted || config.terminal.recover_tabs || crate::update::restarted() { saved.windows } else { Vec::new() };
+        let pending = if encrypted || config.terminal.recover_tabs || config.terminal.persistent_sessions || crate::update::restarted() { saved.windows } else { Vec::new() };
+        if !encrypted && config.terminal.persistent_sessions && !capturing() {
+            local_spawns.prepare_restore::<P>(pending.clone());
+        }
         let update_waker = waker.clone();
         let updates = crate::update::UpdateWorker::start::<P>(Arc::new(move || update_waker.wake()))?;
         let restart_baseline = RestartSettings::from_config(&config);
@@ -296,13 +300,13 @@ impl<P: Platform> Handler<P> {
         let extension_events = store_events.clone();
         let root = config_path.as_deref().and_then(std::path::Path::parent).map(|path| path.join("extensions"));
         let (extensions, extension_worker) = crate::extensions::Host::start::<P>(root, move |event| extension_events.post(StoreEvent::Extensions(event)))?;
-        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false, restart_preparing: false };
+        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false, restart_preparing: false };
         if !encrypted {
             handler.scan_extensions(&handler.config);
             handler.update_launcher(&handler.config, None);
             handler.apply_autostart(&handler.config);
         }
-        Ok((handler, worker, extension_worker))
+        Ok((handler, worker, extension_worker, local_worker))
     }
 
     fn scan_extensions(&self, config: &Config) {
@@ -425,8 +429,11 @@ impl<P: Platform> Handler<P> {
         if self.config_startup != ConfigStartup::Prompt { return; }
         self.startup_config = None;
         if let Some(config) = config {
-            if !config.terminal.recover_tabs && !crate::update::restarted() {
+            if !config.terminal.recover_tabs && !config.terminal.persistent_sessions && !crate::update::restarted() {
                 self.pending.clear();
+            }
+            if config.terminal.persistent_sessions && !capturing() {
+                self.local_spawns.prepare_restore::<P>(self.pending.clone());
             }
             let sealed = config.vault.sealed.clone();
             let minutes = config.vault.remember_minutes;
@@ -671,6 +678,7 @@ impl<P: Platform> Handler<P> {
                 window.request_redraw();
             }
         }
+        self.checkpoint_session();
     }
 
     fn effect(&mut self, window: &Win<P>, effect: Effect) {
@@ -747,6 +755,10 @@ impl<P: Platform> Handler<P> {
             }
             Effect::Spawn { pane, launch, terminal, .. } => {
                 let clear = launch.ssh.is_none() && launch.clear_after_connect == Some(true);
+                let hosted = self.config.terminal.persistent_sessions && launch.local_environment.is_some() && !launch.elevated && !capturing();
+                let app = self.windows.get(&id).map(|state| &state.app);
+                let previous = app.and_then(|app| app.pane_host_id(pane));
+                let title = app.and_then(|app| app.pane_profile_name(pane)).unwrap_or(&launch.command).to_owned();
                 let req = SpawnRequest {
                     command: launch.command,
                     args: launch.args,
@@ -756,7 +768,7 @@ impl<P: Platform> Handler<P> {
                     cols: launch.cols,
                     rows: launch.rows,
                 };
-                let request = crate::local_spawn::Request { key: (id, pane), request: req, terminal, stream: launch.stream, elevated: launch.elevated, clear };
+                let request = crate::local_spawn::Request { key: (id, pane), request: req, terminal, stream: launch.stream, elevated: launch.elevated, clear, hosted, previous, title };
                 let waker = self.waker.clone();
                 if let Err(error) = self.local_spawns.launch::<P>(request, move || waker.wake()) {
                     tracing::error!("local spawn worker: {error}");
@@ -800,13 +812,11 @@ impl<P: Platform> Handler<P> {
                     pending.size = Some((cols, rows));
                 }
             }
-            Effect::Kill { pane } => {
+            Effect::Kill { pane, host_id } => {
                 self.local_spawns.take_pending((id, pane));
                 self.serials.remove(&(id, pane));
                 self.remotes.remove(&(id, pane));
-                if let Some(s) = self.sessions.remove(&(id, pane)) {
-                    s.pty.kill();
-                }
+                self.stop_session(id, pane, host_id);
             }
             Effect::SetClipboard(text) => window.set_clipboard_text(&text),
             Effect::SetClipboardHtml { text, html } => window.set_clipboard_html(&text, &html),
@@ -1110,17 +1120,48 @@ impl<P: Platform> Handler<P> {
         }
     }
 
-    fn session_state(&self) -> SessionState {
-        SessionState { windows: self.windows.values().map(|s| s.app.session_snapshot()).filter(|w| !w.tabs.is_empty()).collect(), recent: self.recent.clone(), recent_folders: self.recent_folders.clone() }
+    fn session_state(&self, checkpoint: bool) -> SessionState {
+        let mut ids: Vec<_> = self.windows.keys().copied().collect();
+        ids.sort_unstable();
+        let windows = ids.into_iter().map(|id| {
+            let app = &self.windows[&id].app;
+            if checkpoint { app.session_checkpoint() } else { app.session_snapshot() }
+        }).chain(self.pending.iter().cloned()).filter(|w| !w.tabs.is_empty()).collect();
+        SessionState { windows, recent: self.recent.clone(), recent_folders: self.recent_folders.clone() }
+    }
+
+    fn queue_session_save(&self, state: SessionState) -> bool {
+        let Some(path) = crate::session_path::<P>() else { return false };
+        self.secrets.sync_config(move |_| {
+            if let Err(e) = persist_session(&path, state) { tracing::warn!("{}: {e}", path.display()); }
+            None
+        })
+    }
+
+    fn checkpoint_session(&mut self) {
+        if !self.config.terminal.persistent_sessions || self.restarting || self.restart_preparing || self.session_saved
+            || self.config_startup != ConfigStartup::Ready || capturing() || self.windows.is_empty() { return; }
+        let state = self.session_state(true);
+        if self.checkpoint.as_ref() != Some(&state) && self.queue_session_save(state.clone()) {
+            self.checkpoint = Some(state);
+        }
     }
 
     fn save_session(&self) {
         if capturing() || self.config_startup != ConfigStartup::Ready {
             return;
         }
-        let Some(path) = crate::session_path::<P>() else { return };
-        if let Err(e) = persist_session(&path, self.session_state()) {
-            tracing::warn!("{}: {e}", path.display());
+        self.queue_session_save(self.session_state(false));
+    }
+
+    fn stop_session(&mut self, window: WindowId, pane: PaneId, host_id: Option<u64>) {
+        let detach = self.restarting && self.config.terminal.persistent_sessions;
+        if let Some(session) = self.sessions.remove(&(window, pane)) {
+            session.abandon_transfer();
+            if detach && session.pty.host_session_id().is_some() { session.pty.detach(); }
+            else { self.local_spawns.kill(session.pty); }
+        } else if let Some(host_id) = host_id.filter(|_| !detach) {
+            self.local_spawns.kill_detached::<P>(host_id);
         }
     }
 
@@ -1419,7 +1460,7 @@ impl<P: Platform> Handler<P> {
         let Some(path) = crate::session_path::<P>() else {
             return self.restart_error(id, aster_core::i18n::t("Config folder unavailable"));
         };
-        let state = self.session_state();
+        let state = self.session_state(false);
         let events = self.store_events.clone();
         if !self.secrets.sync_config(move |_| {
             let result = persist_session(&path, state).map(|()| exe).map_err(|error| error.to_string());
@@ -1448,6 +1489,7 @@ impl<P: Platform> Handler<P> {
     }
 
     fn drain_local_spawns(&mut self) {
+        if self.restart_preparing { return; }
         while let Some(mut ready) = self.local_spawns.next() {
             let (id, pane) = ready.key;
             let Some(mut pending) = self.local_spawns.take_pending((id, pane)) else { continue };
@@ -1455,13 +1497,23 @@ impl<P: Platform> Handler<P> {
             if state.app.terminal(pane).is_none() {
                 continue;
             }
+            state.app.finish_pane_restore(pane, ready.replay.is_some());
             match ready.take() {
                 Ok(spawned) => {
                     state.app.set_pane_pid(pane, spawned.pty.pid());
-                    if let Some((cols, rows)) = pending.size {
-                        spawned.pty.resize(cols, rows);
+                    let hosted = spawned.pty.host_session_id();
+                    state.app.set_pane_host_id(pane, hosted);
+                    let mut repaint_at = None;
+                    if let Some((replay, size)) = ready.replay.take() {
+                        if replay.mode().contains(aster_vt::TermMode::ALT_SCREEN) { repaint_at = Some(size); }
+                        ready.terminal.lock().replace_with_replay(replay);
+                    } else {
+                        clear_on_connect(&ready.terminal, ready.clear, self.waker.clone())();
                     }
-                    clear_on_connect(&ready.terminal, ready.clear, self.waker.clone())();
+                    if let Some((cols, rows)) = pending.size.or(hosted.map(|_| ready.size)) {
+                        if repaint_at == Some((cols, rows)) { spawned.pty.force_resize(cols, rows); }
+                        else { spawned.pty.resize(cols, rows); }
+                    }
                     let session = Session::start(self.session_start(id, pane), spawned, ready.terminal.clone());
                     for input in std::mem::take(&mut pending.input) {
                         session.write(input);
@@ -1469,6 +1521,7 @@ impl<P: Platform> Handler<P> {
                     self.sessions.insert((id, pane), session);
                 }
                 Err(error) => {
+                    state.app.set_pane_host_id(pane, None);
                     tracing::error!("local shell: {error}");
                     state.app.spawn_failed(pane, &error.localized());
                 }
@@ -1498,6 +1551,7 @@ impl<P: Platform> Handler<P> {
         }
         while let Ok((wid, pane, session, code)) = self.exits.try_recv() {
             if self.sessions.get(&(wid, pane)).is_none_or(|current| current.id() != session) { continue; }
+            if let Some(state) = self.windows.get_mut(&wid) { state.app.set_pane_host_id(pane, None); }
             use aster_core::profile::OnExit;
             let policy = self.windows.get(&wid).and_then(|s| s.app.pane_exit_policy(pane));
             let manual_retry = matches!(policy, Some(OnExit::Auto | OnExit::Inherit)) && self.serials.get_mut(&(wid, pane)).is_some_and(|s| s.disconnected(code));
@@ -1712,6 +1766,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             return self.close_for_restart(window);
         }
         self.drain_store();
+        if self.restarting { return self.close_for_restart(window); }
         if self.startup_config.as_ref().is_some_and(|(id, _)| *id == window.id()) {
             if let Some((_, config)) = self.startup_config.take() {
                 self.finish_config_start(window, Some(*config));
@@ -1737,26 +1792,21 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
 
     fn destroyed(&mut self, window: &Win<P>) {
         let id = window.id();
-        self.local_spawns.cancel_window(id);
+        self.local_spawns.cancel_window(id, self.restarting && self.config.terminal.persistent_sessions);
         if let Some(mut s) = self.windows.remove(&id) {
             s.app.close_all();
             for e in s.app.take_effects() {
-                if let Effect::Kill { pane } = e {
-                    if let Some(session) = self.sessions.remove(&(id, pane)) {
-                        session.pty.kill();
-                    }
+                if let Effect::Kill { pane, host_id } = e {
+                    self.stop_session(id, pane, host_id);
                 }
             }
         }
         self.vault_access.remove(&id);
         self.remotes.retain(|(w, _), _| *w != id);
         self.serials.retain(|(w, _), _| *w != id);
-        self.sessions.retain(|(w, _), s| {
-            if *w == id {
-                s.pty.kill();
-            }
-            *w != id
-        });
+        let remaining: Vec<_> = self.sessions.keys().filter_map(|&(w, pane)| (w == id).then_some(pane)).collect();
+        for pane in remaining { self.stop_session(id, pane, None); }
+        self.checkpoint_session();
     }
 }
 

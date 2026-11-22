@@ -165,3 +165,60 @@ fn closing_the_client_kills_the_hosted_shell() {
         std::thread::sleep(Duration::from_millis(10));
     }
 }
+
+fn persistent_connection(host: Arc<persistent::Host>, seen: Seen, token: &str) -> (io::Result<persistent::Client>, std::thread::JoinHandle<io::Result<()>>) {
+    let (host_read, client_write) = io::pipe().unwrap();
+    let (client_read, host_write) = io::pipe().unwrap();
+    let worker = std::thread::spawn(move || host.serve(persistent::Connection::new(Box::new(host_read), Box::new(host_write), || Ok(())), "token", &|req, options| {
+        assert_eq!(req, &request());
+        assert_eq!(options, "options");
+        Ok(fake_shell(seen.clone()))
+    }));
+    (persistent::Client::connect(persistent::Connection::new(Box::new(client_read), Box::new(client_write), || Ok(())), token), worker)
+}
+
+#[test]
+fn persistent_connections_replay_output_and_keep_sessions_independent() {
+    let host = Arc::new(persistent::Host::new(100));
+    let seen = Seen::default();
+    let (client, _) = persistent_connection(host.clone(), seen.clone(), "wrong token");
+    assert!(client.is_err());
+    let (client, first_connection) = persistent_connection(host.clone(), seen.clone(), "token");
+    let mut client = client.unwrap();
+    let first = client.spawn(&request(), "Shell 🌿", "options").unwrap();
+    let second = client.spawn(&request(), "Other shell", "options").unwrap();
+    assert_ne!(first, second);
+    let (spawned, replay) = client.attach(first).unwrap();
+    assert!(replay.is_empty());
+    let Spawned { pty, mut reader, mut writer, wait, .. } = spawned;
+    assert_eq!(pty.host_session_id(), Some(first));
+    pty.resize(90, 25);
+    writer.write_all(b"history").unwrap();
+    read_some(&mut *reader, "echo:history");
+    pty.detach();
+    first_connection.join().unwrap().unwrap();
+    assert_eq!(wait(), None);
+    assert!(!seen.killed.load(Ordering::SeqCst));
+
+    let (client, _) = persistent_connection(host.clone(), seen.clone(), "token");
+    let mut client = client.unwrap();
+    let mut list = client.list().unwrap();
+    list.sort_by_key(|entry| entry.id);
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0], persistent::SessionInfo { id: first, pid: 4242, title: "Shell 🌿".into(), cwd: "/srv/app".into(), cols: 90, rows: 25 });
+    client.kill(second).unwrap();
+    assert!(seen.killed.load(Ordering::SeqCst));
+    assert_eq!(client.list().unwrap(), [list.remove(0)]);
+    let (mut spawned, replay) = client.attach(first).unwrap();
+    assert_eq!(replay, b"echo:history");
+    let (observer, _) = persistent_connection(host.clone(), seen.clone(), "token");
+    observer.unwrap().kill_detached(first).unwrap();
+    spawned.pty.force_resize(90, 25);
+    spawned.writer.write_all(b"live").unwrap();
+    assert_eq!(read_some(&mut *spawned.reader, "echo:live"), "echo:live");
+    assert_eq!(seen.sizes.lock().unwrap().as_slice(), [(90, 25), (89, 25), (90, 25)]);
+    spawned.writer.write_all(b"exit").unwrap();
+    assert_eq!((spawned.wait)(), Some(3));
+    let (client, _) = persistent_connection(host, seen, "token");
+    assert!(client.unwrap().list().unwrap().is_empty());
+}

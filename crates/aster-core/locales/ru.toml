@@ -213,6 +213,8 @@
 "Shell for new tabs and windows" = "Оболочка для новых вкладок и окон"
 "Restore tabs" = "Восстанавливать вкладки"
 "Reopen tabs, splits and their folders on start" = "При запуске открывать вкладки, панели и их папки снова"
+"Keep shells running when the window restarts" = "Сохранять оболочки при перезапуске окна"
+"Reconnect local shells after a restart or crash" = "Подключаться к локальным оболочкам после перезапуска или сбоя"
 "Bell" = "Звонок"
 "What happens when a program rings the bell" = "Что происходит, когда программа подаёт звонок"
 "Scroll on input" = "Прокрутка при вводе"

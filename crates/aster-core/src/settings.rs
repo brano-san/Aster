@@ -130,6 +130,7 @@ pub const SETTINGS: &[Setting] = &[
     item(TERMINAL, "terminal.set-comspec", "Aster environment marker", "Set ASTER=1 in new local shells and preserve COMSPEC", Control::Toggle),
     item(TERMINAL, "terminal.identification", "Terminal identification", "Report the Aster name and version to new shells", Control::Choice(IDENTIFICATION)),
     item(TERMINAL, "terminal.recover-tabs", "Restore tabs", "Reopen tabs, splits and their folders on start", Control::Toggle),
+    item(TERMINAL, "terminal.persistent-sessions", "Keep shells running when the window restarts", "Reconnect local shells after a restart or crash", Control::Toggle),
     item(TERMINAL, "terminal.confirm-close", "Confirm closing running programs", "Ask before closing a tab, pane or window where a program is still running", Control::Toggle),
     item(TERMINAL, "terminal.bell", "Bell", "What happens when a program rings the bell", Control::Segments(BELLS)),
     item(TERMINAL, "terminal.alt-is-meta", "Alt sends Meta", "Prefix letters typed with Alt with Escape", Control::Toggle),

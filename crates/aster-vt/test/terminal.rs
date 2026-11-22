@@ -42,6 +42,22 @@ fn prints_text_and_wraps_lines() {
 }
 
 #[test]
+fn replay_replaces_the_grid_without_emitting_historical_side_effects() {
+    let (mut terminal, events) = term(40, 5);
+    terminal.feed(b"stale saved text");
+    let mut replay = terminal.blank_for_replay(Size::new(20, 5));
+    replay.feed_replay(b"\x1b]2;Shell\x07\x1b[?1049hnew output\x07\x1b[6n\x1b]52;c;dGV4dA==\x07");
+    terminal.replace_with_replay(replay);
+    assert!(terminal.mode().contains(TermMode::ALT_SCREEN));
+    assert_eq!(terminal.screen_text(), "new output");
+    assert_eq!(*events.lock().unwrap(), [VtEvent::Title("Shell".into())]);
+    terminal.feed(b"\x07\x1b[6n");
+    let events = events.lock().unwrap();
+    assert!(events.contains(&VtEvent::Bell));
+    assert!(events.iter().any(|event| matches!(event, VtEvent::Write(_))));
+}
+
+#[test]
 fn debug_dump_reports_cursor_modes_viewport_and_last_200_history_rows() {
     let (mut t, _) = term(12, 2);
     for i in 0..205 {

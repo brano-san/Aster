@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 
+#[path = "persistent_host.rs"]
+pub mod persistent;
+
 pub const HELLO: u8 = 0;
 pub const SPAWN: u8 = 1;
 pub const READY: u8 = 2;
@@ -19,6 +22,9 @@ pub type Reader = Box<dyn Read + Send>;
 pub type Writer = Box<dyn Write + Send>;
 
 pub fn write_frame(w: &mut dyn Write, kind: u8, payload: &[u8]) -> io::Result<()> {
+    if payload.len() > MAX_FRAME {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+    }
     let mut frame = Vec::with_capacity(5 + payload.len());
     frame.push(kind);
     frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());

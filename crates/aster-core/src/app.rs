@@ -83,7 +83,7 @@ pub enum Effect {
     SerialControl { pane: PaneId, control: SerialControl },
     Write { pane: PaneId, bytes: Vec<u8> },
     Resize { pane: PaneId, cols: u16, rows: u16 },
-    Kill { pane: PaneId },
+    Kill { pane: PaneId, host_id: Option<u64> },
     SetClipboard(String),
     SetClipboardHtml { text: String, html: String },
     RequestPaste,
@@ -159,6 +159,8 @@ pub(crate) struct Pane {
     generation: u64,
     pub queued: Vec<u8>,
     pub pid: Option<u32>,
+    pub host_id: Option<u64>,
+    pub restore_buffer: Option<Vec<String>>,
     pub size: Size,
     pub scroll_acc: f32,
     pub seen: u64,
@@ -863,7 +865,7 @@ impl App {
             global: self.config.terminal.environment.clone(), profile: profile.env.clone(), refresh: self.config.terminal.refresh_environment, set_comspec: self.config.terminal.set_comspec,
         }));
         let launch = Launch { local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), clear_after_connect: profile.clear_after_connect, command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
-        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
+        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, host_id: None, restore_buffer: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
         id
     }
 
@@ -978,7 +980,7 @@ impl App {
         self.pane_profile_probe.take_if(|probe| probe.pane == pane);
         if let Some(p) = self.panes.remove(&pane) {
             if p.exited.is_none() {
-                self.effects.push(Effect::Kill { pane });
+                self.effects.push(Effect::Kill { pane, host_id: p.host_id });
             }
         }
     }
@@ -1048,8 +1050,7 @@ impl App {
     }
 
     pub fn close_all(&mut self) {
-        let ids: Vec<PaneId> = self.panes.iter().filter(|(_, p)| p.exited.is_none()).map(|(id, _)| *id).collect();
-        self.effects.extend(ids.into_iter().map(|pane| Effect::Kill { pane }));
+        self.effects.extend(self.panes.iter().filter(|(_, p)| p.exited.is_none()).map(|(&pane, p)| Effect::Kill { pane, host_id: p.host_id }));
         self.panes.clear();
         self.ssh_auth.clear();
         self.ssh_forwards.clear();
@@ -1816,7 +1817,7 @@ impl App {
         let options = self.options();
         let Some(p) = self.panes.get_mut(&pane).filter(|p| p.profile.ssh.is_some()) else { return };
         let Some(launch) = p.retry_launch.as_ref() else { return };
-        if p.exited.is_none() { self.effects.push(Effect::Kill { pane }); }
+        if p.exited.is_none() { self.effects.push(Effect::Kill { pane, host_id: None }); }
         p.generation += 1;
         let sink = Self::terminal_sink(self.sender.clone(), self.wake.clone(), pane, p.generation);
         let terminal = p.terminal.lock().next_session(options, sink, launch.cwd.clone());
