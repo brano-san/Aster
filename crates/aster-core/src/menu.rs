@@ -132,6 +132,7 @@ impl App {
         self.commit_rename();
         self.menu = Some(Menu { entries, at: (x, y), selected: None, profile: None, opened_at: self.clock() });
         self.set_cursor(CursorIcon::Default);
+        self.hover_state.menu = Default::default();
         self.dirty = true;
     }
 

@@ -31,6 +31,7 @@ struct State<P: Platform> {
     app: App,
     gfx: Gfx<P::Text>,
     renderer: Option<P::Renderer>,
+    quake: crate::quake::Quake,
     flow: crate::session::OutputFlow,
     output: HashMap<PaneId, crate::session::RawOutput>,
 }
@@ -341,8 +342,7 @@ impl<P: Platform> Handler<P> {
                 let dark = self.windows.get(&window.id()).is_none_or(|s| s.app.is_dark());
                 window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark, visible: true });
             }
-            window.set_visible(true);
-            window.activate();
+            self.quake_visibility(window, true);
             window.request_redraw();
         }
     }
@@ -690,6 +690,9 @@ impl<P: Platform> Handler<P> {
         }
         if let Some(state) = self.windows.get_mut(&id) {
             state.output.retain(|pane, _| state.app.terminal(*pane).is_some());
+            if !state.app.animations() {
+                state.quake.advance(window, false, state.app.clock());
+            }
             if state.app.needs_redraw() {
                 window.request_redraw();
             }
@@ -921,7 +924,10 @@ impl<P: Platform> Handler<P> {
                 window.close();
             }
             Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()), visible: true }),
-            Effect::Timer(ms) => window.set_timer(ms),
+            Effect::Timer(ms) => {
+                let moving = self.windows.get(&id).is_some_and(|s| s.quake.target().is_some());
+                window.set_timer(if moving { ms.min(crate::quake::FRAME_MS) } else { ms });
+            }
             Effect::Attention => window.request_attention(),
             Effect::Notify(notification) => window.notify(notification),
             Effect::ProbeCommand { request, pids } => {
@@ -1115,6 +1121,13 @@ impl<P: Platform> Handler<P> {
             Dock::Right => Edge::Right,
         };
         Some(DockSpec { edge, fill: a.dock_fill, space: a.dock_space, on_top: a.dock_always_on_top, screen: self.config.dock.selection() })
+    }
+
+    fn quake_visibility(&mut self, window: &Win<P>, visible: bool) {
+        let spec = if self.windows.keys().min() == Some(&window.id()) { self.dock_spec() } else { None };
+        if let Some(state) = self.windows.get_mut(&window.id()) {
+            state.quake.set_visible(window, visible, spec, state.app.animations(), state.app.clock());
+        }
     }
 
     fn apply_window_prefs(&mut self, window: &Win<P>) {
@@ -1743,7 +1756,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         }
         let dark = app.is_dark();
         window.set_dark(dark);
-        self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx: Gfx::new(text, ATLAS), renderer: None });
+        self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx: Gfx::new(text, ATLAS), renderer: None, quake: Default::default() });
         if first && self.config_startup != ConfigStartup::Prompt {
             self.open_pending_windows(window, dark, !hidden);
             self.applied = None;
@@ -1762,10 +1775,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
 
     fn event(&mut self, window: &Win<P>, event: Event) {
         if matches!(event, Event::NotificationClicked(_)) {
-            if !window.is_visible() {
-                window.set_visible(true);
-            }
-            window.activate();
+            self.quake_visibility(window, true);
         }
         if matches!(event, Event::Focus(true)) {
             self.last_focused = Some(window.id());
@@ -1775,19 +1785,17 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             }
         }
         if matches!(event, Event::GlobalHotkey) {
-            if window.is_visible() && window.is_foreground() {
-                window.set_visible(false);
-            } else {
-                window.set_visible(true);
-                if let Some(spec) = self.dock_spec() {
-                    window.dock(Some(spec));
-                }
-                window.activate();
+            let target = self.windows.get(&window.id()).and_then(|state| state.quake.target());
+            let visible = window.is_visible();
+            let show = !target.unwrap_or_else(|| visible && window.is_foreground());
+            if show && visible && target.is_none() {
+                if let Some(spec) = self.dock_spec() { window.dock(Some(spec)); }
             }
+            self.quake_visibility(window, show);
             return;
         }
         if matches!(event, Event::Focus(false)) && self.config.appearance.dock_hide_on_blur && self.dock_spec().is_some() && self.windows.keys().min() == Some(&window.id()) {
-            window.set_visible(false);
+            self.quake_visibility(window, false);
         }
         if matches!(event, Event::SessionEnding) {
             self.save_session();
@@ -1801,6 +1809,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         if let Some(s) = self.windows.get_mut(&window.id()) {
             if matches!(event, Event::Resized { .. }) {
                 s.app.set_fullscreen(window.is_fullscreen());
+            }
+            if matches!(event, Event::Timer) {
+                s.quake.advance(window, s.app.animations(), s.app.clock());
             }
             s.app.on_event(event);
         }

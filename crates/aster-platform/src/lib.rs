@@ -72,6 +72,19 @@ pub struct DockSpec {
     pub screen: aster_core::config::DockScreen,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DockSlide {
+    pub x: i32,
+    pub shown_y: i32,
+    pub hidden_y: i32,
+}
+
+impl DockSlide {
+    pub fn top((x, y, _, height): (i32, i32, i32, i32), monitor_top: i32) -> Self {
+        Self { x, shown_y: y, hidden_y: monitor_top.saturating_sub(height) }
+    }
+}
+
 pub fn dock_rect(work: (i32, i32, i32, i32), spec: DockSpec) -> (i32, i32, i32, i32) {
     let (x, y, w, h) = work;
     let fill = spec.fill.clamp(0.05, 1.0);
@@ -137,6 +150,9 @@ pub trait Window {
     fn is_visible(&self) -> bool;
     fn is_foreground(&self) -> bool;
     fn dock(&self, spec: Option<DockSpec>);
+    fn dock_slide(&self) -> Option<DockSlide> { None }
+    fn screen_position(&self) -> Option<(i32, i32)> { None }
+    fn set_position(&self, _x: i32, _y: i32) -> bool { false }
     fn set_global_hotkey(&self, key: Option<(aster_core::input::Key, aster_core::input::Mods)>) -> bool;
     fn set_progress(&self, progress: Option<aster_core::app::Progress>);
 }

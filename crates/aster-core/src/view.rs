@@ -1,4 +1,5 @@
 use crate::app::{App, Drag, Effect, Metrics};
+use crate::hover::{fill as hover_fill, opacity, TabHover};
 use crate::i18n::{t, tf, tn};
 use crate::input::HitArea;
 use crate::overlay::{Overlay, OverlayKind, VISIBLE};
@@ -6,10 +7,12 @@ use crate::busy::{Busy, ProgressBar};
 use crate::layers::Layer;
 use crate::motion::{POP, TOAST_IN, TOAST_OUT, UNFOLD};
 use crate::panes::PaneId;
+use crate::tab_motion::{StripFrame, TabGhost};
 use crate::theme::color;
 use aster_gfx::render::{Color, Rect};
 use aster_gfx::text::{FontFamily, FontStyle, Gfx, TextBackend};
 use aster_vt::{CursorShape, Flags, Rgb, Size};
+use std::time::Instant;
 
 pub use crate::tabs::{bare_chrome, chrome, Chrome, TabSlot, TAB_H};
 const PAD: f32 = 6.0;
@@ -264,11 +267,15 @@ impl App {
             if self.chrome.caption != self.chrome.tab_bar {
                 g.dl.rect(self.chrome.caption, theme.chrome);
             }
-            self.draw_tab_bar(g, maximized);
+            self.draw_tab_bar(g, maximized, now);
+        } else {
+            self.hover_state.tabs = Default::default();
+            self.hover_state.window = Default::default();
+            self.tab_strip = Default::default();
         }
         let content = self.chrome.content;
         g.dl.rect(content, theme.background);
-        self.draw_profile_sidebar(g);
+        self.draw_profile_sidebar(g, now);
         let gap = (1.0 * s).round().max(1.0);
         let layout = match self.tabs.get(self.active) {
             Some(tab) => match tab.zoomed {
@@ -278,15 +285,20 @@ impl App {
             None => crate::panes::Layout::default(),
         };
         self.layout = layout.clone();
+        let tab = self.tabs.get(self.active);
+        let animate_panes = self.animations() && !matches!(self.drag, Drag::Splitter { .. } | Drag::SidebarResize { .. });
+        self.motion |= self.pane_motion.settle(tab.map(|t| t.key), content, &layout, tab.and_then(|t| t.zoomed), animate_panes, now);
         let focus = self.focused_pane();
         let split = layout.panes.len() > 1;
         let broadcast = self.broadcast_targets();
         let show_pane_busy = self.settings.is_none() && self.files.is_none()
             && self.vault_prompt.as_ref().is_none_or(|dialog| dialog.kind != crate::vault_settings::DialogKind::Startup);
         for (id, rect) in &layout.panes {
-            self.draw_pane(g, *id, *rect, focus == Some(*id), m);
+            let visual = self.pane_motion.pane(*id, now);
+            let pane_from = g.dl.instances.len();
+            self.draw_pane(g, *id, *rect, visual, focus == Some(*id), m);
             if split && focus != Some(*id) {
-                g.dl.rect(*rect, theme.dim);
+                g.dl.rect(visual, theme.dim);
             }
             let password = self.password_prompt(*id).and_then(|prompt| {
                 if prompt.offer {
@@ -331,11 +343,14 @@ impl App {
                 let frame = self.draw_ssh_auth(g, pane, panel, geo, focus == Some(*id), phase);
                 self.layers.pop(&mut g.dl, layer, from, frame, 1, POP);
             }
+            if visual != *rect {
+                g.dl.confine(pane_from, visual);
+            }
         }
         for sp in &layout.splitters {
-            g.dl.rect(sp.rect, theme.divider);
+            g.dl.rect(self.pane_motion.splitter(&sp.path, now), theme.divider);
         }
-        self.draw_pane_rearrangement(g);
+        self.draw_pane_rearrangement(g, now);
         if self.vault_prompt.as_ref().is_some_and(|dialog| dialog.kind == crate::vault_settings::DialogKind::Startup) {
             g.dl.rect(content, theme.surface);
             self.draw_window_vault(g, content);
@@ -348,9 +363,9 @@ impl App {
         }
         let content_layers = g.dl.instances.len();
         self.draw_search(g);
-        self.draw_settings(g);
-        self.draw_files(g);
-        self.draw_overlay(g);
+        self.draw_settings(g, now);
+        self.draw_files(g, now);
+        self.draw_overlay(g, now);
         self.draw_update_notice(g);
         self.draw_paste(g, m);
         self.draw_close(g);
@@ -419,10 +434,13 @@ impl App {
         g.dl.set_clip(None);
     }
 
-    fn draw_profile_sidebar<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+    fn draw_profile_sidebar<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
         use crate::profile_sidebar::Focus;
         use crate::profiles_page::TreeKind;
-        let Some(geo) = self.sidebar_geometry() else { return };
+        let Some(geo) = self.sidebar_geometry() else {
+            self.hover_state.profiles = Default::default();
+            return;
+        };
         let s = self.ui();
         let theme = self.theme;
         let (mx, my) = self.mouse;
@@ -434,6 +452,10 @@ impl App {
         let max_scroll = self.profile_sidebar.rows.len().saturating_sub(visible);
         self.profile_sidebar.scroll = self.profile_sidebar.scroll.min(max_scroll);
         let browser = &self.profile_sidebar;
+        let rows = browser.rows.iter().skip(browser.scroll).take(visible).enumerate();
+        let hot = rows.clone().find(|(position, _)| geo.row(*position).contains(mx, my))
+            .map(|(position, _)| browser.scroll + position);
+        self.motion |= self.hover_state.profiles.aim(hot, self.animations(), now);
         let focused = browser.focus == Focus::Filter;
         g.dl.set_clip(Some(geo.rect));
         g.dl.rect(geo.rect, theme.surface);
@@ -464,11 +486,13 @@ impl App {
         let resizing = matches!(self.drag, Drag::SidebarResize { .. });
         let divider = Rect::new(geo.rect.right() - line, geo.rect.y, line, geo.rect.h);
         g.dl.rect(divider, if resizing || geo.grip.contains(mx, my) { theme.accent } else { theme.divider });
-        for (position, row) in browser.rows.iter().skip(browser.scroll).take(visible).enumerate() {
+        for (position, row) in rows {
             let r = geo.row(position);
             let selected = browser.selected == browser.scroll + position && browser.focus != Focus::None;
-            if selected || r.contains(mx, my) {
-                g.dl.round_rect(r, if selected { theme.accent.alpha(0x30) } else { theme.button_hover }, radius);
+            if selected {
+                g.dl.round_rect(r, theme.accent.alpha(0x30), radius);
+            } else if let Some(fill) = hover_fill(&self.hover_state.profiles, browser.scroll + position, now, theme.button_hover) {
+                g.dl.round_rect(r, fill, radius);
             }
             let x = r.x + 8.0 * s + row.indent(s).min((r.w - 44.0 * s).max(0.0));
             let end = r.right() - 7.0 * s;
@@ -510,11 +534,18 @@ impl App {
         }
     }
 
-    fn draw_pane_rearrangement<B: TextBackend>(&self, g: &mut Gfx<B>) {
+    fn draw_pane_rearrangement<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
         let s = self.ui();
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
-        if let Some(state) = self.rearrange.as_ref().filter(|_| self.rearranging()) {
+        let rearranging = self.rearranging();
+        let drop = self.pane_drag_hover().map(|(rect, zone)| (rect, zone, true))
+            .or_else(|| self.tab_drag_hover().map(|(rect, zone)| (rect, zone, false)));
+        let animate = self.animations();
+        let (labels_alpha, drop_alpha, moving) = self.rearrange_motion.settle(rearranging, drop.map(|(rect, _, _)| rect), animate, now);
+        self.motion |= moving;
+        if let Some(state) = self.rearrange.as_ref().filter(|_| rearranging && labels_alpha > 0.0) {
+            let from = g.dl.instances.len();
             let count = self.layout.panes.len();
             let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), true);
             for (i, (pane, rect)) in self.layout.panes.iter().enumerate() {
@@ -529,11 +560,16 @@ impl App {
                 centered(g, badge, &label, ui, if selected { theme.on_accent } else { theme.text });
             }
             g.dl.set_clip(None);
+            if labels_alpha < 1.0 {
+                g.dl.fade(from, labels_alpha);
+            }
         }
-        if let Some((rect, active)) = self.pane_drag_hover() {
-            self.draw_drop_zones(g, rect, active, true);
-        } else if let Some((rect, active)) = self.tab_drag_hover() {
-            self.draw_drop_zones(g, rect, active, false);
+        if let Some((rect, active, center_swap)) = drop.filter(|_| drop_alpha > 0.0) {
+            let from = g.dl.instances.len();
+            self.draw_drop_zones(g, rect, active, center_swap);
+            if drop_alpha < 1.0 {
+                g.dl.fade(from, drop_alpha);
+            }
         }
     }
 
@@ -569,7 +605,7 @@ impl App {
         g.dl.set_clip(None);
     }
 
-    fn draw_tab_bar<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool) {
+    fn draw_tab_bar<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool, now: Instant) {
         let s = self.ui();
         let theme = self.theme;
         let c = self.chrome.clone();
@@ -577,34 +613,86 @@ impl App {
         let icons = FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false);
         let (mx, my) = self.mouse;
         let radius = (8.0 * s).round();
-        for (i, slot) in c.tabs.iter().enumerate() {
-            let r = slot.rect;
+        let hot = if c.plus.contains(mx, my) {
+            Some(TabHover::Plus)
+        } else if c.tab_menu.contains(mx, my) {
+            Some(TabHover::Menu)
+        } else {
+            c.tabs.iter().zip(&self.tabs).find(|(slot, _)| slot.rect.contains(mx, my)).map(|(slot, tab)| {
+                if slot.close.contains(mx, my) { TabHover::Close(tab.key) } else { TabHover::Tab(tab.key) }
+            })
+        };
+        let window_hot = self.hit_test(mx, my);
+        let window_hot = matches!(window_hot, HitArea::Minimize | HitArea::Maximize | HitArea::Close).then_some(window_hot);
+        let animate = self.animations();
+        self.motion |= self.hover_state.tabs.aim(hot, animate, now);
+        self.motion |= self.hover_state.window.aim(window_hot, animate, now);
+        let bar = if c.tab_bar == c.caption { Rect::new(c.tab_bar.x, c.tab_bar.y, c.min.x, c.tab_bar.h) } else { c.tab_bar };
+        let targets: Vec<_> = self.tabs.iter().zip(&c.tabs).map(|(tab, slot)| (tab.key, slot.rect)).collect();
+        let active = self.tabs.get(self.active).map(|tab| tab.key);
+        let drag = match self.drag {
+            Drag::Tab { index, grab, moved: true, .. } => self.tabs.get(index).map(|tab| {
+                let at = if c.vertical { my - grab.1 } else { mx - grab.0 };
+                (index, tab.key, at)
+            }),
+            _ => None,
+        };
+        self.motion |= self.tab_strip.settle(&targets, active, drag.map(|(_, key, at)| (key, at)), StripFrame {
+            bar, vertical: c.vertical, plus: c.plus, menu: c.tab_menu, animate, now,
+        });
+        let strip_start = g.dl.instances.len();
+        for (r, ghost) in self.tab_strip.ghosts(now) {
+            if r.w > 0.0 && r.h > 0.0 {
+                g.dl.set_clip(Some(r));
+                self.draw_tab_mark(g, r, ghost.color);
+                if ghost.pinned {
+                    self.draw_pinned_tab(g, r, ui, ghost, false, false);
+                } else {
+                    let x = r.x + (12.0 * s).round();
+                    let y = baseline(g, r, ui);
+                    g.text(x, y, &ghost.label, ui, theme.text_dim, (r.right() - x).max(0.0));
+                }
+            }
+        }
+        let active_dragged = drag.is_some_and(|(i, _, _)| i == self.active);
+        if let Some(r) = self.tab_strip.indicator(now).filter(|_| !active_dragged) {
+            self.draw_active_tab(g, r, radius);
+        }
+        let drag_index = drag.map(|(i, _, _)| i);
+        let mut dragged_instances = None;
+        for i in (0..c.tabs.len()).filter(|&i| Some(i) != drag_index).chain(drag_index) {
+            let slot = &c.tabs[i];
+            let key = self.tabs[i].key;
+            let Some(r) = self.tab_strip.rect(key, now) else { continue };
+            let paint = self.tab_ghost(i);
             if r.w <= 0.0 || r.h <= 0.0 {
+                self.tab_strip.remember(key, paint);
                 continue;
             }
             g.dl.set_clip(Some(r));
             let active = i == self.active;
             let hovered = slot.rect.contains(mx, my);
-            let dragging = matches!(self.drag, Drag::Tab { index, moved: true, .. } if index == i);
-            if active || dragging {
-                let shape = match self.config.appearance.tab_bar_position {
-                    crate::config::TabBarPosition::Top => Rect::new(r.x, r.y, r.w, r.h + radius),
-                    crate::config::TabBarPosition::Bottom => Rect::new(r.x, r.y - radius, r.w, r.h + radius),
-                    _ => r.inset(0.0, (2.0 * s).round()),
-                };
-                g.dl.round_rect(shape, theme.tab_active, radius);
-            } else if hovered {
-                g.dl.round_rect(Rect::new(r.x + 2.0 * s, r.y + 2.0 * s, r.w - 4.0 * s, r.h - 6.0 * s), theme.tab_hover, (6.0 * s).round());
-            } else if !c.vertical && i + 1 != self.active && i + 1 < c.tabs.len() {
-                let lh = (16.0 * s).round();
-                g.dl.rect(Rect::new(r.right() - 1.0, r.y + ((r.h - lh) / 2.0).round(), (1.0 * s).max(1.0), lh), theme.divider);
+            let dragging = drag_index == Some(i);
+            let tab_alpha = self.hover_state.tabs.alpha(TabHover::Tab(key), now) + self.hover_state.tabs.alpha(TabHover::Close(key), now);
+            if dragging {
+                dragged_instances = Some(g.dl.instances.len());
+                self.draw_active_tab(g, r, radius);
+            } else if !active {
+                if let Some(fill) = opacity(theme.tab_hover, tab_alpha) {
+                    g.dl.round_rect(Rect::new(r.x + 2.0 * s, r.y + 2.0 * s, r.w - 4.0 * s, r.h - 6.0 * s), fill, (6.0 * s).round());
+                }
+                if !c.vertical && i + 1 != self.active && i + 1 < c.tabs.len() {
+                    if let Some(fill) = opacity(theme.divider, 1.0 - tab_alpha) {
+                        let lh = (16.0 * s).round();
+                        g.dl.rect(Rect::new(r.right() - 1.0, r.y + ((r.h - lh) / 2.0).round(), (1.0 * s).max(1.0), lh), fill);
+                    }
+                }
             }
-            if let Some(ink) = self.tab_color(i) {
-                g.dl.round_rect(Rect::new(r.x + (10.0 * s).round(), r.y + (3.0 * s).round(), r.w - (20.0 * s).round(), (3.0 * s).round().max(2.0)), ink, (1.5 * s).round());
-            }
+            self.draw_tab_mark(g, r, paint.color);
             let show_close = slot.close.w > 0.0 && (active || hovered);
+            let close = Rect::new(slot.close.x + r.right() - slot.rect.right(), slot.close.y + r.y - slot.rect.y, slot.close.w, slot.close.h);
             let text_x = r.x + (12.0 * s).round();
-            let text_end = if show_close { slot.close.x - 4.0 * s } else { r.right() - 12.0 * s };
+            let text_end = if show_close { close.x - 4.0 * s } else { r.right() - 12.0 * s };
             let y = baseline(g, r, ui);
             let checking = matches!(self.tabs[i].command_watch, crate::close::CommandWatch::Polling { .. });
             match self.rename.as_ref().filter(|n| n.tab == i) {
@@ -616,10 +704,9 @@ impl App {
                     let caret_h = (14.0 * s).round();
                     g.dl.rect(Rect::new(text_x + w + 1.0, field.y + ((field.h - caret_h) / 2.0).round(), (1.0 * s).round().max(1.0), caret_h), theme.accent);
                 }
-                None if self.tabs[i].pinned && checking => draw_busy_spinner(&mut g.dl, &mut self.busy, r, s, theme.accent),
-                None if self.tabs[i].pinned => self.draw_pinned_tab(g, i, r, ui),
+                None if paint.pinned && checking => draw_busy_spinner(&mut g.dl, &mut self.busy, r, s, theme.accent),
+                None if paint.pinned => self.draw_pinned_tab(g, r, ui, &paint, active, self.tab_activity(i)),
                 None => {
-                    let title = self.tab_label(i);
                     let mut x = text_x;
                     if checking && text_end - x >= 16.0 * s {
                         let area = Rect::new(x, r.y, 14.0 * s, r.h);
@@ -631,16 +718,16 @@ impl App {
                         g.dl.circle(Rect::new(x, r.y + ((r.h - d) / 2.0).round(), d, d), theme.accent);
                         x += d + (6.0 * s).round();
                     }
-                    if let Some((label, tint)) = self.tab_badge(i) {
+                    if let Some((label, tint)) = &paint.badge {
                         let style = tab_badge_style(s);
-                        let w = (g.measure(&label, style) + 6.0 * s).round();
+                        let w = (g.measure(label, style) + 6.0 * s).round();
                         if x + w + 18.0 * s <= text_end {
                             let badge = Rect::new(x, r.y + ((r.h - 16.0 * s) / 2.0).round(), w, (16.0 * s).round());
-                            draw_tab_badge(g, badge, &label, tint, s);
+                            draw_tab_badge(g, badge, label, *tint, s);
                             x = badge.right() + (5.0 * s).round();
                         }
                     }
-                    g.text(x, y, &title, ui, if active { theme.text } else { theme.text_dim }, (text_end - x).max(0.0));
+                    g.text(x, y, &paint.label, ui, if active { theme.text } else { theme.text_dim }, (text_end - x).max(0.0));
                 }
             }
             if let Some(progress) = self.tab_progress(i) {
@@ -656,66 +743,100 @@ impl App {
                 g.dl.rect(track, theme.divider);
                 g.dl.rect(Rect::new(track.x, track.y, (track.w * fraction).round(), track.h), ink);
             }
-            if show_close {
-                if slot.close.contains(mx, my) {
-                    g.dl.round_rect(slot.close, theme.button_hover, (4.0 * s).round());
-                }
-                centered(g, slot.close, G_CLOSE, FontStyle::new(FontFamily::Icons, (8.0 * s).round(), false), if active { theme.text } else { theme.text_dim });
+            let close_fill = hover_fill(&self.hover_state.tabs, TabHover::Close(key), now, theme.button_hover);
+            if let Some(fill) = close_fill {
+                g.dl.round_rect(close, fill, (4.0 * s).round());
             }
+            if show_close || close_fill.is_some() {
+                centered(g, close, G_CLOSE, FontStyle::new(FontFamily::Icons, (8.0 * s).round(), false), if active { theme.text } else { theme.text_dim });
+            }
+            self.tab_strip.remember(key, paint);
         }
+        g.dl.confine(strip_start, bar);
+        let tabs_end = g.dl.instances.len();
         g.dl.set_clip(Some(c.tab_bar));
-        if c.plus.contains(mx, my) {
-            g.dl.round_rect(c.plus, theme.button_hover, (6.0 * s).round());
+        let (plus, menu) = self.tab_strip.buttons(now);
+        if let Some(fill) = hover_fill(&self.hover_state.tabs, TabHover::Plus, now, theme.button_hover) {
+            g.dl.round_rect(plus, fill, (6.0 * s).round());
         }
-        centered(g, c.plus, G_PLUS, icons, theme.text_dim);
-        if c.tab_menu.w > 0.0 && c.tab_menu.h > 0.0 {
-            if c.tab_menu.contains(mx, my) {
-                let fill = if self.drag == Drag::TabMenu { theme.button_press } else { theme.button_hover };
-                g.dl.round_rect(c.tab_menu, fill, (6.0 * s).round());
+        centered(g, plus, G_PLUS, icons, theme.text_dim);
+        if menu.w > 0.0 && menu.h > 0.0 {
+            let fill = if self.drag == Drag::TabMenu && hot == Some(TabHover::Menu) { Some(theme.button_press) }
+                else { hover_fill(&self.hover_state.tabs, TabHover::Menu, now, theme.button_hover) };
+            if let Some(fill) = fill {
+                g.dl.round_rect(menu, fill, (6.0 * s).round());
             }
-            g.dl.chevron((c.tab_menu.x + c.tab_menu.w / 2.0, c.tab_menu.y + c.tab_menu.h / 2.0), 8.0 * s, 90.0, 1.5 * s, theme.text_dim);
+            g.dl.chevron((menu.x + menu.w / 2.0, menu.y + menu.h / 2.0), 8.0 * s, 90.0, 1.5 * s, theme.text_dim);
+        }
+        if let Some(start) = dragged_instances {
+            g.dl.instances[start..].rotate_left(tabs_end - start);
         }
         g.dl.set_clip(Some(c.caption));
         for (r, glyph, area) in [(c.min, G_MIN, HitArea::Minimize), (c.max, if maximized { G_RESTORE } else { G_MAX }, HitArea::Maximize), (c.close, G_CLOSE, HitArea::Close)] {
-            let hot = self.hover == area;
             let pressed = self.drag == Drag::Button(area);
-            let mut ink = theme.text;
-            if area == HitArea::Close && (hot || pressed) {
-                g.dl.rect(r, theme.close_hover);
-                ink = Color::rgb(0xFFFFFF);
-            } else if pressed {
-                g.dl.rect(r, theme.button_press);
-            } else if hot {
-                g.dl.rect(r, theme.button_hover);
+            let close = area == HitArea::Close;
+            let hot_ink = if close { theme.close_hover } else { theme.button_hover };
+            let fill = if pressed { Some(if close { theme.close_hover } else { theme.button_press }) }
+                else { hover_fill(&self.hover_state.window, area, now, hot_ink) };
+            if let Some(fill) = fill {
+                g.dl.rect(r, fill);
             }
+            let ink = if close && (window_hot == Some(area) || pressed) { Color::rgb(0xFFFFFF) } else { theme.text };
             centered(g, r, glyph, icons, ink);
         }
         g.dl.set_clip(None);
     }
 
-    fn draw_pinned_tab<B: TextBackend>(&self, g: &mut Gfx<B>, index: usize, r: Rect, ui: FontStyle) {
+    fn draw_active_tab<B: TextBackend>(&self, g: &mut Gfx<B>, r: Rect, radius: f32) {
+        g.dl.set_clip(Some(r));
+        let shape = match self.config.appearance.tab_bar_position {
+            crate::config::TabBarPosition::Top => Rect::new(r.x, r.y, r.w, r.h + radius),
+            crate::config::TabBarPosition::Bottom => Rect::new(r.x, r.y - radius, r.w, r.h + radius),
+            _ => r.inset(0.0, (2.0 * self.ui()).round()),
+        };
+        g.dl.round_rect(shape, self.theme.tab_active, radius);
+    }
+
+    fn draw_tab_mark<B: TextBackend>(&self, g: &mut Gfx<B>, r: Rect, color: Option<Color>) {
         let s = self.ui();
-        let number = self.tab_label(index);
-        let ink = if self.active == index { self.theme.text } else { self.theme.text_dim };
+        let inset = (10.0 * s).round();
+        if let Some(ink) = color.filter(|_| r.w > 2.0 * inset) {
+            g.dl.round_rect(Rect::new(r.x + inset, r.y + (3.0 * s).round(), r.w - 2.0 * inset, (3.0 * s).round().max(2.0)), ink, (1.5 * s).round());
+        }
+    }
+
+    fn tab_ghost(&self, index: usize) -> TabGhost {
+        let pinned = self.tabs[index].pinned;
+        let badge = self.tab_badge(index);
+        let mut label = self.tab_label(index);
+        if pinned && badge.is_none() && label.is_empty() {
+            label = self.tab_title(index);
+        }
+        TabGhost { label, color: self.tab_color(index), badge, pinned }
+    }
+
+    fn draw_pinned_tab<B: TextBackend>(&self, g: &mut Gfx<B>, r: Rect, ui: FontStyle, tab: &TabGhost, active: bool, activity: bool) {
+        let s = self.ui();
+        let number = &tab.label;
+        let ink = if active { self.theme.text } else { self.theme.text_dim };
         let mut dot = (r.right() - 8.0 * s, r.y + 7.0 * s);
-        if let Some((label, tint)) = self.tab_badge(index) {
-            let number_w = g.measure(&number, ui);
+        if let Some((label, tint)) = &tab.badge {
+            let number_w = g.measure(number, ui);
             let gap = if number.is_empty() { 0.0 } else { (3.0 * s).round() };
-            let badge_w = (g.measure(&label, tab_badge_style(s)) + 6.0 * s).round().min((r.w - number_w - gap).max(0.0));
+            let badge_w = (g.measure(label, tab_badge_style(s)) + 6.0 * s).round().min((r.w - number_w - gap).max(0.0));
             let x = (r.x + (r.w - number_w - gap - badge_w) / 2.0).round();
             let badge = Rect::new(x + number_w + gap, r.y + ((r.h - 16.0 * s) / 2.0).round(), badge_w, (16.0 * s).round());
             let y = baseline(g, r, ui);
-            g.text(x, y, &number, ui, ink, number_w + 1.0);
-            draw_tab_badge(g, badge, &label, tint, s);
+            g.text(x, y, number, ui, ink, number_w + 1.0);
+            draw_tab_badge(g, badge, label, *tint, s);
             dot = (badge.right(), badge.y);
         } else {
-            let text = if number.is_empty() { self.tab_title(index) } else { number };
             let y = baseline(g, r, ui);
             let width = (r.w - 8.0 * s).max(0.0);
-            let w = g.measure(&text, ui).min(width);
-            g.text((r.x + (r.w - w) / 2.0).round(), y, &text, ui, ink, width);
+            let w = g.measure(number, ui).min(width);
+            g.text((r.x + (r.w - w) / 2.0).round(), y, number, ui, ink, width);
         }
-        if self.tab_activity(index) {
+        if activity {
             let diameter = (6.0 * s).round();
             g.dl.circle(Rect::new(dot.0 - diameter / 2.0, dot.1 - diameter / 2.0, diameter, diameter), self.theme.accent);
         }
@@ -804,8 +925,9 @@ impl App {
         }
     }
 
-    fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, m: Metrics) {
+    fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, visual: Rect, focused: bool, m: Metrics) {
         let s = self.ui();
+        let visual = self.pane_terminal_rect(id, visual);
         let rect = self.pane_terminal_rect(id, rect);
         let inner = pane_inner_with(rect, s, self.config.terminal.padding);
         let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
@@ -829,7 +951,11 @@ impl App {
         let overrides = *t.colors();
         let default_bg = palette.background(&overrides);
         if default_bg != self.palette.background {
+            let from = g.dl.instances.len();
             g.dl.rect(rect, rgb(default_bg));
+            if visual != rect {
+                g.dl.refit(from, rect, visual);
+            }
         }
         g.dl.set_clip(Some(rect));
         self.draw_terminal_background(g, rect);
@@ -1518,12 +1644,14 @@ impl App {
     fn draw_menu<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: std::time::Instant) {
         use crate::menu::{item_progress, Entry};
         let layer = Layer::Menu;
-        let menu = self.menu.as_ref();
-        let from = self.layers.start(&mut g.dl, layer, menu.map(|menu| menu.opened_at), POP);
+        let menu = self.menu.clone();
+        let from = self.layers.start(&mut g.dl, layer, menu.as_ref().map(|menu| menu.opened_at), POP);
         let Some(menu) = menu else { return };
         let Some(geo) = self.menu_geometry() else { return };
         let phase = self.layers.progress(layer, UNFOLD);
         let unfolded = geo.unfolded(phase);
+        let animate = self.animations();
+        self.motion |= self.hover_state.menu.aim(menu.selected, animate, now);
         let s = self.ui();
         let theme = self.theme;
         let radius = (7.0 * s).round();
@@ -1545,8 +1673,8 @@ impl App {
         for (k, (i, r)) in geo.rows.iter().enumerate() {
             let Some(Entry::Item { label, action, enabled }) = menu.entries.get(*i) else { continue };
             let row = g.dl.instances.len();
-            if menu.selected == Some(*i) {
-                g.dl.round_rect(*r, theme.accent.alpha(0x38), (4.0 * s).round());
+            if let Some(fill) = hover_fill(&self.hover_state.menu, *i, now, theme.accent.alpha(0x38)) {
+                g.dl.round_rect(*r, fill, (4.0 * s).round());
             }
             let ink = if *enabled { theme.text } else { theme.text_dim.alpha(0x80) };
             let hint = if menu.profile.is_some() { String::new() } else { self.keymap.bindings_of(action).next().map(crate::keymap::format_binding).unwrap_or_default() };
@@ -1573,12 +1701,15 @@ impl App {
         self.layers.save(&g.dl, layer, from);
     }
 
-    fn draw_files<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+    fn draw_files<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
         use crate::files::{date, human_size, Prompt, TransferState};
         if self.files.as_ref().is_some_and(|f| !self.panes.contains_key(&f.pane)) {
             self.files = None;
         }
-        let Some(geo) = self.files_geometry() else { return };
+        let Some(geo) = self.files_geometry() else {
+            self.hover_state.files = Default::default();
+            return;
+        };
         let Some(page) = self.files.clone() else { return };
         let transfers: Vec<_> = self.transfers_of(page.pane).into_iter().cloned().collect();
         let s = self.ui();
@@ -1586,6 +1717,9 @@ impl App {
         let line = (1.0 * s).round().max(1.0);
         let radius = (6.0 * s).round();
         let (mx, my) = self.mouse;
+        let hot = geo.rows.iter().find(|(_, r)| geo.list.contains(mx, my) && r.contains(mx, my)).map(|(row, _)| *row);
+        let animate = self.animations();
+        self.motion |= self.hover_state.files.aim(hot, animate, now);
         g.dl.rect(self.chrome.content, theme.surface);
         let title = FontStyle::new(FontFamily::Ui, (17.0 * s).round(), true);
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
@@ -1637,8 +1771,8 @@ impl App {
             }
             if *row == page.selected {
                 g.dl.round_rect(*r, theme.accent.alpha(0x30), radius);
-            } else if r.contains(mx, my) {
-                g.dl.round_rect(*r, theme.button_hover, radius);
+            } else if let Some(fill) = hover_fill(&self.hover_state.files, *row, now, theme.button_hover) {
+                g.dl.round_rect(*r, fill, radius);
             }
             let y = baseline(g, *r, ui);
             let icon = Rect::new(r.x + (14.0 * s).round(), r.y + ((r.h - 14.0 * s) / 2.0).round(), (16.0 * s).round(), (14.0 * s).round());
@@ -2404,7 +2538,7 @@ impl App {
         }
     }
 
-    fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+    fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
         use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
         let s = self.ui();
         let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
@@ -2412,6 +2546,7 @@ impl App {
         let (_, _, width) = crate::settings::column_widths(self.chrome.content, s);
         let Some(page) = self.settings.as_ref() else {
             self.layers.start(&mut g.dl, Layer::RestartNotice, None, TOAST_OUT);
+            self.hover_state.settings = Default::default();
             return;
         };
         let info_rows = page.shown.iter().filter_map(|&index| {
@@ -2526,6 +2661,13 @@ impl App {
             let message = if page.colors_page() { t("No color schemes match") } else if page.searching_vault() { t("No secrets match") } else { t("No settings match") };
             centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), message, ui, theme.text_dim);
         }
+        let inset = (2.0 * s).round();
+        let hot = geo.rows.iter().find_map(|row| match row.kind {
+            RowKind::Item(n) if geo.list.contains(mx, my) && row.rect.inset(0.0, inset).contains(mx, my) => Some(page.shown[n]),
+            _ => None,
+        });
+        let animate = self.animations();
+        self.motion |= self.hover_state.settings.aim(hot, animate, now);
         g.dl.set_clip(Some(geo.list));
         let current_scheme = page.scheme_item(if page.colors_page() { page.scheme_tab.name(&self.config.appearance) } else { self.current_scheme() });
         for row in &geo.rows {
@@ -2544,11 +2686,11 @@ impl App {
                 }
                 RowKind::Item(n) => {
                     let selected = n == page.selected;
-                    let card = row.rect.inset(0.0, (2.0 * s).round());
+                    let card = row.rect.inset(0.0, inset);
                     if selected {
                         g.dl.round_rect(card, theme.accent.alpha(0x26), radius);
-                    } else if card.contains(mx, my) {
-                        g.dl.round_rect(card, theme.button_hover, radius);
+                    } else if let Some(fill) = hover_fill(&self.hover_state.settings, page.shown[n], now, theme.button_hover) {
+                        g.dl.round_rect(card, fill, radius);
                     }
                     if let Some(action) = page.shortcut(page.shown[n]) {
                         let tx = row.rect.x + (14.0 * s).round();
@@ -2908,17 +3050,24 @@ impl App {
         }
     }
 
-    fn draw_overlay<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+    fn draw_overlay<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
         let layer = Layer::Overlay;
-        let overlay = self.overlay.as_ref();
-        let from = self.layers.start(&mut g.dl, layer, overlay.map(|overlay| overlay.opened_at), POP);
-        let Some(overlay) = overlay else { return };
-        let geo = overlay_geometry(self, overlay);
-        self.draw_overlay_content(g, overlay, &geo);
+        let overlay = self.overlay.clone();
+        let from = self.layers.start(&mut g.dl, layer, overlay.as_ref().map(|overlay| overlay.opened_at), POP);
+        let Some(overlay) = overlay else {
+            self.hover_state.overlay = Default::default();
+            return;
+        };
+        let geo = overlay_geometry(self, &overlay);
+        let (mx, my) = self.mouse;
+        let hot = geo.items.iter().find(|(_, rect)| rect.contains(mx, my)).map(|(i, _)| overlay.shown[*i].0);
+        let animate = self.animations();
+        self.motion |= self.hover_state.overlay.aim(hot, animate, now);
+        self.draw_overlay_content(g, &overlay, &geo, now);
         self.layers.pop(&mut g.dl, layer, from, geo.frame, 0, POP);
     }
 
-    fn draw_overlay_content<B: TextBackend>(&self, g: &mut Gfx<B>, o: &Overlay, geo: &OverlayGeometry) {
+    fn draw_overlay_content<B: TextBackend>(&self, g: &mut Gfx<B>, o: &Overlay, geo: &OverlayGeometry, now: Instant) {
         let s = self.ui();
         let theme = self.theme;
         let radius = (8.0 * s).round();
@@ -2946,7 +3095,6 @@ impl App {
             centered(g, r, message, ui, theme.text_dim);
             return;
         }
-        let (mx, my) = self.mouse;
         let bold = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), true);
         for (title, r) in &geo.headers {
             let y = baseline(g, *r, bold);
@@ -2962,8 +3110,8 @@ impl App {
             let chosen = *i == o.selected;
             if chosen {
                 g.dl.round_rect(*r, theme.accent.alpha(0x38), (5.0 * s).round());
-            } else if r.contains(mx, my) {
-                g.dl.round_rect(*r, theme.button_hover, (5.0 * s).round());
+            } else if let Some(fill) = hover_fill(&self.hover_state.overlay, *item, now, theme.button_hover) {
+                g.dl.round_rect(*r, fill, (5.0 * s).round());
             }
             let y = baseline(g, *r, ui);
             let mut x = r.x + (10.0 * s).round();

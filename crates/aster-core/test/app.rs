@@ -186,6 +186,46 @@ fn spawns(effects: &[Effect]) -> Vec<(PaneId, Launch)> {
 }
 
 #[test]
+fn moving_over_a_palette_row_starts_the_hover_transition() {
+    let (mut a, mut gfx) = app();
+    a.config.appearance.animations = true;
+    a.open_default_tab();
+    a.open_overlay(OverlayKind::Commands);
+    a.frame(&mut gfx, false);
+    assert!(!a.needs_redraw());
+    let geo = crate::view::overlay_geometry(&a, a.overlay.as_ref().unwrap());
+    let row = geo.items[1].1;
+    a.on_event(Event::MouseMove { x: row.x + 1.0, y: row.y + 1.0 });
+    assert!(a.needs_redraw());
+    a.frame(&mut gfx, false);
+    assert!(a.motion);
+}
+
+#[test]
+fn pane_transition_resizes_the_terminal_once_and_snaps_when_disabled() {
+    let (mut a, mut gfx) = app();
+    a.config.appearance.animations = true;
+    a.open_default_tab();
+    a.frame(&mut gfx, false);
+    let original = a.focused_pane().unwrap();
+    a.take_effects();
+    a.run(Action::SplitRight);
+    a.frame(&mut gfx, false);
+    let final_rect = a.layout.panes[0].1;
+    assert!(a.motion);
+    assert_ne!(a.pane_motion.pane(original, a.last_frame.unwrap()), final_rect);
+    let changes = a.take_effects();
+    assert_eq!(changes.iter().filter(|effect| matches!(effect, Effect::Resize { pane, .. } if *pane == original)).count(), 1);
+    a.frame(&mut gfx, false);
+    assert!(!a.take_effects().iter().any(|effect| matches!(effect, Effect::Resize { .. })));
+    a.set_system_animations(false);
+    a.frame(&mut gfx, false);
+    assert!(!a.motion);
+    assert!(!a.needs_redraw());
+    assert_eq!(a.pane_motion.pane(original, a.last_frame.unwrap()), final_rect);
+}
+
+#[test]
 fn the_config_page_wraps_full_paths_and_errors_in_a_narrow_window() {
     let (mut a, mut gfx) = app();
     a.set_viewport(350, 640, 1.0);

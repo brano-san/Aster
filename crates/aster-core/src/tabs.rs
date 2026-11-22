@@ -210,7 +210,7 @@ impl App {
         }
     }
 
-    pub(crate) fn drag_tab(&mut self, mut index: usize, start: (f32, f32), moved: bool, x: f32, y: f32) {
+    pub(crate) fn drag_tab(&mut self, mut index: usize, start: (f32, f32), grab: (f32, f32), moved: bool, x: f32, y: f32) {
         if !moved && (x - start.0).abs().max((y - start.1).abs()) <= 6.0 * self.ui() {
             return;
         }
@@ -224,9 +224,10 @@ impl App {
                 self.tabs.insert(target, source);
                 self.active = self.tabs.iter().position(|tab| tab.key == active).unwrap_or(target);
                 index = target;
+                self.chrome = self.tab_chrome();
             }
         }
-        self.drag = Drag::Tab { index, start, moved: true };
+        self.drag = Drag::Tab { index, start, grab, moved: true };
         self.dirty = true;
     }
 

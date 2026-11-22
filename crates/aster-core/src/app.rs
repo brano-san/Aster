@@ -195,7 +195,7 @@ pub(crate) enum Drag {
     Select { pane: PaneId, open_link: bool },
     Report { pane: PaneId, button: MouseButton },
     Splitter { path: Vec<bool>, axis: Axis, span: Rect },
-    Tab { index: usize, start: (f32, f32), moved: bool },
+    Tab { index: usize, start: (f32, f32), grab: (f32, f32), moved: bool },
     Pane { pane: PaneId, start: (f32, f32), moved: bool },
     Button(HitArea),
     TabClose(usize),
@@ -256,6 +256,8 @@ pub struct App {
     pub(crate) drag: Drag,
     last_click: Option<(Instant, f32, f32, u8)>,
     pub(crate) hover: HitArea,
+    pub(crate) hover_state: crate::hover::HoverState,
+    pub(crate) tab_strip: crate::tab_motion::TabStrip,
     pub(crate) hover_link: Option<HoverLink>,
     pub(crate) overlay: Option<Overlay>,
     pub(crate) settings: Option<crate::settings::SettingsPage>,
@@ -321,6 +323,8 @@ pub struct App {
     timer_due: Option<Instant>,
     pub(crate) metrics: Option<Metrics>,
     pub(crate) layout: Layout,
+    pub(crate) pane_motion: crate::pane_motion::PaneMotion,
+    pub(crate) rearrange_motion: crate::pane_motion::RearrangeMotion,
     pub(crate) chrome: Chrome,
     pub(crate) preedit: Preedit,
     title: String,
@@ -386,6 +390,8 @@ impl App {
             drag: Drag::None,
             last_click: None,
             hover: HitArea::Client,
+            hover_state: Default::default(),
+            tab_strip: Default::default(),
             hover_link: None,
             overlay: None,
             settings: None,
@@ -443,6 +449,8 @@ impl App {
             timer_due: None,
             metrics: None,
             layout: Layout::default(),
+            pane_motion: Default::default(),
+            rearrange_motion: Default::default(),
             chrome: Chrome::default(),
             preedit: Preedit::default(),
             title: String::new(),
@@ -2071,6 +2079,9 @@ impl App {
             Event::MouseLeave => {
                 self.mouse = (-1.0, -1.0);
                 self.hover = HitArea::Client;
+                if self.menu.is_some() {
+                    self.menu_hover(self.mouse.0, self.mouse.1);
+                }
                 self.dirty = true;
             }
             Event::DroppedFiles(paths) => {
@@ -2353,6 +2364,7 @@ impl App {
         if self.menu.is_some() {
             return self.menu_hover(x, y);
         }
+        self.dirty |= self.overlay.is_some() && previous != self.mouse;
         if self.config_editor_mouse_move(x, y) { return; }
         if self.drag == Drag::None && self.update_hovered(x, y) {
             self.hover = HitArea::Client;
@@ -2406,7 +2418,7 @@ impl App {
                 self.dirty = true;
                 return;
             }
-            Drag::Tab { index, start, moved } => return self.drag_tab(index, start, moved, x, y),
+            Drag::Tab { index, start, grab, moved } => return self.drag_tab(index, start, grab, moved, x, y),
             _ => {}
         }
         if self.sidebar_move(x, y) {
@@ -2419,11 +2431,14 @@ impl App {
             self.dirty = true;
             return;
         }
-        if (self.settings.is_some() || self.files.is_some()) && self.chrome.content.contains(x, y) {
-            self.dirty = true;
-            self.hover_link = None;
-            self.set_cursor(CursorIcon::Default);
-            return;
+        if self.settings.is_some() || self.files.is_some() {
+            self.dirty |= self.chrome.content.contains(previous.0, previous.1);
+            if self.chrome.content.contains(x, y) {
+                self.dirty = true;
+                self.hover_link = None;
+                self.set_cursor(CursorIcon::Default);
+                return;
+            }
         }
         let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.rename.is_some() || self.pane_rename.is_some() || self.sidebar_focused() || self.rearranging();
         if self.config.panes.focus_follows_mouse && !modal && self.drag == Drag::None {
@@ -2607,7 +2622,9 @@ impl App {
                     MouseButton::Left if self.chrome.tabs[i].close.contains(x, y) => self.drag = Drag::TabClose(i),
                     MouseButton::Left if self.click_count(x, y, clicks) >= 2 => self.start_rename(i),
                     MouseButton::Left => {
-                        self.drag = Drag::Tab { index: i, start: (x, y), moved: false };
+                        let slot = &self.chrome.tabs[i];
+                        let grab = (x - slot.rect.x, y - slot.rect.y);
+                        self.drag = Drag::Tab { index: i, start: (x, y), grab, moved: false };
                     }
                     MouseButton::Right => self.open_tab_menu(i, x, y),
                     _ => { self.non_keyboard_shortcut(chord); }

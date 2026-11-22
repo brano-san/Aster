@@ -12,6 +12,7 @@ mod log;
 mod local_spawn;
 mod net;
 mod pty_host;
+mod quake;
 mod remote;
 mod secrets;
 mod serial;

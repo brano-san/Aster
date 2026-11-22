@@ -2,7 +2,7 @@ use crate::err;
 use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, PasteTarget, Preedit};
 use aster_core::notifications::Notification;
 use aster_gfx::render::Rect;
-use aster_platform::{DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
+use aster_platform::{DockSlide, DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -76,6 +76,8 @@ pub struct Win32Window {
     ime_area: Cell<Rect>,
     restore: Cell<Option<(WINDOWPLACEMENT, isize)>>,
     dock_spec: Cell<Option<DockSpec>>,
+    dock_slide: Cell<Option<DockSlide>>,
+    positioning: Cell<bool>,
     pub(crate) sync: Rc<FrameSync>,
 }
 
@@ -120,6 +122,8 @@ impl Win32Window {
             ime_area: Cell::new(Rect::default()),
             restore: Cell::new(None),
             dock_spec: Cell::new(None),
+            dock_slide: Cell::new(None),
+            positioning: Cell::new(false),
             sync: Rc::new(FrameSync::default()),
         }
     }
@@ -434,7 +438,24 @@ impl Window for Win32Window {
 
     fn dock(&self, spec: Option<DockSpec>) {
         self.dock_spec.set(spec);
-        crate::monitors::place_dock(self.hwnd(), spec);
+        self.dock_slide.set(crate::monitors::place_dock(self.hwnd(), spec));
+    }
+
+    fn dock_slide(&self) -> Option<DockSlide> {
+        self.dock_slide.get().filter(|_| !self.is_fullscreen() && !self.is_maximized() && !unsafe { IsIconic(self.hwnd()).as_bool() })
+    }
+
+    fn screen_position(&self) -> Option<(i32, i32)> {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(self.hwnd(), &mut rect).ok()?; }
+        Some((rect.left, rect.top))
+    }
+
+    fn set_position(&self, x: i32, y: i32) -> bool {
+        self.positioning.set(true);
+        let moved = unsafe { SetWindowPos(self.hwnd(), None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) }.is_ok();
+        self.positioning.set(false);
+        moved
     }
 
     fn set_progress(&self, progress: Option<aster_core::app::Progress>) {
@@ -1365,7 +1386,7 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
         }
         WM_DISPLAYCHANGE => {
             if let Some(spec) = w.dock_spec.get() {
-                crate::monitors::place_dock(w.hwnd(), Some(spec));
+                w.dock(Some(spec));
             } else if !w.is_fullscreen() && crate::d3d::capture_path().is_none() {
                 crate::monitors::recover_normal_window(w.hwnd());
             }
@@ -1380,6 +1401,7 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
             Some(LRESULT(0))
         }
         WM_DPICHANGED => {
+            if w.positioning.get() { return Some(LRESULT(0)); }
             let dpi = ((wp.0 >> 16) & 0xFFFF) as u32;
             w.dpi.set(dpi);
             s.send(Event::ScaleChanged(dpi as f32 / 96.0));

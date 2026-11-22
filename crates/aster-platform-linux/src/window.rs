@@ -2,7 +2,7 @@ use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Past
 use aster_core::notifications::Notification;
 use aster_gfx::render::Rect;
 use aster_platform::monitors::{choose_monitor, correct_offscreen, monitor_at, Bounds, Monitor};
-use aster_platform::{dock_rect, DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
+use aster_platform::{dock_rect, DockSlide, DockSpec, Edge, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -55,6 +55,8 @@ pub struct LinuxWindow {
     edge: Cell<Option<ResizeDirection>>,
     timer: Cell<Option<Instant>>,
     dock_spec: Cell<Option<DockSpec>>,
+    dock_slide: Cell<Option<DockSlide>>,
+    position: Cell<Option<(i32, i32)>>,
     translucent: bool,
 }
 
@@ -77,12 +79,17 @@ impl LinuxWindow {
     }
 
     fn apply_dock(&self, spec: DockSpec, monitors: &[Monitor]) {
+        self.dock_slide.set(None);
         let current = self.raw.current_monitor().and_then(|monitor| monitor.position())
             .and_then(|point| monitor_at(monitors, (point.x, point.y)));
         let Some(monitor) = choose_monitor(monitors, current, spec.screen) else { return };
         if self.raw.is_maximized() { self.raw.set_maximized(false); }
         self.raw.set_window_level(if spec.on_top { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
-        self.place(dock_rect(monitor.work, spec));
+        let rect = dock_rect(monitor.work, spec);
+        self.place(rect);
+        if spec.edge == Edge::Top {
+            self.dock_slide.set(Some(DockSlide::top(rect, monitor.bounds.1)));
+        }
     }
 
     fn displays_changed(&self, monitors: &[Monitor]) {
@@ -259,8 +266,25 @@ impl Window for LinuxWindow {
             let monitors = crate::monitors::collect(self.raw.available_monitors(), self.raw.primary_monitor());
             self.apply_dock(spec, &monitors);
         } else {
+            self.dock_slide.set(None);
             self.raw.set_window_level(WindowLevel::Normal);
         }
+    }
+
+    fn dock_slide(&self) -> Option<DockSlide> {
+        self.dock_slide.get().filter(|_| self.free_size() && self.raw.is_minimized() != Some(true))
+    }
+
+    fn screen_position(&self) -> Option<(i32, i32)> {
+        self.position.get().or_else(|| self.dock_slide.get().map(|slide| (slide.x, slide.shown_y)))
+    }
+
+    fn set_position(&self, x: i32, y: i32) -> bool {
+        if !self.raw.display_handle().is_ok_and(|h| matches!(h.as_raw(), RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_))) {
+            return false;
+        }
+        self.raw.set_outer_position(PhysicalPosition::new(x, y).into());
+        true
     }
 
     fn set_global_hotkey(&self, _key: Option<(Key, Mods)>) -> bool {
@@ -619,6 +643,8 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
             edge: Cell::new(None),
             timer: Cell::new(None),
             dock_spec: Cell::new(None),
+            dock_slide: Cell::new(None),
+            position: Cell::new(None),
             translucent,
         };
         self.nodes.push(Node { window, last_click: None, pointer: (0.0, 0.0) });
@@ -683,6 +709,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
         let w = &node.window;
         match event {
             WindowEvent::RedrawRequested => handler.redraw(w),
+            WindowEvent::Moved(at) => w.position.set(Some((at.x, at.y))),
             WindowEvent::SurfaceResized(size) => {
                 w.size.set((size.width, size.height));
                 handler.event(w, Event::Resized { width: size.width, height: size.height });
