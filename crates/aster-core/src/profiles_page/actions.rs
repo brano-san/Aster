@@ -91,6 +91,15 @@ impl App {
         self.dirty = true;
     }
 
+    pub(crate) fn edit_profile_settings_row(&mut self, id: &str) {
+        let Some(mut profile) = self.profiles.iter().find(|p| p.id == id).cloned() else { return };
+        let original = self.config.profiles.iter().any(|p| p.id == id).then(|| id.to_owned());
+        if original.is_none() {
+            profile.name = tf("{name} (copy)", &[("name", &profile.name)]);
+        }
+        self.open_profile_form(profile, original, false);
+    }
+
     pub(crate) fn edit_profile_template(&mut self, id: &str) {
         let Some((_, name)) = templates().into_iter().find(|(key, _)| *key == id) else { return };
         let mut profile = Profile::default();
@@ -128,9 +137,9 @@ impl App {
         let Some(row) = page.tree_at(item) else { return };
         match row.kind.clone() {
             TreeKind::Profile(index) => {
-                let row = &page.profiles[index];
-                let Some(mut p) = self.profiles.iter().find(|p| p.id == row.id).cloned() else { return };
+                let id = page.profiles[index].id.clone();
                 if action {
+                    let Some(p) = self.profiles.iter().find(|p| p.id == id).cloned() else { return };
                     let before = self.tabs.len();
                     self.open_tab(p);
                     if self.tabs.len() > before {
@@ -138,9 +147,7 @@ impl App {
                         if let Some(i) = self.tabs.iter().position(|t| t.focus == SETTINGS_PANE) { self.active = i; }
                     }
                 } else {
-                    let original = row.custom.then(|| p.id.clone());
-                    if !row.custom { p.name = tf("{name} (copy)", &[("name", &p.name)]); }
-                    self.open_profile_form(p, original, false);
+                    self.edit_profile_settings_row(&id);
                 }
             }
             TreeKind::Header(h) => {

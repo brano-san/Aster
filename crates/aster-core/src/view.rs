@@ -121,6 +121,15 @@ fn centered<B: TextBackend>(g: &mut Gfx<B>, r: Rect, text: &str, style: FontStyl
     g.text((r.x + (r.w - w) / 2.0).round(), y, text, style, c, r.w);
 }
 
+fn tab_badge_style(s: f32) -> FontStyle {
+    FontStyle::new(FontFamily::Ui, (8.5 * s).round(), true)
+}
+
+fn draw_tab_badge<B: TextBackend>(g: &mut Gfx<B>, r: Rect, label: &str, tint: u32, s: f32) {
+    g.dl.round_rect(r, Color::rgb(tint), (3.0 * s).round());
+    centered(g, r, label, tab_badge_style(s), Color::rgb(0xFFFFFF));
+}
+
 pub struct OverlayGeometry {
     pub frame: Rect,
     pub input: Rect,
@@ -132,7 +141,7 @@ pub struct OverlayGeometry {
 pub fn overlay_geometry(app: &App, o: &Overlay) -> OverlayGeometry {
     let s = app.ui();
     let content = app.chrome.content;
-    let profiles = o.kind == OverlayKind::Profiles;
+    let profiles = o.kind.is_profile_picker();
     let width = (if profiles { 520.0 } else { 560.0 } * s).min((content.w - 32.0 * s).max(200.0 * s)).min(content.w).round();
     let x = (content.x + (content.w - width) / 2.0).round();
     let y = content.y + (10.0 * s).round();
@@ -213,6 +222,7 @@ impl App {
         }
         let content = self.chrome.content;
         g.dl.rect(content, theme.background);
+        self.draw_profile_sidebar(g);
         let gap = (1.0 * s).round().max(1.0);
         let layout = match self.tabs.get(self.active) {
             Some(tab) => match tab.zoomed {
@@ -252,10 +262,12 @@ impl App {
             if self.bell_flash(*id) {
                 g.dl.rect(*rect, theme.foreground.alpha(0x2C));
             }
+            self.draw_pane_header(g, *id, *rect, focus == Some(*id));
         }
         for sp in &layout.splitters {
             g.dl.rect(sp.rect, theme.divider);
         }
+        self.draw_pane_rearrangement(g);
         if let Some(dialog) = self.vault_prompt.as_ref().filter(|dialog| dialog.kind == crate::vault_settings::DialogKind::Startup) {
             g.dl.rect(content, theme.surface);
             self.draw_vault_dialog(g, content, dialog, false);
@@ -341,6 +353,156 @@ impl App {
         g.dl.set_clip(None);
     }
 
+    fn draw_profile_sidebar<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        use crate::profile_sidebar::Focus;
+        use crate::profiles_page::TreeKind;
+        let Some(geo) = self.sidebar_geometry() else { return };
+        let s = self.ui();
+        let theme = self.theme;
+        let (mx, my) = self.mouse;
+        let line = (1.0 * s).round().max(1.0);
+        let ui = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), false);
+        let bold = FontStyle::new(FontFamily::Ui, ui.px(), true);
+        let radius = (5.0 * s).round();
+        let visible = geo.visible();
+        let max_scroll = self.profile_sidebar.rows.len().saturating_sub(visible);
+        self.profile_sidebar.scroll = self.profile_sidebar.scroll.min(max_scroll);
+        let browser = &self.profile_sidebar;
+        let focused = browser.focus == Focus::Filter;
+        g.dl.set_clip(Some(geo.rect));
+        g.dl.rect(geo.rect, theme.surface);
+        g.dl.round_rect(geo.filter, theme.overlay, radius);
+        g.dl.outline(geo.filter, if focused { theme.accent } else { theme.overlay_border }, radius, line);
+        let x = geo.filter.x + (8.0 * s).round();
+        let y = baseline(g, geo.filter, ui);
+        let width = (geo.filter.right() - x - 8.0 * s).max(0.0);
+        let composing = focused && !self.preedit.is_empty();
+        let empty = browser.query.is_empty() && !composing;
+        let w = if empty {
+            g.text(x, y, t("Filter profiles"), ui, theme.text_dim, width);
+            0.0
+        } else {
+            let w = g.text(x, y, &browser.query, ui, theme.text, width);
+            if composing {
+                g.text(x + w, y, &self.preedit.text, ui, theme.text, (width - w).max(0.0));
+                let cursor = self.preedit.cursor.unwrap_or(self.preedit.text.len());
+                w + g.measure(&self.preedit.text[..cursor], ui)
+            } else {
+                w
+            }
+        };
+        let caret = focused.then(|| Rect::new(x + w.min(width), geo.filter.y + (8.0 * s).round(), line, (14.0 * s).round()));
+        if let Some(caret) = caret {
+            g.dl.rect(caret, theme.accent);
+        }
+        let resizing = matches!(self.drag, Drag::SidebarResize { .. });
+        let divider = Rect::new(geo.rect.right() - line, geo.rect.y, line, geo.rect.h);
+        g.dl.rect(divider, if resizing || geo.grip.contains(mx, my) { theme.accent } else { theme.divider });
+        for (position, row) in browser.rows.iter().skip(browser.scroll).take(visible).enumerate() {
+            let r = geo.row(position);
+            let selected = browser.selected == browser.scroll + position && browser.focus != Focus::None;
+            if selected || r.contains(mx, my) {
+                g.dl.round_rect(r, if selected { theme.accent.alpha(0x30) } else { theme.button_hover }, radius);
+            }
+            let x = r.x + 8.0 * s + row.indent(s).min((r.w - 44.0 * s).max(0.0));
+            let end = r.right() - 7.0 * s;
+            match &row.kind {
+                TreeKind::Header(header) => {
+                    let open = !browser.query.trim().is_empty() || !browser.collapsed.contains(header);
+                    g.dl.chevron((x + 4.0 * s, r.y + r.h * 0.5), 7.0 * s, if open { 90.0 } else { 0.0 }, 1.5 * s, theme.text_dim);
+                    let mut x = x + 16.0 * s;
+                    if let Some(group) = header.group_index(&self.config.groups).map(|i| &self.config.groups[i]) {
+                        x = self.draw_profile_group_mark(g, r, x, group, bold);
+                    }
+                    let y = baseline(g, r, bold);
+                    g.text(x, y, header.label(&self.config.groups), bold, theme.text, (end - x).max(0.0));
+                }
+                TreeKind::Profile(i) => {
+                    let profile = &browser.profiles[*i];
+                    let badge = Rect::new(x, r.y + ((r.h - 16.0 * s) / 2.0).round(), (22.0 * s).round(), (16.0 * s).round());
+                    draw_tab_badge(g, badge, &profile.badge, profile.tint, s);
+                    let x = badge.right() + (7.0 * s).round();
+                    let y = baseline(g, r, ui);
+                    g.text(x, y, &profile.name, ui, theme.text, (end - x).max(0.0));
+                }
+                _ => {}
+            }
+        }
+        if browser.rows.is_empty() && visible > 0 {
+            let r = geo.row(0);
+            let y = baseline(g, r, ui);
+            g.text(x, y, t("Nothing matches the filter"), ui, theme.text_dim, width);
+        }
+        if max_scroll > 0 && visible > 0 {
+            let height = (geo.list.h * visible as f32 / browser.rows.len() as f32).max(12.0 * s);
+            let y = geo.list.y + (geo.list.h - height) * browser.scroll as f32 / max_scroll as f32;
+            g.dl.round_rect(Rect::new(geo.rect.right() - 4.0 * s, y, 2.0 * s, height), theme.text_dim.alpha(0x80), s);
+        }
+        g.dl.set_clip(None);
+        if let Some(caret) = caret {
+            self.set_ime_area(caret);
+        }
+    }
+
+    fn draw_pane_rearrangement<B: TextBackend>(&self, g: &mut Gfx<B>) {
+        let s = self.ui();
+        let theme = self.theme;
+        let line = (1.0 * s).round().max(1.0);
+        if let Some(state) = self.rearrange.as_ref().filter(|_| self.rearranging()) {
+            let count = self.layout.panes.len();
+            let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), true);
+            for (i, (pane, rect)) in self.layout.panes.iter().enumerate() {
+                let rect = self.pane_terminal_rect(*pane, *rect);
+                let label = crate::rearrange::pane_label(i, count);
+                let w = (g.measure(&label, ui) + 16.0 * s).round();
+                let badge = Rect::new(rect.x + 10.0 * s, rect.y + 10.0 * s, w, (24.0 * s).round());
+                let selected = state.first == Some(*pane);
+                g.dl.set_clip(Some(rect));
+                g.dl.round_rect(badge, if selected { theme.accent } else { theme.overlay }, (5.0 * s).round());
+                g.dl.outline(badge, theme.accent, (5.0 * s).round(), line);
+                centered(g, badge, &label, ui, if selected { Color::rgb(0xFFFFFF) } else { theme.text });
+            }
+            g.dl.set_clip(None);
+        }
+        if let Some((rect, active)) = self.pane_drag_hover() {
+            self.draw_drop_zones(g, rect, active, true);
+        } else if let Some((rect, active)) = self.tab_drag_hover() {
+            self.draw_drop_zones(g, rect, active, false);
+        }
+    }
+
+    fn draw_drop_zones<B: TextBackend>(&self, g: &mut Gfx<B>, rect: Rect, active: crate::rearrange::DropZone, center_swap: bool) {
+        use crate::panes::Side;
+        use crate::rearrange::DropZone;
+        let s = self.ui();
+        let theme = self.theme;
+        let line = (1.0 * s).round().max(1.0);
+        let ui = FontStyle::new(FontFamily::Ui, (18.0 * s).round(), false);
+        g.dl.set_clip(Some(rect));
+        for (zone, area) in crate::rearrange::drop_zones(rect) {
+            let r = area.inset(line, line);
+            let chosen = zone == active;
+            g.dl.round_rect(r, if chosen { theme.accent.alpha(0x78) } else { theme.overlay.alpha(0xC8) }, (4.0 * s).round());
+            g.dl.outline(r, if chosen { theme.accent } else { theme.overlay_border }, (4.0 * s).round(), line);
+            let ink = if chosen { Color::rgb(0xFFFFFF) } else { theme.text_dim };
+            if r.w < 18.0 * s || r.h < 18.0 * s {
+                continue;
+            }
+            let angle = match zone {
+                DropZone::Side(Side::Left) => 180.0,
+                DropZone::Side(Side::Right) => 0.0,
+                DropZone::Side(Side::Top) => 270.0,
+                DropZone::Side(Side::Bottom) => 90.0,
+                DropZone::Center => {
+                    centered(g, r, if center_swap { "↔" } else { "+" }, ui, ink);
+                    continue;
+                }
+            };
+            g.dl.chevron((r.x + r.w / 2.0, r.y + r.h / 2.0), 12.0 * s, angle, 1.5 * s, ink);
+        }
+        g.dl.set_clip(None);
+    }
+
     fn draw_tab_bar<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool) {
         let s = self.ui();
         let theme = self.theme;
@@ -396,6 +558,15 @@ impl App {
                         g.dl.circle(Rect::new(x, r.y + ((r.h - d) / 2.0).round(), d, d), theme.accent);
                         x += d + (6.0 * s).round();
                     }
+                    if let Some((label, tint)) = self.tab_badge(i) {
+                        let style = tab_badge_style(s);
+                        let w = (g.measure(&label, style) + 6.0 * s).round();
+                        if x + w + 18.0 * s <= text_end {
+                            let badge = Rect::new(x, r.y + ((r.h - 16.0 * s) / 2.0).round(), w, (16.0 * s).round());
+                            draw_tab_badge(g, badge, &label, tint, s);
+                            x = badge.right() + (5.0 * s).round();
+                        }
+                    }
                     g.text(x, y, &title, ui, if active { theme.text } else { theme.text_dim }, (text_end - x).max(0.0));
                 }
             }
@@ -423,6 +594,13 @@ impl App {
             g.dl.round_rect(c.plus, theme.button_hover, (6.0 * s).round());
         }
         centered(g, c.plus, G_PLUS, icons, theme.text_dim);
+        if c.tab_menu.w > 0.0 && c.tab_menu.h > 0.0 {
+            if c.tab_menu.contains(mx, my) {
+                let fill = if self.drag == Drag::TabMenu { theme.button_press } else { theme.button_hover };
+                g.dl.round_rect(c.tab_menu, fill, (6.0 * s).round());
+            }
+            g.dl.chevron((c.tab_menu.x + c.tab_menu.w / 2.0, c.tab_menu.y + c.tab_menu.h / 2.0), 8.0 * s, 90.0, 1.5 * s, theme.text_dim);
+        }
         g.dl.set_clip(Some(c.caption));
         for (r, glyph, area) in [(c.min, G_MIN, HitArea::Minimize), (c.max, if maximized { G_RESTORE } else { G_MAX }, HitArea::Maximize), (c.close, G_CLOSE, HitArea::Close)] {
             let hot = self.hover == area;
@@ -445,24 +623,48 @@ impl App {
         let s = self.ui();
         let number = self.tab_label(index);
         let ink = if self.active == index { self.theme.text } else { self.theme.text_dim };
-        let Some(pane) = self.panes.get(&self.tabs[index].focus) else {
-            centered(g, r, &number, ui, ink);
-            return;
-        };
-        let (label, tint) = crate::picker::badge(&pane.profile);
-        let small = FontStyle::new(FontFamily::Ui, (8.5 * s).round(), true);
-        let badge_w = (g.measure(&label, small) + 6.0 * s).round();
-        let number_w = g.measure(&number, ui);
-        let gap = (3.0 * s).round();
-        let x = (r.x + (r.w - number_w - gap - badge_w) / 2.0).round();
-        let badge = Rect::new(x + number_w + gap, r.y + ((r.h - 16.0 * s) / 2.0).round(), badge_w, (16.0 * s).round());
-        let y = baseline(g, r, ui);
-        g.text(x, y, &number, ui, ink, number_w + 1.0);
-        g.dl.round_rect(badge, Color::rgb(tint), (3.0 * s).round());
-        centered(g, badge, &label, small, Color::rgb(0xFFFFFF));
+        let mut dot = (r.right() - 8.0 * s, r.y + 7.0 * s);
+        if let Some((label, tint)) = self.tab_badge(index) {
+            let number_w = g.measure(&number, ui);
+            let gap = if number.is_empty() { 0.0 } else { (3.0 * s).round() };
+            let badge_w = (g.measure(&label, tab_badge_style(s)) + 6.0 * s).round().min((r.w - number_w - gap).max(0.0));
+            let x = (r.x + (r.w - number_w - gap - badge_w) / 2.0).round();
+            let badge = Rect::new(x + number_w + gap, r.y + ((r.h - 16.0 * s) / 2.0).round(), badge_w, (16.0 * s).round());
+            let y = baseline(g, r, ui);
+            g.text(x, y, &number, ui, ink, number_w + 1.0);
+            draw_tab_badge(g, badge, &label, tint, s);
+            dot = (badge.right(), badge.y);
+        } else {
+            let text = if number.is_empty() { self.tab_title(index) } else { number };
+            let y = baseline(g, r, ui);
+            let width = (r.w - 8.0 * s).max(0.0);
+            let w = g.measure(&text, ui).min(width);
+            g.text((r.x + (r.w - w) / 2.0).round(), y, &text, ui, ink, width);
+        }
         if self.tab_activity(index) {
             let diameter = (6.0 * s).round();
-            g.dl.circle(Rect::new(badge.right() - diameter / 2.0, badge.y - diameter / 2.0, diameter, diameter), self.theme.accent);
+            g.dl.circle(Rect::new(dot.0 - diameter / 2.0, dot.1 - diameter / 2.0, diameter, diameter), self.theme.accent);
+        }
+    }
+
+    fn tab_badge(&self, index: usize) -> Option<(String, u32)> {
+        if !self.config.appearance.tab_icon {
+            return None;
+        }
+        self.panes.get(&self.tabs[index].focus).map(|pane| crate::picker::badge(&pane.profile))
+    }
+
+    fn draw_profile_group_mark<B: TextBackend>(&self, g: &mut Gfx<B>, rect: Rect, x: f32, group: &crate::profile::ProfileGroup, font: FontStyle) -> f32 {
+        let s = self.ui();
+        let tint = group.color.as_deref().and_then(aster_vt::schemes::parse_hex).map(color);
+        if let Some(icon) = group.icon.as_deref().filter(|v| !v.is_empty()) {
+            let y = baseline(g, rect, font);
+            x + g.text(x, y, icon, font, tint.unwrap_or(self.theme.text_dim), 32.0 * s) + 7.0 * s
+        } else if let Some(ink) = tint {
+            g.dl.circle(Rect::new(x, rect.y + (rect.h - 9.0 * s) * 0.5, 9.0 * s, 9.0 * s), ink);
+            x + 16.0 * s
+        } else {
+            x
         }
     }
 
@@ -509,7 +711,7 @@ impl App {
             }
             let Some(tab) = self.tabs.iter().find(|t| t.root.contains(id)) else { continue };
             if let Some((_, rect)) = tab.root.layout(content, gap).panes.into_iter().find(|(p, _)| *p == id) {
-                let inner = pane_inner_with(rect, s, self.config.terminal.padding);
+                let inner = pane_inner_with(self.pane_terminal_rect(id, rect), s, self.config.terminal.padding);
                 let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
                 self.prepare_pane(id, size, m);
             }
@@ -518,6 +720,7 @@ impl App {
 
     fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, m: Metrics) {
         let s = self.ui();
+        let rect = self.pane_terminal_rect(id, rect);
         let inner = pane_inner_with(rect, s, self.config.terminal.padding);
         let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
         self.prepare_pane(id, size, m);
@@ -669,7 +872,7 @@ impl App {
             let w = (link.end.saturating_sub(link.start)) as f32 * m.w;
             g.dl.rect(Rect::new(x, oy + link.line as f32 * m.h + under_y, w, thin), theme.accent);
         }
-        if focused && !self.preedit.is_empty() {
+        if focused && self.pane_rename.is_none() && !self.sidebar_focused() && !self.preedit.is_empty() {
             let style = FontStyle::new(FontFamily::Mono, px, false);
             let w = g.measure(&self.preedit.text, style);
             let r = Rect::new(cr.x, cr.y, w.max(m.w), m.h);
@@ -704,9 +907,51 @@ impl App {
             }
         }
         g.dl.set_clip(None);
-        if focused {
+        if focused && self.pane_rename.is_none() && !self.sidebar_focused() {
             self.set_ime_area(cr);
         }
+    }
+
+    fn draw_pane_header<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool) {
+        let header = self.pane_header(id, rect);
+        if header.h <= 0.0 || header.w <= 0.0 {
+            return;
+        }
+        let Some(pane) = self.panes.get(&id) else { return };
+        let s = self.ui();
+        let theme = self.theme;
+        let ui = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let line = (1.0 * s).round().max(1.0);
+        let field = header.inset((5.0 * s).round(), (2.0 * s).round());
+        let x = field.x + (4.0 * s).round();
+        let y = baseline(g, header, ui);
+        g.dl.set_clip(Some(header));
+        g.dl.rect(header, theme.surface);
+        g.dl.rect(Rect::new(header.x, header.bottom() - line, header.w, line), theme.divider);
+        let edit = self.pane_rename.as_ref().filter(|edit| edit.pane == id);
+        if let Some(edit) = edit {
+            let radius = (4.0 * s).round();
+            g.dl.round_rect(field, theme.tab_active, radius);
+            g.dl.outline(field, theme.accent, radius, line);
+            let width = (field.right() - x - 4.0 * s).max(0.0);
+            let empty = edit.text.is_empty() && self.preedit.is_empty();
+            let w = if empty {
+                g.text(x, y, t("Pane name"), ui, theme.text_dim, width);
+                0.0
+            } else {
+                let w = g.text(x, y, &edit.text, ui, theme.text, width);
+                g.text(x + w, y, &self.preedit.text, ui, theme.text, (width - w).max(0.0));
+                let cursor = self.preedit.cursor.unwrap_or(self.preedit.text.len());
+                w + g.measure(&self.preedit.text[..cursor], ui)
+            };
+            let caret = Rect::new(x + w.min(width), field.y + 2.0 * line, line, (field.h - 4.0 * line).max(0.0));
+            g.dl.rect(caret, theme.accent);
+            self.set_ime_area(caret);
+        } else {
+            let title = pane.name.as_deref().or(pane.title.as_deref()).unwrap_or(&pane.profile.name);
+            g.text(x, y, title, ui, if focused { theme.text } else { theme.text_dim }, (header.right() - x - 8.0 * s).max(0.0));
+        }
+        g.dl.set_clip(None);
     }
 
     fn draw_search<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
@@ -865,6 +1110,7 @@ impl App {
         let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
         let heading = match confirm.target {
             CloseTarget::Pane(_) => t("Close the pane? These programs are still running:"),
+            CloseTarget::PaneProfile(..) => t("Change the profile and stop the current session?"),
             CloseTarget::Tabs(_) if confirm.programs.is_empty() => t("Close the pinned tab?"),
             CloseTarget::Tabs(ref reps) if reps.len() > 1 => t("Close the tabs? These programs are still running:"),
             CloseTarget::Tabs(_) => t("Close the tab? These programs are still running:"),
@@ -893,7 +1139,8 @@ impl App {
                 g.dl.round_rect(*r, if r.contains(mx, my) { theme.button_hover } else { theme.tab_active }, (5.0 * s).round());
                 g.dl.outline(*r, theme.overlay_border, (5.0 * s).round(), line);
             }
-            centered(g, *r, t(BUTTONS[i]), ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
+            let label = if i == 0 && matches!(confirm.target, CloseTarget::PaneProfile(..)) { t("Change profile") } else { t(BUTTONS[i]) };
+            centered(g, *r, label, ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
         }
     }
 
@@ -1045,7 +1292,7 @@ impl App {
                 g.dl.round_rect(*r, theme.accent.alpha(0x38), (4.0 * s).round());
             }
             let ink = if *enabled { theme.text } else { theme.text_dim.alpha(0x80) };
-            let hint = self.keymap.bindings_of(action).next().map(crate::keymap::format_binding).unwrap_or_default();
+            let hint = if menu.profile.is_some() { String::new() } else { self.keymap.bindings_of(action).next().map(crate::keymap::format_binding).unwrap_or_default() };
             let hint_w = if hint.is_empty() { 0.0 } else { g.measure(&hint, small) };
             let pad = (12.0 * s).round();
             let y = baseline(g, *r, ui);
@@ -1263,14 +1510,7 @@ impl App {
                 x += 20.0 * s;
                 let group = header.group_index(&page.groups).map(|i| &page.groups[i]);
                 if let Some(group) = group {
-                    let tint = group.color.as_deref().and_then(aster_vt::schemes::parse_hex).map(color);
-                    if let Some(icon) = group.icon.as_deref().filter(|v| !v.is_empty()) {
-                        let y = baseline(g, rect, bold);
-                        x += g.text(x, y, icon, bold, tint.unwrap_or(theme.text_dim), 32.0 * s) + 7.0 * s;
-                    } else if let Some(ink) = tint {
-                        g.dl.circle(Rect::new(x, rect.y + (rect.h - 9.0 * s) * 0.5, 9.0 * s, 9.0 * s), ink);
-                        x += 16.0 * s;
-                    }
+                    x = self.draw_profile_group_mark(g, rect, x, group, bold);
                     action_button(g, t("Edit"));
                 }
                 let end = if group.is_some() { action.x } else { rect.right() } - 10.0 * s;
@@ -1919,7 +2159,7 @@ impl App {
         for r in &geo.dividers {
             g.dl.rect(*r, theme.overlay_border);
         }
-        let profiles = o.kind == OverlayKind::Profiles;
+        let profiles = o.kind.is_profile_picker();
         for (i, r) in &geo.items {
             let (item, _) = &o.shown[*i];
             let pick = &o.items[*item];

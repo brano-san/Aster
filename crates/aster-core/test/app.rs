@@ -1100,7 +1100,7 @@ fn focus_follows_the_mouse_only_when_enabled() {
     a.on_event(Event::MouseMove { x: left.1.x + 10.0, y: left.1.y + 10.0 });
     assert_eq!(a.focused_pane(), Some(right.0));
     let mut config = Config::default();
-    config.terminal.focus_follows_mouse = true;
+    config.panes.focus_follows_mouse = true;
     a.set_config(config);
     a.on_event(Event::MouseMove { x: left.1.x + 10.0, y: left.1.y + 10.0 });
     assert_eq!(a.focused_pane(), Some(left.0));

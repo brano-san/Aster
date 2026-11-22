@@ -33,6 +33,11 @@ pub enum Action {
     PaneNavNext,
     PaneMaximize,
     ClosePane,
+    RenamePane,
+    ChangePaneProfile,
+    ToggleProfileSidebar,
+    RearrangePanes,
+    PaneToTab,
     Copy,
     Paste,
     SelectAll,
@@ -130,6 +135,11 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::PaneNavNext, "pane-nav-next", "Focus the next pane"),
     (Action::PaneMaximize, "pane-maximize", "Maximize the active pane"),
     (Action::ClosePane, "close-pane", "Close the active pane"),
+    (Action::RenamePane, "rename-pane", "Rename pane"),
+    (Action::ChangePaneProfile, "change-pane-profile", "Change pane profile"),
+    (Action::ToggleProfileSidebar, "toggle-profile-sidebar", "Toggle profile sidebar"),
+    (Action::RearrangePanes, "rearrange-panes", "Rearrange panes"),
+    (Action::PaneToTab, "pane-to-tab", "Move pane to a new tab"),
     (Action::Copy, "copy", "Copy"),
     (Action::Paste, "paste", "Paste"),
     (Action::SelectAll, "select-all", "Select all"),
@@ -203,7 +213,7 @@ impl Action {
         use Action::*;
         matches!(
             self,
-            Tab(_) | NextTab | PreviousTab | NextMruTab | PreviousMruTab | MoveTabLeft | MoveTabRight | NewTab | NewWindow | NewAdminTab | CloseTab | PinTab | ReopenTab | ToggleLastTab | ProfileSelector | CommandSelector | ToggleFullscreen | ToggleTabBar | SelectColorScheme | OpenProfile(_) | SelectProfileSection(_) | SelectProfileGroup(_) | ManageProfiles | ClearRecentProfiles | MinimizeWindow | ToggleMaximize | CloseWindow | Quit
+            Tab(_) | NextTab | PreviousTab | NextMruTab | PreviousMruTab | MoveTabLeft | MoveTabRight | NewTab | NewWindow | NewAdminTab | CloseTab | PinTab | ReopenTab | ToggleLastTab | ProfileSelector | CommandSelector | ToggleFullscreen | ToggleTabBar | ToggleProfileSidebar | SelectColorScheme | OpenProfile(_) | SelectProfileSection(_) | SelectProfileGroup(_) | ManageProfiles | ClearRecentProfiles | MinimizeWindow | ToggleMaximize | CloseWindow | Quit
         )
     }
 

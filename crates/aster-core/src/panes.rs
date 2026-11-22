@@ -92,6 +92,39 @@ impl Node {
         true
     }
 
+    pub(crate) fn replace_pane(&mut self, old: PaneId, new: PaneId) {
+        if let Some(leaf) = self.leaf_mut(old) {
+            *leaf = Node::Leaf(new);
+        }
+    }
+
+    pub fn swap_panes(&mut self, first: PaneId, second: PaneId) -> bool {
+        if first == second || !self.contains(first) || !self.contains(second) {
+            return false;
+        }
+        self.swap_ids(first, second);
+        true
+    }
+
+    fn swap_ids(&mut self, first: PaneId, second: PaneId) {
+        match self {
+            Node::Leaf(id) if *id == first => *id = second,
+            Node::Leaf(id) if *id == second => *id = first,
+            Node::Leaf(_) => {}
+            Node::Split { a, b, .. } => {
+                a.swap_ids(first, second);
+                b.swap_ids(first, second);
+            }
+        }
+    }
+
+    pub fn move_pane(&mut self, pane: PaneId, target: PaneId, side: Side) -> bool {
+        if pane == target || !self.contains(target) || !self.remove(pane) {
+            return false;
+        }
+        self.split(target, side, pane)
+    }
+
     pub fn remove(&mut self, pane: PaneId) -> bool {
         let Node::Split { a, b, .. } = self else { return false };
         if **a == Node::Leaf(pane) {
@@ -138,10 +171,12 @@ impl Node {
             Node::Split { axis, ratio, a, b } => {
                 let (ra, rs, rb) = match axis {
                     Axis::Horizontal => {
+                        let gap = gap.min(r.w);
                         let wa = ((r.w - gap) * ratio).round().max(0.0);
                         (Rect::new(r.x, r.y, wa, r.h), Rect::new(r.x + wa, r.y, gap, r.h), Rect::new(r.x + wa + gap, r.y, (r.w - wa - gap).max(0.0), r.h))
                     }
                     Axis::Vertical => {
+                        let gap = gap.min(r.h);
                         let ha = ((r.h - gap) * ratio).round().max(0.0);
                         (Rect::new(r.x, r.y, r.w, ha), Rect::new(r.x, r.y + ha, r.w, gap), Rect::new(r.x, r.y + ha + gap, r.w, (r.h - ha - gap).max(0.0)))
                     }

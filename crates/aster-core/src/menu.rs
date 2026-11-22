@@ -14,6 +14,7 @@ pub struct Menu {
     pub entries: Vec<Entry>,
     pub at: (f32, f32),
     pub selected: Option<usize>,
+    pub(crate) profile: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -107,7 +108,7 @@ impl App {
     fn open_menu(&mut self, entries: Vec<Entry>, x: f32, y: f32) {
         self.overlay = None;
         self.commit_rename();
-        self.menu = Some(Menu { entries, at: (x, y), selected: None });
+        self.menu = Some(Menu { entries, at: (x, y), selected: None, profile: None });
         self.set_cursor(CursorIcon::Default);
         self.dirty = true;
     }
@@ -170,6 +171,10 @@ impl App {
             Entry::Separator,
             item("Split to the right", Action::SplitRight, true),
             item("Split to the bottom", Action::SplitBottom, true),
+            item("Rename pane", Action::RenamePane, true),
+            item("Change pane profile", Action::ChangePaneProfile, true),
+            item("Rearrange panes", Action::RearrangePanes, self.can_save_layout()),
+            item("Move pane to a new tab", Action::PaneToTab, self.can_save_layout()),
             item("Close pane", Action::ClosePane, true),
             Entry::Separator,
             item("Search", Action::Search, true),
@@ -186,6 +191,17 @@ impl App {
         entries
     }
 
+    pub(crate) fn open_sidebar_profile_menu(&mut self, profile: String, x: f32, y: f32) {
+        self.open_menu(vec![
+            item("Open", Action::NewTab, true),
+            item("Open in split", Action::SplitRight, true),
+            item("Edit", Action::Settings, true),
+        ], x, y);
+        if let Some(menu) = self.menu.as_mut() {
+            menu.profile = Some(profile);
+        }
+    }
+
     pub(crate) fn close_menu(&mut self) {
         if self.menu.take().is_some() {
             self.dirty = true;
@@ -194,8 +210,9 @@ impl App {
 
     fn run_menu(&mut self, i: usize) {
         let Some(action) = self.menu.as_ref().and_then(|m| m.action(i)) else { return };
+        let profile = self.menu.as_mut().and_then(|m| m.profile.take());
         self.close_menu();
-        self.run(action);
+        if let Some(profile) = profile { self.run_sidebar_profile(&profile, action); } else { self.run(action); }
     }
 
     pub(crate) fn menu_key(&mut self, key: Key) {

@@ -95,7 +95,7 @@ fn the_pin_menu_reflects_state_and_skips_protected_close_targets() {
 
 #[test]
 fn the_menu_stays_inside_the_window() {
-    let menu = Menu { entries: vec![Entry::Separator; 3], at: (990.0, 690.0), selected: None };
+    let menu = Menu { entries: vec![Entry::Separator; 3], at: (990.0, 690.0), selected: None, profile: None };
     let geo = geometry(&menu, 1.0, (1000.0, 700.0));
     assert!(geo.frame.right() <= 1000.0 && geo.frame.bottom() <= 700.0);
 }

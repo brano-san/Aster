@@ -10,6 +10,11 @@ pub const LISTED: usize = 6;
 
 const COMMAND_INTERVAL: Duration = Duration::from_secs(2);
 
+pub(crate) fn command_probe_id() -> u64 {
+    static REQUEST: AtomicU64 = AtomicU64::new(1);
+    REQUEST.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum CommandWatch {
     #[default]
@@ -32,6 +37,7 @@ impl CommandWatch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CloseTarget {
     Pane(PaneId),
+    PaneProfile(PaneId, String),
     Tabs(Vec<PaneId>),
     Window,
 }
@@ -84,7 +90,7 @@ impl App {
 
     fn target_panes(&self, target: &CloseTarget) -> Vec<PaneId> {
         match target {
-            CloseTarget::Pane(id) => vec![*id],
+            CloseTarget::Pane(id) | CloseTarget::PaneProfile(id, _) => vec![*id],
             CloseTarget::Tabs(reps) => self.tabs.iter().filter(|t| reps.iter().any(|p| t.root.contains(*p))).flat_map(|t| t.root.panes()).collect(),
             CloseTarget::Window => self.tabs.iter().flat_map(|t| t.root.panes()).collect(),
         }
@@ -128,7 +134,6 @@ impl App {
     }
 
     pub(crate) fn poll_commands(&mut self, now: Instant) {
-        static REQUEST: AtomicU64 = AtomicU64::new(1);
         for i in 0..self.tabs.len() {
             let tab = &self.tabs[i];
             let CommandWatch::Waiting { busy, next } = tab.command_watch else { continue };
@@ -139,11 +144,11 @@ impl App {
             if pids.is_empty() {
                 self.tabs[i].command_watch = if busy { CommandWatch::Finished } else { CommandWatch::Off };
                 if busy {
-                    self.push(Effect::Attention);
+                    self.notify_command_finished(i);
                 }
                 self.dirty = true;
             } else {
-                let request = REQUEST.fetch_add(1, Ordering::Relaxed);
+                let request = command_probe_id();
                 self.tabs[i].command_watch = CommandWatch::Polling { busy, request };
                 self.push(Effect::ProbeCommand { request, pids });
             }
@@ -151,11 +156,15 @@ impl App {
     }
 
     pub fn command_probe_finished(&mut self, request: u64, result: Option<bool>) {
-        let Some(tab) = self.tabs.iter_mut().find(|t| matches!(t.command_watch, CommandWatch::Polling { request: r, .. } if r == request)) else { return };
+        if self.finish_pane_profile_probe(request, result) {
+            return;
+        }
+        let Some(index) = self.tabs.iter().position(|t| matches!(t.command_watch, CommandWatch::Polling { request: r, .. } if r == request)) else { return };
+        let tab = &mut self.tabs[index];
         let CommandWatch::Polling { busy, .. } = tab.command_watch else { return };
         if busy && result == Some(false) {
             tab.command_watch = CommandWatch::Finished;
-            self.push(Effect::Attention);
+            self.notify_command_finished(index);
             self.dirty = true;
         } else {
             tab.command_watch = CommandWatch::Waiting { busy: result.unwrap_or(busy), next: Instant::now() + COMMAND_INTERVAL };
@@ -178,6 +187,7 @@ impl App {
     fn close_now(&mut self, target: CloseTarget) {
         match target {
             CloseTarget::Pane(id) => self.close_pane(id),
+            CloseTarget::PaneProfile(pane, profile) => self.replace_pane_profile(pane, &profile),
             CloseTarget::Tabs(reps) => {
                 for rep in reps {
                     if let Some(i) = self.tabs.iter().position(|t| t.root.contains(rep)) {

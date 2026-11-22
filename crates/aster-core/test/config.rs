@@ -21,6 +21,40 @@ fn tray_is_opt_in_and_round_trips() {
 }
 
 #[test]
+fn dock_screen_accepts_named_and_numeric_toml_values() {
+    assert_eq!(Config::default().dock.selection(), DockScreen::Current);
+    let primary = Config::parse("[dock]\nscreen = \"primary\"").unwrap();
+    assert_eq!(primary.dock.selection(), DockScreen::Primary);
+    let numbered = Config::parse("[dock]\nscreen = 2").unwrap();
+    assert_eq!(numbered.dock.selection(), DockScreen::Number(2));
+    assert_eq!(Config::parse(&numbered.to_text()).unwrap(), numbered);
+    assert_eq!(Config::parse("[dock]\nscreen = 0").unwrap().dock.selection(), DockScreen::Current);
+}
+
+#[test]
+fn last_tab_option_migrates_to_terminal_and_the_new_key_wins() {
+    let legacy = "[appearance]\nlast-tab-closes-window = false";
+    let migrated = Config::parse(legacy).unwrap();
+    assert!(!migrated.terminal.close_window_with_last_tab);
+    let text = migrated.to_text();
+    assert!(text.contains("close-window-with-last-tab = false"));
+    assert!(!text.contains("last-tab-closes-window"));
+    assert!(Config::parse(&format!("{legacy}\n[terminal]\nclose-window-with-last-tab = true")).unwrap().terminal.close_window_with_last_tab);
+}
+
+#[test]
+fn pane_options_read_legacy_mouse_focus_and_prefer_the_new_section() {
+    let legacy = "[terminal]\nfocus-follows-mouse = true";
+    let migrated = Config::parse(legacy).unwrap();
+    assert!(migrated.panes.focus_follows_mouse);
+    assert_eq!(migrated.panes.resize_step(), 0.1);
+    let new = Config::parse(&format!("{legacy}\n[panes]\nfocus-follows-mouse = false\nresize-step = 0.7")).unwrap();
+    assert!(!new.panes.focus_follows_mouse);
+    assert_eq!(new.panes.resize_step(), 0.7);
+    assert_eq!(Config::parse(&new.to_text()).unwrap(), new);
+}
+
+#[test]
 fn partial_sections_keep_the_other_defaults() {
     let c = Config::parse(
         r#"

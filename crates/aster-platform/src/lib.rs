@@ -1,4 +1,5 @@
 pub mod host;
+pub mod monitors;
 
 use aster_core::input::{CursorIcon, Event, HitArea};
 use aster_core::profile::Profile;
@@ -58,6 +59,7 @@ pub struct DockSpec {
     pub fill: f32,
     pub space: f32,
     pub on_top: bool,
+    pub screen: aster_core::config::DockScreen,
 }
 
 pub fn dock_rect(work: (i32, i32, i32, i32), spec: DockSpec) -> (i32, i32, i32, i32) {
@@ -119,6 +121,7 @@ pub trait Window {
     fn set_dark(&self, dark: bool);
     fn set_timer(&self, ms: u32);
     fn request_attention(&self);
+    fn notify(&self, _notification: aster_core::notifications::Notification) {}
     fn set_surface(&self, backdrop: aster_core::config::Backdrop) -> Surface;
     fn set_visible(&self, visible: bool);
     fn is_visible(&self) -> bool;

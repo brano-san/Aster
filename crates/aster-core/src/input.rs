@@ -123,6 +123,7 @@ pub enum Event {
     Timer,
     SessionEnding,
     GlobalHotkey,
+    NotificationClicked(u64),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

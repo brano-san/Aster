@@ -57,7 +57,7 @@ impl ProfileLayout {
                 if cwd.is_some() {
                     source.cwd.clone_from(cwd);
                 }
-                NodeState::Pane(Box::new(PaneState { profile: source, cwd: cwd.clone(), buffer: Vec::new() }))
+                NodeState::Pane(Box::new(PaneState { profile: source, cwd: cwd.clone(), buffer: Vec::new(), name: None }))
             }
             Self::Split { vertical, ratio, a, b } => NodeState::Split {
                 vertical: *vertical, ratio: if ratio.is_finite() { *ratio } else { 0.5 },
@@ -70,6 +70,8 @@ impl ProfileLayout {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaneState {
     pub profile: Profile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -160,7 +162,7 @@ impl App {
                 let pane = self.panes.get(id).filter(|p| !p.profile.hold)?;
                 let cwd = self.pane_cwd(*id);
                 let t = pane.terminal.lock();
-                NodeState::Pane(Box::new(PaneState { profile: pane.source_profile.clone(), cwd, buffer: t.tail_lines(BUFFER_LINES) }))
+                NodeState::Pane(Box::new(PaneState { profile: pane.source_profile.clone(), name: pane.name.clone(), cwd, buffer: t.tail_lines(BUFFER_LINES) }))
             }
             Node::Split { axis, ratio, a, b } => match (self.node_state(a), self.node_state(b)) {
                 (Some(a), Some(b)) => NodeState::Split { vertical: *axis == Axis::Vertical, ratio: *ratio, a: Box::new(a), b: Box::new(b) },
@@ -201,6 +203,7 @@ impl App {
                 let profile = Profile { elevated: false, ..p.profile.clone() };
                 let id: PaneId = self.new_pane_in(profile, p.cwd.clone());
                 if let Some(pane) = self.panes.get_mut(&id) {
+                    pane.name = p.name.clone().filter(|name| !name.trim().is_empty());
                     let mut t = pane.terminal.lock();
                     if !p.buffer.is_empty() {
                         t.feed(&restore_text(&p.buffer));
@@ -208,6 +211,7 @@ impl App {
                     let seen = t.output_seq();
                     drop(t);
                     pane.seen = seen;
+                    pane.activity_seq = seen;
                 }
                 Node::Leaf(id)
             }

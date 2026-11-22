@@ -44,3 +44,13 @@ fn tray_prefers_last_focus_among_surviving_windows() {
     nodes.clear();
     assert!(recent_window(&nodes).is_none());
 }
+
+#[test]
+fn capture_can_hold_move_and_release_a_pane_drag() {
+    assert_eq!(capture_batch("Down@10,15;Move@40,45;Up@80,85"), vec![
+        Event::MouseMove { x: 10.0, y: 15.0 },
+        Event::MouseDown { x: 10.0, y: 15.0, button: MouseButton::Left, clicks: 1 },
+        Event::MouseMove { x: 40.0, y: 45.0 },
+        Event::MouseUp { x: 80.0, y: 85.0, button: MouseButton::Left },
+    ]);
+}

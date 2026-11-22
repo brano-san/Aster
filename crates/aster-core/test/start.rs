@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 fn start_app() -> App {
     let mut config = Config::default();
-    config.appearance.last_tab_closes_window = false;
+    config.terminal.close_window_with_last_tab = false;
     config.hotkeys.insert("tab-2".into(), vec!["Ctrl-J".into()]);
     let profiles = ["a", "b", "c", "d", "e", "f"].map(|name| Profile::new(name, name, "shell", &[]));
     let mut app = App::new(config, profiles.to_vec(), true, None, Arc::new(|| {}));

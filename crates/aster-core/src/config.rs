@@ -101,6 +101,53 @@ pub enum Dock {
     Right,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DockScreen {
+    #[default]
+    Current,
+    Primary,
+    Number(u32),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct DockSettings {
+    #[serde(deserialize_with = "read_dock_screen")]
+    pub screen: String,
+}
+
+fn read_dock_screen<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Value {
+        Number(u32),
+        Text(String),
+    }
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Number(number) => number.to_string(),
+        Value::Text(text) => text,
+    })
+}
+
+impl Default for DockSettings {
+    fn default() -> Self {
+        Self { screen: "current".into() }
+    }
+}
+
+impl DockSettings {
+    pub fn selection(&self) -> DockScreen {
+        let value = self.screen.trim();
+        if value.eq_ignore_ascii_case("primary") {
+            DockScreen::Primary
+        } else if let Ok(number) = value.parse::<std::num::NonZeroU32>() {
+            DockScreen::Number(number.get())
+        } else {
+            DockScreen::Current
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct SearchOptions {
@@ -148,7 +195,7 @@ pub struct Terminal {
     pub recover_tabs: bool,
     pub open_on_start: bool,
     pub confirm_close: bool,
-    pub focus_follows_mouse: bool,
+    pub close_window_with_last_tab: bool,
     pub recent_profiles: usize,
 }
 
@@ -190,9 +237,42 @@ impl Default for Terminal {
             recover_tabs: true,
             open_on_start: true,
             confirm_close: true,
-            focus_follows_mouse: false,
+            close_window_with_last_tab: true,
             recent_profiles: 3,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Panes {
+    pub resize_step: f32,
+    pub focus_follows_mouse: bool,
+}
+
+impl Default for Panes {
+    fn default() -> Self {
+        Self { resize_step: 0.1, focus_follows_mouse: false }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Notifications {
+    pub command_finished: bool,
+    pub activity: bool,
+    pub activity_silence_seconds: u32,
+}
+
+impl Default for Notifications {
+    fn default() -> Self {
+        Self { command_finished: false, activity: false, activity_silence_seconds: 10 }
+    }
+}
+
+impl Panes {
+    pub fn resize_step(self) -> f32 {
+        if self.resize_step.is_nan() { Self::default().resize_step } else { self.resize_step.clamp(0.1, 0.9) }
     }
 }
 
@@ -231,7 +311,6 @@ pub struct Appearance {
     pub light_color_scheme: String,
     pub cycle_tabs: bool,
     pub animations: bool,
-    pub last_tab_closes_window: bool,
     pub tray: bool,
     pub ui_font: String,
     pub density: f32,
@@ -246,7 +325,12 @@ pub struct Appearance {
     pub language: String,
     pub tab_bar: TabBar,
     pub tab_index: bool,
+    pub tab_icon: bool,
+    pub pane_titles: bool,
+    pub profile_sidebar: bool,
+    pub profile_sidebar_width: f32,
     pub tab_close_buttons: bool,
+    pub tab_menu_button: bool,
     pub tabs_in_fullscreen: bool,
     pub tab_width: TabWidth,
     pub tab_bar_position: TabBarPosition,
@@ -261,7 +345,6 @@ impl Default for Appearance {
             light_color_scheme: "Aster Light".into(),
             cycle_tabs: true,
             animations: true,
-            last_tab_closes_window: true,
             tray: false,
             ui_font: String::new(),
             density: 1.0,
@@ -276,7 +359,12 @@ impl Default for Appearance {
             language: "auto".into(),
             tab_bar: TabBar::Always,
             tab_index: false,
+            tab_icon: true,
+            pane_titles: false,
+            profile_sidebar: false,
+            profile_sidebar_width: crate::profile_sidebar::DEFAULT_WIDTH,
             tab_close_buttons: true,
+            tab_menu_button: true,
             tabs_in_fullscreen: false,
             tab_width: TabWidth::Fit,
             tab_bar_position: TabBarPosition::Top,
@@ -348,6 +436,9 @@ pub struct Config {
     pub palette: Palette,
     pub terminal: Terminal,
     pub appearance: Appearance,
+    pub panes: Panes,
+    pub notifications: Notifications,
+    pub dock: DockSettings,
     pub vault: Vault,
     pub ssh: Ssh,
     pub system: System,
@@ -373,12 +464,25 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Config, String> {
-        toml::from_str(text).map_err(|e| {
+        let mut config: Config = toml::from_str(text).map_err(|e| {
             let Some(prefix) = e.span().and_then(|span| text.get(..span.start)) else { return e.message().to_owned() };
             let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
             let column = prefix.rsplit('\n').next().unwrap_or_default().chars().count() + 1;
             crate::i18n::tf("Line {line}, column {column}: {error}", &[("line", &line.to_string()), ("column", &column.to_string()), ("error", e.message())])
-        })
+        })?;
+        if let Ok(raw) = toml::from_str::<toml::Table>(text) {
+            let legacy_bool = |section: &str, key: &str, previous_section: &str, previous_key: &str| {
+                if raw.get(section).and_then(|v| v.get(key)).is_some() { return None; }
+                raw.get(previous_section)?.get(previous_key)?.as_bool()
+            };
+            if let Some(value) = legacy_bool("terminal", "close-window-with-last-tab", "appearance", "last-tab-closes-window") {
+                config.terminal.close_window_with_last_tab = value;
+            }
+            if let Some(value) = legacy_bool("panes", "focus-follows-mouse", "terminal", "focus-follows-mouse") {
+                config.panes.focus_follows_mouse = value;
+            }
+        }
+        Ok(config)
     }
 
     pub fn to_text(&self) -> String {

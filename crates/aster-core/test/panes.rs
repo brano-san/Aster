@@ -56,3 +56,26 @@ fn neighbors_are_found_geometrically() {
     assert_eq!(neighbor(&l, 2, Side::Bottom), Some(3));
     assert_eq!(neighbor(&l, 1, Side::Left), None);
 }
+
+#[test]
+fn moving_panes_collapses_empty_branches_and_swapping_preserves_split_ratios() {
+    let mut root = Node::Leaf(1);
+    assert!(root.split(1, Side::Right, 2));
+    assert!(root.split(2, Side::Bottom, 3));
+    root.set_ratio(&[], 0.3);
+    root.set_ratio(&[true], 0.6);
+    let rect = Rect::new(0.0, 0.0, 750.0, 450.0);
+    let before = root.layout(rect, 1.0);
+    assert!(root.swap_panes(1, 3));
+    let after = root.layout(rect, 1.0);
+    assert_eq!(after.panes[0], (3, before.panes[0].1));
+    assert_eq!(after.panes[2], (1, before.panes[2].1));
+    assert_eq!(before.splitters, after.splitters);
+    assert!(root.move_pane(3, 1, Side::Left));
+    assert_eq!(root.panes(), [2, 3, 1]);
+    assert!(!root.move_pane(3, 99, Side::Right));
+    assert!(!root.swap_panes(2, 99));
+    let layout = root.layout(rect, 1.0);
+    assert_eq!(layout.splitters.len(), 2);
+    assert!(layout.panes.iter().all(|(_, pane)| pane.w > 0.0 && pane.h > 0.0 && pane.right() <= rect.right() && pane.bottom() <= rect.bottom()));
+}

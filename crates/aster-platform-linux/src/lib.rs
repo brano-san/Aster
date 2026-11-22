@@ -7,6 +7,8 @@ mod fonts;
 mod gl;
 pub mod config_lock;
 mod instance;
+mod monitors;
+mod notifications;
 mod pty;
 mod shells;
 mod text;

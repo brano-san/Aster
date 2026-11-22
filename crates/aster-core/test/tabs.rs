@@ -230,7 +230,7 @@ fn closing_the_last_tab_can_keep_its_window_for_another_profile() {
     let mut a = app(1);
     let old = a.tabs[0].focus;
     let mut config = a.config().clone();
-    config.appearance.last_tab_closes_window = false;
+    config.terminal.close_window_with_last_tab = false;
     a.set_config(config);
     a.run(Action::CloseTab);
     assert!(a.tabs.is_empty());
@@ -283,6 +283,10 @@ fn each_bar_position_separates_panes_tabs_and_caption_buttons() {
             assert_eq!(a.hit_test(x, y), area);
         }
         assert!(encloses(c.tab_bar, c.plus));
+        assert!(encloses(c.tab_bar, c.tab_menu));
+        let (x, y) = center(c.tab_menu);
+        assert_eq!(a.hit_test(x, y), HitArea::Client);
+        assert!(if c.vertical { c.plus.bottom() <= c.tab_menu.y } else { c.plus.right() <= c.tab_menu.x });
         for slot in &c.tabs {
             assert!(slot.rect.w > 0.0 && encloses(c.tab_bar, slot.rect) && encloses(slot.rect, slot.close));
             let (x, y) = center(slot.rect);
@@ -333,6 +337,27 @@ fn disabled_close_buttons_leave_the_slot_clickable_and_middle_click_still_closes
 }
 
 #[test]
+fn tab_menu_button_opens_the_active_tab_menu_and_can_be_hidden() {
+    let mut a = app(2);
+    let menu = a.chrome.tab_menu;
+    assert!(menu.w > 0.0 && a.chrome.plus.right() <= menu.x && menu.right() <= a.chrome.min.x);
+    let (x, y) = (menu.x + menu.w / 2.0, menu.y + menu.h / 2.0);
+    assert_eq!(a.hit_test(x, y), crate::input::HitArea::Client);
+    a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+    a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+    assert!(a.menu_open());
+    assert_eq!(a.active, 1);
+    a.close_menu();
+    a.config.appearance.tab_menu_button = false;
+    a.chrome = a.tab_chrome();
+    assert_eq!(a.chrome.tab_menu, Rect::default());
+    let tab = a.chrome.tabs[0].rect;
+    a.on_event(Event::MouseDown { x: tab.x + 1.0, y: tab.y + 1.0, button: MouseButton::Right, clicks: 1 });
+    assert!(a.menu_open());
+    assert_eq!(a.active, 0);
+}
+
+#[test]
 fn numbered_and_pinned_tab_labels_preserve_the_full_window_title() {
     let mut a = app(2);
     a.tabs[1].title = Some("Build output".into());
@@ -340,8 +365,11 @@ fn numbered_and_pinned_tab_labels_preserve_the_full_window_title() {
     a.config.appearance.tab_index = true;
     assert_eq!(a.tab_label(1), "2  Build output");
     a.toggle_pin();
-    a.config.appearance.tab_index = false;
     assert_eq!(a.tab_label(0), "1");
+    a.config.appearance.tab_index = false;
+    assert_eq!(a.tab_label(0), "");
+    a.config.appearance.tab_icon = false;
+    assert_eq!(a.tab_label(0), "Build output");
     a.mark_drawn();
     assert!(a.take_effects().iter().any(|effect| matches!(effect, Effect::Title(text) if text == "Build output")));
 }
@@ -362,6 +390,38 @@ fn dragging_sidebar_tabs_uses_the_vertical_axis_and_respects_pins() {
     assert_eq!((a.active, a.tabs[1].focus), (1, tab));
     a.on_event(Event::MouseMove { x, y: pin.y + 10.0 });
     assert_eq!((a.active, a.tabs[1].focus), (1, tab));
+}
+
+#[test]
+fn dragging_a_tab_inserts_its_whole_tree_and_pane_to_tab_keeps_the_session() {
+    let mut a = app(2);
+    a.activate(0);
+    a.run(Action::SplitBottom);
+    let source = a.tabs[0].root.clone();
+    let moved_focus = a.tabs[0].focus;
+    a.activate(1);
+    let original_focus = a.tabs[1].focus;
+    a.chrome = a.tab_chrome();
+    a.layout = a.tabs[1].root.layout(a.chrome.content, 1.0);
+    a.take_effects();
+    let tab = a.chrome.tabs[0].rect;
+    a.on_event(Event::MouseDown { x: tab.x + 12.0, y: tab.y + 10.0, button: MouseButton::Left, clicks: 1 });
+    assert_eq!(a.focused_pane(), Some(original_focus));
+    let target = a.layout.panes[0].1;
+    let (x, y) = (target.x + 5.0, target.y + target.h / 2.0);
+    a.on_event(Event::MouseMove { x, y });
+    assert_eq!(a.tab_drag_hover().map(|(_, zone)| zone), Some(crate::rearrange::DropZone::Side(crate::panes::Side::Left)));
+    a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+    assert_eq!(a.tab_count(), 1);
+    assert!(matches!(&a.tabs[0].root, crate::panes::Node::Split { a, .. } if **a == source));
+    assert_eq!(a.focused_pane(), Some(moved_focus));
+    a.run(Action::PaneToTab);
+    assert_eq!(a.tab_count(), 2);
+    assert_eq!(a.tabs[1].root, crate::panes::Node::Leaf(moved_focus));
+    assert!(a.tabs[0].root.contains(original_focus));
+    assert_eq!(a.panes.len(), 3);
+    assert!(a.closed_tabs.is_empty());
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Spawn { .. } | Effect::Kill { .. })));
 }
 
 #[test]
@@ -542,6 +602,22 @@ fn keyboard_resizing_moves_the_nearest_divider() {
     assert!(matches!(a.tabs[0].root, crate::panes::Node::Split { ratio, .. } if (ratio - 0.4).abs() < 1e-6));
     a.run(Action::PaneResizeDown);
     assert!(matches!(a.tabs[0].root, crate::panes::Node::Split { ratio, .. } if (ratio - 0.4).abs() < 1e-6), "no vertical divider to move");
+}
+
+#[test]
+fn keyboard_resizing_uses_the_configured_step_and_clamps_the_divider() {
+    let mut a = app(1);
+    a.run(Action::SplitRight);
+    a.config.panes.resize_step = 0.3;
+    a.run(Action::PaneResizeLeft);
+    assert!(matches!(a.tabs[0].root, crate::panes::Node::Split { ratio, .. } if (ratio - 0.2).abs() < 1e-6));
+    a.config.panes.resize_step = 2.0;
+    assert_eq!(a.config.panes.resize_step(), 0.9);
+    a.run(Action::PaneResizeLeft);
+    assert!(matches!(a.tabs[0].root, crate::panes::Node::Split { ratio, .. } if ratio == 0.05));
+    a.config.panes.resize_step = f32::NAN;
+    a.run(Action::PaneResizeRight);
+    assert!(matches!(a.tabs[0].root, crate::panes::Node::Split { ratio, .. } if (ratio - 0.15).abs() < 1e-6));
 }
 
 #[test]

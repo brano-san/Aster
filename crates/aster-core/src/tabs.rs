@@ -1,6 +1,8 @@
-use crate::app::{App, Effect};
+use crate::app::{App, Drag, Effect, Tab};
 use crate::config::{Appearance, TabBarPosition, TabWidth};
 use crate::input::{Key, Mods};
+use crate::panes::{Node, Side};
+use crate::rearrange::DropZone;
 use aster_gfx::render::Rect;
 
 pub const TAB_H: f32 = 36.0;
@@ -17,17 +19,13 @@ pub struct Chrome {
     pub caption: Rect,
     pub tabs: Vec<TabSlot>,
     pub plus: Rect,
+    pub tab_menu: Rect,
     pub min: Rect,
     pub max: Rect,
     pub close: Rect,
     pub content: Rect,
+    pub profile_sidebar: Rect,
     pub vertical: bool,
-}
-
-impl Chrome {
-    pub(crate) fn tab_axis(&self, x: f32, y: f32) -> f32 {
-        if self.vertical { y } else { x }
-    }
 }
 
 pub fn chrome(w: f32, h: f32, s: f32, tabs: usize, pinned: usize, active: usize, appearance: &Appearance) -> Chrome {
@@ -62,8 +60,10 @@ impl Chrome {
         let span = if self.vertical { tab_bar.h } else if top { self.min.x } else { tab_bar.w };
         let margin = (8.0 * s).round().min(span);
         let plus_span = row.min(span - margin);
-        let gap = (4.0 * s).round().min(span - margin - plus_span);
-        let available = (span - margin - plus_span - gap - (12.0 * s).round()).max(0.0);
+        let menu_width = (24.0 * s).round();
+        let menu_span = if appearance.tab_menu_button && tabs > 0 && span - margin - plus_span >= menu_width { menu_width } else { 0.0 };
+        let gap = (4.0 * s).round().min(span - margin - plus_span - menu_span);
+        let available = (span - margin - plus_span - menu_span - gap - (12.0 * s).round()).max(0.0);
         let pin_width = (48.0 * s).round();
         let preferred = (if appearance.tab_width == TabWidth::Fixed { 200.0 } else { 220.0 } * s).round();
         let regular_width = ((available - pinned as f32 * pin_width) / tabs.saturating_sub(pinned).max(1) as f32)
@@ -114,6 +114,14 @@ impl Chrome {
             let pad = if top { inset.min(tab_bar.h - height) } else { 0.0 };
             Rect::new(cursor + gap, tab_bar.y + ((tab_bar.h + pad - height) / 2.0).round(), plus_span, height)
         };
+        if menu_span > 0.0 {
+            let plus = self.plus;
+            self.tab_menu = if self.vertical {
+                Rect::new(plus.x, plus.bottom(), plus.w, menu_span)
+            } else {
+                Rect::new(plus.right(), plus.y, menu_span, plus.h)
+            };
+        }
     }
 }
 
@@ -181,21 +189,102 @@ impl MruTabs {
 impl App {
     pub(crate) fn tab_chrome(&self) -> Chrome {
         let (w, h) = self.size;
-        if self.tab_bar_hidden() {
+        let mut chrome = if self.tab_bar_hidden() {
             bare_chrome(w, h)
         } else {
             chrome(w, h, self.ui(), self.tabs.len(), self.tabs.partition_point(|tab| tab.pinned), self.active, &self.config.appearance)
-        }
+        };
+        self.place_profile_sidebar(&mut chrome);
+        chrome
     }
 
     pub(crate) fn tab_label(&self, index: usize) -> String {
-        if self.tabs[index].pinned {
+        if self.tabs[index].pinned && self.config.appearance.tab_index {
             (index + 1).to_string()
+        } else if self.tabs[index].pinned && self.config.appearance.tab_icon {
+            String::new()
         } else if self.config.appearance.tab_index {
             format!("{}  {}", index + 1, self.tab_title(index))
         } else {
             self.tab_title(index)
         }
+    }
+
+    pub(crate) fn drag_tab(&mut self, mut index: usize, start: (f32, f32), moved: bool, x: f32, y: f32) {
+        if !moved && (x - start.0).abs().max((y - start.1).abs()) <= 6.0 * self.ui() {
+            return;
+        }
+        if self.chrome.tab_bar.contains(x, y) {
+            let target = self.chrome.tabs.iter().position(|slot| {
+                if self.chrome.vertical { slot.rect.contains(slot.rect.x, y) } else { slot.rect.contains(x, slot.rect.y) }
+            });
+            if let Some(target) = target.filter(|&target| index != target && self.can_move_tab(index, target)) {
+                let active = self.tabs[self.active].key;
+                let source = self.tabs.remove(index);
+                self.tabs.insert(target, source);
+                self.active = self.tabs.iter().position(|tab| tab.key == active).unwrap_or(target);
+                index = target;
+            }
+        }
+        self.drag = Drag::Tab { index, start, moved: true };
+        self.dirty = true;
+    }
+
+    fn can_drop_tab(&self, index: usize) -> bool {
+        index != self.active && self.files.is_none()
+            && [index, self.active].into_iter().all(|i| self.tabs.get(i).is_some_and(|tab| self.panes.contains_key(&tab.focus)))
+    }
+
+    pub(crate) fn tab_drag_hover(&self) -> Option<(Rect, DropZone)> {
+        let Drag::Tab { index, moved: true, .. } = self.drag else { return None };
+        if !self.can_drop_tab(index) { return None; }
+        self.pane_drop_at(None, self.mouse.0, self.mouse.1).map(|(_, rect, zone)| (rect, zone))
+    }
+
+    pub(crate) fn finish_tab_drag(&mut self, index: usize, moved: bool, x: f32, y: f32) {
+        if moved && self.can_drop_tab(index) {
+            if let Some((pane, _, zone)) = self.pane_drop_at(None, x, y) {
+                if self.tabs[self.active].root.contains(pane) {
+                    let side = match zone { DropZone::Side(side) => side, DropZone::Center => Side::Right };
+                    let source = self.tabs.remove(index);
+                    self.mru.remove(source.key);
+                    self.active -= usize::from(index < self.active);
+                    let destination = &mut self.tabs[self.active];
+                    destination.root.split_tree(pane, side, source.root);
+                    destination.zoomed = None;
+                    destination.focus = source.focus;
+                    self.stop_rearranging();
+                    self.prompt_pending_serial();
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
+        let clicked = self.chrome.tabs.get(index).is_some_and(|slot| slot.rect.contains(x, y));
+        if clicked || (moved && self.chrome.tab_bar.contains(x, y)) {
+            self.activate(index);
+        }
+    }
+
+    pub(crate) fn move_pane_to_tab(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let pane = tab.focus;
+        let order = tab.root.panes();
+        let Some(index) = order.iter().position(|&id| id == pane) else { return };
+        if !tab.root.remove(pane) {
+            return;
+        }
+        let remaining = order.into_iter().filter(|&id| id != pane).collect::<Vec<_>>();
+        let origin = remaining[index.saturating_sub(1)];
+        tab.focus = origin;
+        tab.zoomed = None;
+        self.remember_tab_origin(origin);
+        let at = self.tab_insert_index(false);
+        self.tabs.insert(at, Tab::new(Node::Leaf(pane), pane));
+        self.active = at;
+        self.stop_rearranging();
+        self.prompt_pending_serial();
+        self.dirty = true;
     }
 
     pub(crate) fn switch_mru(&mut self, action: crate::keymap::Action, held: bool) {

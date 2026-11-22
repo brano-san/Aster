@@ -50,7 +50,7 @@ fn every_setting_points_at_a_config_value_of_the_matching_type() {
 #[test]
 fn window_and_appearance_list_their_own_settings() {
     let keys = |name: &str| SETTINGS.iter().filter(|s| s.section == name).map(|s| s.key).collect::<Vec<_>>();
-    assert_eq!(keys("Window"), ["appearance.opacity", "appearance.backdrop", "appearance.density", "appearance.tab-bar", "appearance.tab-index", "appearance.tab-close-buttons", "appearance.tabs-in-fullscreen", "appearance.tab-width", "appearance.tab-bar-position", "appearance.mru-tabs", "appearance.cycle-tabs", "appearance.animations", "appearance.last-tab-closes-window", "appearance.tray"]);
+    assert_eq!(keys("Window"), ["appearance.opacity", "appearance.backdrop", "appearance.density", "appearance.tab-bar", "appearance.tab-index", "appearance.tab-icon", "appearance.tab-close-buttons", "appearance.tab-menu-button", "appearance.pane-titles", "panes.resize-step", "panes.focus-follows-mouse", "appearance.profile-sidebar", "appearance.profile-sidebar-width", "appearance.tabs-in-fullscreen", "appearance.tab-width", "appearance.tab-bar-position", "appearance.mru-tabs", "appearance.cycle-tabs", "appearance.animations", "terminal.close-window-with-last-tab", "notifications.command-finished", "notifications.activity", "notifications.activity-silence-seconds", "appearance.tray"]);
     for key in ["terminal.font", "terminal.font-size", "terminal.line-padding", "terminal.padding", "terminal.cursor", "terminal.cursor-blink", "terminal.fallback-font", "appearance.ui-font"] {
         assert!(keys(APPEARANCE).contains(&key));
     }

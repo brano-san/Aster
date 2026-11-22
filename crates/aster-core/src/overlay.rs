@@ -8,10 +8,17 @@ use std::ops::Range;
 pub enum OverlayKind {
     Commands,
     Profiles,
+    PaneProfile(PaneId),
     ProfileTemplates,
     Schemes,
     TabColors,
     SerialSpeed(PaneId),
+}
+
+impl OverlayKind {
+    pub(crate) fn is_profile_picker(self) -> bool {
+        matches!(self, Self::Profiles | Self::PaneProfile(_))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -83,6 +90,7 @@ impl Overlay {
         match self.kind {
             OverlayKind::Commands => t("Type a command"),
             OverlayKind::Profiles => t("Select a profile or enter an address"),
+            OverlayKind::PaneProfile(_) => t("Select a profile for this pane"),
             OverlayKind::ProfileTemplates => t("Select a profile template"),
             OverlayKind::Schemes => t("Select a color scheme"),
             OverlayKind::TabColors => t("Select a tab color"),
@@ -97,7 +105,7 @@ impl Overlay {
             return;
         }
         let commands = matches!(self.kind, OverlayKind::Commands);
-        let profiles = matches!(self.kind, OverlayKind::Profiles);
+        let profiles = self.kind.is_profile_picker();
         let english = |p: &Pick| {
             if !commands {
                 return None;

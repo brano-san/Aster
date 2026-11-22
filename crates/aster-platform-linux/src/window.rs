@@ -1,11 +1,13 @@
 use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Preedit};
+use aster_core::notifications::Notification;
 use aster_gfx::render::Rect;
-use aster_platform::{Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
+use aster_platform::monitors::{choose_monitor, correct_offscreen, monitor_at, Bounds, Monitor};
+use aster_platform::{dock_rect, DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::cursor::CursorIcon as WinitCursor;
@@ -18,7 +20,7 @@ use winit::keyboard::{Key as WinitKey, KeyCode, ModifiersState, NamedKey, Physic
 use winit::monitor::Fullscreen;
 use winit::platform::{wayland::WindowAttributesWayland, x11::WindowAttributesX11};
 use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
-use winit::window::{ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, ResizeDirection, Theme, UserAttentionType, WindowAttributes};
+use winit::window::{ImeCapabilities, ImeEnableRequest, ImeRequest, ImeRequestData, ResizeDirection, Theme, UserAttentionType, WindowAttributes, WindowLevel};
 
 const DEFAULT_SIZE: (f64, f64) = (1000.0, 640.0);
 const MIN_SIZE: (f64, f64) = (360.0, 200.0);
@@ -45,11 +47,14 @@ pub struct LinuxWindow {
     id: WindowId,
     raw: Arc<dyn winit::window::Window>,
     commands: Commands,
+    notification_tx: mpsc::Sender<(WindowId, u64)>,
+    notification_waker: LinuxWaker,
     size: Cell<(u32, u32)>,
     scale: Cell<f32>,
     cursor: Cell<CursorIcon>,
     edge: Cell<Option<ResizeDirection>>,
     timer: Cell<Option<Instant>>,
+    dock_spec: Cell<Option<DockSpec>>,
     translucent: bool,
 }
 
@@ -64,6 +69,34 @@ impl LinuxWindow {
 
     fn free_size(&self) -> bool {
         !self.raw.is_maximized() && self.raw.fullscreen().is_none()
+    }
+
+    fn place(&self, (x, y, w, h): Bounds) {
+        let _ = self.raw.request_surface_size(PhysicalSize::new(w.max(1) as u32, h.max(1) as u32).into());
+        self.raw.set_outer_position(PhysicalPosition::new(x, y).into());
+    }
+
+    fn apply_dock(&self, spec: DockSpec, monitors: &[Monitor]) {
+        let current = self.raw.current_monitor().and_then(|monitor| monitor.position())
+            .and_then(|point| monitor_at(monitors, (point.x, point.y)));
+        let Some(monitor) = choose_monitor(monitors, current, spec.screen) else { return };
+        if self.raw.is_maximized() { self.raw.set_maximized(false); }
+        self.raw.set_window_level(if spec.on_top { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal });
+        self.place(dock_rect(monitor.work, spec));
+    }
+
+    fn displays_changed(&self, monitors: &[Monitor]) {
+        if self.is_wayland() { return; }
+        if let Some(spec) = self.dock_spec.get() {
+            self.apply_dock(spec, monitors);
+        } else if self.free_size() && self.raw.is_minimized() != Some(true) {
+            if let Ok(at) = self.raw.outer_position() {
+                let (w, h) = self.size.get();
+                if let Some(bounds) = correct_offscreen((at.x, at.y, w as i32, h as i32), monitors) {
+                    self.place(bounds);
+                }
+            }
+        }
     }
 
     fn track_edge(&self, x: f32, y: f32) {
@@ -136,6 +169,24 @@ impl Window for LinuxWindow {
         self.raw.focus_window();
     }
 
+    fn notify(&self, notification: Notification) {
+        let window = self.id;
+        let tx = self.notification_tx.clone();
+        let waker = self.notification_waker.clone();
+        let started = std::thread::Builder::new().name("aster-notification".into()).spawn(move || {
+            match crate::notifications::show(&notification) {
+                Ok(true) => {
+                    if tx.send((window, notification.tab)).is_ok() { waker.wake(); }
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!("desktop notification: {error}"),
+            }
+        });
+        if let Err(error) = started {
+            tracing::warn!("cannot start desktop notification: {error}");
+        }
+    }
+
     fn open_window(&self, opts: WindowOptions) {
         self.commands.borrow_mut().push(Command::Open(opts));
     }
@@ -201,7 +252,16 @@ impl Window for LinuxWindow {
         self.raw.has_focus()
     }
 
-    fn dock(&self, _spec: Option<aster_platform::DockSpec>) {}
+    fn dock(&self, spec: Option<DockSpec>) {
+        self.dock_spec.set(spec);
+        if self.is_wayland() { return; }
+        if let Some(spec) = spec {
+            let monitors = crate::monitors::collect(self.raw.available_monitors(), self.raw.primary_monitor());
+            self.apply_dock(spec, &monitors);
+        } else {
+            self.raw.set_window_level(WindowLevel::Normal);
+        }
+    }
 
     fn set_global_hotkey(&self, _key: Option<(Key, Mods)>) -> bool {
         false
@@ -413,7 +473,8 @@ impl WindowSystem for LinuxWindows {
             (Vec::new(), Some(WindowOptions { visible: true, ..first }))
         };
         let commands = Rc::new(RefCell::new(commands));
-        let mut app = Loop { handler, nodes: Vec::new(), commands, waiting, pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None };
+        let (notification_tx, notification_clicks) = mpsc::channel();
+        let mut app = Loop { handler, nodes: Vec::new(), commands, waiting, notification_tx, notification_clicks, notification_waker: self.waker(), pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None, monitors: Vec::new(), next_monitor_scan: None };
         self.event_loop.run_app_on_demand(&mut app).map_err(|e| PlatformError::new(-1, format!("event loop: {e}")))?;
         app.error.map_or(Ok(()), Err)
     }
@@ -430,6 +491,11 @@ struct Loop<H> {
     nodes: Vec<Node>,
     commands: Commands,
     waiting: Option<WindowOptions>,
+    notification_tx: mpsc::Sender<(WindowId, u64)>,
+    notification_clicks: mpsc::Receiver<(WindowId, u64)>,
+    notification_waker: LinuxWaker,
+    monitors: Vec<Monitor>,
+    next_monitor_scan: Option<Instant>,
     pastes: HashMap<AsyncRequestSerial, (WindowId, Option<u64>)>,
     pending: Arc<AtomicBool>,
     next_id: WindowId,
@@ -471,6 +537,25 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
         }
         if self.nodes.is_empty() && self.waiting.is_none() {
             el.exit();
+        }
+    }
+
+    fn scan_monitors(&mut self, el: &dyn ActiveEventLoop) {
+        if self.nodes.iter().all(|node| node.window.is_wayland()) {
+            self.next_monitor_scan = None;
+            return;
+        }
+        let now = Instant::now();
+        if self.next_monitor_scan.is_some_and(|next| now < next) {
+            return;
+        }
+        self.next_monitor_scan = Some(now + Duration::from_secs(1));
+        let monitors = crate::monitors::collect(el.available_monitors(), el.primary_monitor());
+        if self.monitors != monitors {
+            self.monitors = monitors;
+            for node in &self.nodes {
+                node.window.displays_changed(&self.monitors);
+            }
         }
     }
 
@@ -517,10 +602,13 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
             scale: Cell::new(raw.scale_factor() as f32),
             raw,
             commands: self.commands.clone(),
+            notification_tx: self.notification_tx.clone(),
+            notification_waker: self.notification_waker.clone(),
             size: Cell::new((size.width, size.height)),
             cursor: Cell::new(CursorIcon::Default),
             edge: Cell::new(None),
             timer: Cell::new(None),
+            dock_spec: Cell::new(None),
             translucent,
         };
         self.nodes.push(Node { window, last_click: None, pointer: (0.0, 0.0) });
@@ -664,6 +752,11 @@ impl<H: WindowHandler<LinuxWindows>> ApplicationHandler for Loop<H> {
         if self.waiting.is_some() && self.handler.background_woken() {
             self.commands.borrow_mut().extend(self.waiting.take().map(Command::Open));
         }
+        for (window, tab) in self.notification_clicks.try_iter() {
+            if let Some(node) = self.nodes.iter().find(|node| node.window.id == window) {
+                self.handler.event(&node.window, Event::NotificationClicked(tab));
+            }
+        }
         for node in &self.nodes {
             self.handler.woken(&node.window);
         }
@@ -692,7 +785,8 @@ impl<H: WindowHandler<LinuxWindows>> ApplicationHandler for Loop<H> {
     fn about_to_wait(&mut self, el: &dyn ActiveEventLoop) {
         self.fire_timers();
         self.settle(el);
-        let next = self.nodes.iter().filter_map(|n| n.window.timer.get()).min();
+        self.scan_monitors(el);
+        let next = self.nodes.iter().filter_map(|n| n.window.timer.get()).chain(self.next_monitor_scan).min();
         el.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }

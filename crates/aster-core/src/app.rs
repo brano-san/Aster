@@ -25,7 +25,6 @@ pub const BLINK: Duration = Duration::from_millis(530);
 const BELL_FLASH: Duration = Duration::from_millis(150);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const CLOSED_TABS: usize = 10;
-const PANE_STEP: f32 = 0.1;
 pub(crate) const SETTINGS_PANE: PaneId = PaneId::MAX;
 
 pub const TAB_COLORS: [(&str, &str); 9] = [("No color", ""), ("Red", "#E5534B"), ("Orange", "#E0823D"), ("Yellow", "#D4B13B"), ("Green", "#57AB5A"), ("Teal", "#39B6A8"), ("Blue", "#4C8DF6"), ("Purple", "#9D6CE0"), ("Pink", "#D9619F")];
@@ -110,6 +109,7 @@ pub enum Effect {
     NewWindow,
     Timer(u32),
     Attention,
+    Notify(crate::notifications::Notification),
     ProbeCommand { request: u64, pids: Vec<u32> },
     Beep,
     Surface(crate::config::Backdrop),
@@ -140,6 +140,7 @@ pub(crate) struct Pane {
     pub source_profile: Profile,
     pub profile: Profile,
     pub title: Option<String>,
+    pub name: Option<String>,
     pub exited: Option<Option<u32>>,
     pub pending: Option<Launch>,
     pub retry_launch: Option<Box<Launch>>,
@@ -150,11 +151,13 @@ pub(crate) struct Pane {
     pub size: Size,
     pub scroll_acc: f32,
     pub seen: u64,
+    pub activity_seq: u64,
 }
 
 pub(crate) struct Tab {
     pub key: u64,
     pub command_watch: crate::close::CommandWatch,
+    pub activity: crate::notifications::Activity,
     pub pinned: bool,
     pub root: Node,
     pub focus: PaneId,
@@ -167,7 +170,7 @@ impl Tab {
     pub(crate) fn new(root: Node, focus: PaneId) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        Self { key: NEXT.fetch_add(1, Ordering::Relaxed), root, focus, zoomed: None, title: None, color: None, pinned: false, command_watch: Default::default() }
+        Self { key: NEXT.fetch_add(1, Ordering::Relaxed), root, focus, zoomed: None, title: None, color: None, pinned: false, command_watch: Default::default(), activity: crate::notifications::Activity::new(Instant::now()) }
     }
 }
 
@@ -177,9 +180,12 @@ pub(crate) enum Drag {
     Select { pane: PaneId, open_link: bool },
     Report { pane: PaneId, button: MouseButton },
     Splitter { path: Vec<bool>, axis: Axis, span: Rect },
-    Tab { index: usize, start: f32, moved: bool },
+    Tab { index: usize, start: (f32, f32), moved: bool },
+    Pane { pane: PaneId, start: (f32, f32), moved: bool },
     Button(HitArea),
     TabClose(usize),
+    TabMenu,
+    SidebarResize { width: f32 },
     Plus,
 }
 
@@ -237,6 +243,10 @@ pub struct App {
     pub(crate) vault_input_id: u64,
     pub(crate) menu: Option<crate::menu::Menu>,
     pub(crate) rename: Option<crate::tabs::Rename>,
+    pub(crate) pane_rename: Option<crate::pane_header::Rename>,
+    pub(crate) pane_profile_probe: Option<crate::pane_header::ProfileProbe>,
+    pub(crate) profile_sidebar: crate::profile_sidebar::ProfileSidebar,
+    pub(crate) rearrange: Option<crate::rearrange::Rearrange>,
     pub(crate) paste_confirm: Option<crate::paste::PasteConfirm>,
     pub(crate) files: Option<crate::files::FilesPage>,
     pub(crate) transfers: Vec<crate::files::Transfer>,
@@ -338,6 +348,10 @@ impl App {
             vault_prompt: None,
             menu: None,
             rename: None,
+            pane_rename: None,
+            pane_profile_probe: None,
+            profile_sidebar: Default::default(),
+            rearrange: None,
             paste_confirm: None,
             files: None,
             transfers: Vec::new(),
@@ -388,6 +402,7 @@ impl App {
         };
         app.restyle();
         app.apply_language();
+        app.sync_profile_sidebar();
         app.effects.push(Effect::Surface(app.config.appearance.backdrop));
         app
     }
@@ -633,6 +648,9 @@ impl App {
         let mut profiles = self.detected.clone();
         profiles.extend(config.profiles.iter().cloned());
         let profiles_changed = self.config.groups != config.groups || self.config.profiles != config.profiles || self.config.hidden_profiles != config.hidden_profiles || self.config.terminal.profile != config.terminal.profile;
+        let sidebar_changed = profiles_changed || self.config.profile_defaults != config.profile_defaults || self.config.appearance.profile_sidebar != config.appearance.profile_sidebar;
+        let activity_changed = self.config.notifications.activity != config.notifications.activity
+            || self.config.notifications.activity_silence_seconds != config.notifications.activity_silence_seconds;
         self.profiles = profiles;
         self.keymap = Keymap::with_mru(&config.hotkeys, config.appearance.mru_tabs);
         self.mru.cancel();
@@ -641,6 +659,8 @@ impl App {
         }
         self.config = config;
         if profiles_changed { self.sync_profile_page(); }
+        if sidebar_changed { self.sync_profile_sidebar(); }
+        if activity_changed { self.reset_activity_tracking(); }
         if !self.config.appearance.animations {
             self.bell = None;
             self.tab_toast = None;
@@ -726,7 +746,7 @@ impl App {
             global: self.config.terminal.environment.clone(), profile: profile.env.clone(), refresh: self.config.terminal.refresh_environment, set_comspec: self.config.terminal.set_comspec,
         }));
         let launch = Launch { local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
-        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, exited: None, pending: Some(launch), retry_launch: None, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0 });
+        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
         id
     }
 
@@ -788,7 +808,7 @@ impl App {
         }
     }
 
-    fn split_with(&mut self, side: Side, profile: Profile) {
+    pub(crate) fn split_with(&mut self, side: Side, profile: Profile) {
         let Some(focus) = self.focused_pane().filter(|p| *p != SETTINGS_PANE) else { return self.open_tab(profile) };
         let effective = crate::profile::effective(&profile, &self.config);
         let same_profile = self.panes.get(&focus).is_some_and(|p| p.profile.id == profile.id);
@@ -805,19 +825,7 @@ impl App {
 
     pub fn close_pane(&mut self, pane: PaneId) {
         let Some(ti) = self.tabs.iter().position(|t| t.root.contains(pane)) else { return };
-        if self.files.as_ref().is_some_and(|f| f.pane == pane) {
-            self.files = None;
-        }
-        self.offers.remove(&pane);
-        self.prompts.remove(&pane);
-        if self.search.as_ref().is_some_and(|s| s.pane == pane) {
-            self.search = None;
-        }
-        if let Some(p) = self.panes.remove(&pane) {
-            if p.exited.is_none() {
-                self.effects.push(Effect::Kill { pane });
-            }
-        }
+        self.release_pane(pane);
         let tab = &mut self.tabs[ti];
         if tab.root == Node::Leaf(pane) {
             self.remove_tab(ti);
@@ -836,6 +844,37 @@ impl App {
         self.dirty = true;
     }
 
+    pub(crate) fn release_pane(&mut self, pane: PaneId) {
+        if self.files.as_ref().is_some_and(|f| f.pane == pane) {
+            self.files = None;
+        }
+        self.offers.remove(&pane);
+        self.prompts.remove(&pane);
+        if self.search.as_ref().is_some_and(|s| s.pane == pane) {
+            self.search = None;
+        }
+        self.pane_rename.take_if(|edit| edit.pane == pane);
+        self.pane_profile_probe.take_if(|probe| probe.pane == pane);
+        if let Some(p) = self.panes.remove(&pane) {
+            if p.exited.is_none() {
+                self.effects.push(Effect::Kill { pane });
+            }
+        }
+    }
+
+    pub(crate) fn update_pane_references(&mut self, old: PaneId, new: PaneId) {
+        for reference in [&mut self.current_tab, &mut self.last_tab] {
+            if *reference == Some(old) {
+                *reference = Some(new);
+            }
+        }
+    }
+
+    pub(crate) fn remember_tab_origin(&mut self, pane: PaneId) {
+        self.last_tab = Some(pane);
+        self.current_tab = Some(pane);
+    }
+
     pub(crate) fn remove_tab(&mut self, index: usize) {
         if let Some(state) = self.tab_state(index) {
             if self.closed_tabs.len() == CLOSED_TABS {
@@ -846,14 +885,10 @@ impl App {
         let tab = self.tabs.remove(index);
         self.mru.remove(tab.key);
         for id in tab.root.panes() {
-            if let Some(p) = self.panes.remove(&id) {
-                if p.exited.is_none() {
-                    self.effects.push(Effect::Kill { pane: id });
-                }
-            }
+            self.release_pane(id);
         }
         if self.tabs.is_empty() {
-            if self.config.appearance.last_tab_closes_window {
+            if self.config.terminal.close_window_with_last_tab {
                 self.effects.push(Effect::Close);
             } else {
                 self.active = 0;
@@ -900,6 +935,7 @@ impl App {
 
     pub fn activate(&mut self, index: usize) {
         if let Some(tab) = self.tabs.get_mut(index) {
+            tab.activity.visit();
             if tab.command_watch == crate::close::CommandWatch::Finished {
                 tab.command_watch = Default::default();
                 self.dirty = true;
@@ -1102,11 +1138,20 @@ impl App {
         if self.rename.is_some() {
             return self.rename_text(&text.replace(['\r', '\n'], " "));
         }
+        if self.pane_rename.is_some() {
+            return self.pane_rename_text(&text.replace(['\r', '\n'], " "));
+        }
         if self.files.is_some() {
             return self.files_text(&text.replace(['\r', '\n'], " "));
         }
         if self.settings.is_some() {
             return self.settings_text(&text.replace(['\r', '\n'], " "));
+        }
+        if self.sidebar_focused() {
+            return self.sidebar_text(&text.replace(['\r', '\n'], " "));
+        }
+        if self.rearranging() {
+            return;
         }
         if let Some(pane) = self.offered_pane() {
             if let Some((PaneTransfer::AwaitingFiles, p)) = self.offers.get_mut(&pane) {
@@ -1297,6 +1342,19 @@ impl App {
             CloseWindow => self.request_close(crate::close::CloseTarget::Window),
             Quit => self.effects.push(Effect::Quit),
             RenameTab => self.start_rename(self.active),
+            ToggleProfileSidebar => self.toggle_profile_sidebar(),
+            RearrangePanes => self.toggle_rearrange(),
+            PaneToTab => self.move_pane_to_tab(),
+            RenamePane => {
+                if let Some(pane) = self.focused_pane() {
+                    self.start_pane_rename(pane);
+                }
+            }
+            ChangePaneProfile => {
+                if let Some(pane) = self.focused_pane().filter(|id| self.panes.contains_key(id)) {
+                    self.open_overlay(OverlayKind::PaneProfile(pane));
+                }
+            }
             PinTab => self.toggle_pin(),
             SaveAsProfile => self.save_as_profile(false),
             SaveLayout => self.save_as_profile(true),
@@ -1326,10 +1384,10 @@ impl App {
                     self.open_admin_tab(p);
                 }
             }
-            PaneResizeLeft => self.nudge_divider(Axis::Horizontal, -PANE_STEP),
-            PaneResizeRight => self.nudge_divider(Axis::Horizontal, PANE_STEP),
-            PaneResizeUp => self.nudge_divider(Axis::Vertical, -PANE_STEP),
-            PaneResizeDown => self.nudge_divider(Axis::Vertical, PANE_STEP),
+            PaneResizeLeft => self.nudge_divider(Axis::Horizontal, -1.0),
+            PaneResizeRight => self.nudge_divider(Axis::Horizontal, 1.0),
+            PaneResizeUp => self.nudge_divider(Axis::Vertical, -1.0),
+            PaneResizeDown => self.nudge_divider(Axis::Vertical, 1.0),
             ExplodeTab => self.explode_tab(),
             BroadcastToTab => self.toggle_broadcast(Broadcast::Tab),
             BroadcastToAllTabs => self.toggle_broadcast(Broadcast::AllTabs),
@@ -1426,6 +1484,7 @@ impl App {
         let items = match kind {
             OverlayKind::Commands => self.command_picks(),
             OverlayKind::Profiles => self.profile_picks(),
+            OverlayKind::PaneProfile(_) => self.filtered_profile_picks(crate::picker::ProfileFilter::SinglePane),
             OverlayKind::ProfileTemplates => crate::profiles_page::profile_templates(),
             OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), value: n, ..Pick::default() }).collect(),
             OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string(), ..Pick::default() }).collect(),
@@ -1484,6 +1543,7 @@ impl App {
             OverlayKind::Profiles => {
                 self.open_profile_by_id(value.strip_prefix(crate::picker::RECENT).unwrap_or(&value));
             }
+            OverlayKind::PaneProfile(pane) => self.request_pane_profile(pane, value),
             OverlayKind::TabColors => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
                     tab.color = (!value.is_empty()).then_some(value);
@@ -1562,7 +1622,7 @@ impl App {
     }
 
     pub(crate) fn terminal_has_focus(&self) -> bool {
-        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.paste_confirm.is_none() && self.close_confirm.is_none() && self.files.is_none()
+        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.pane_rename.is_none() && self.paste_confirm.is_none() && self.close_confirm.is_none() && self.files.is_none() && !self.sidebar_focused() && !self.rearranging()
     }
 
     pub(crate) fn cursor_blink_enabled(&self) -> bool {
@@ -1613,8 +1673,15 @@ impl App {
     }
 
     fn track_tab(&mut self) {
-        if let Some(tab) = self.tabs.get(self.active) {
+        if !self.rearranging() {
+            self.stop_rearranging();
+        }
+        let focused = self.focused_pane();
+        self.pane_rename.take_if(|edit| focused != Some(edit.pane));
+        self.pane_profile_probe.take_if(|probe| focused != Some(probe.pane));
+        if let Some(tab) = self.tabs.get_mut(self.active) {
             self.mru.visit(tab.key);
+            tab.activity.visit();
         }
         let on = self.tabs.get(self.active).is_some_and(|t| t.focus == SETTINGS_PANE);
         if on && self.settings.is_none() {
@@ -1650,8 +1717,9 @@ impl App {
         }
     }
 
-    fn nudge_divider(&mut self, axis: Axis, delta: f32) {
+    fn nudge_divider(&mut self, axis: Axis, direction: f32) {
         let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let delta = direction * self.config.panes.resize_step();
         if tab.zoomed.is_none() && tab.root.nudge(tab.focus, axis, delta) {
             self.dirty = true;
         }
@@ -1827,11 +1895,12 @@ impl App {
             }
             Event::Timer => self.on_timer(),
             Event::GlobalHotkey => {}
+            Event::NotificationClicked(tab) => self.notification_clicked(tab),
         }
     }
 
     fn on_key(&mut self, key: Key, mods: Mods) {
-        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.settings.is_some() || self.files.is_some();
+        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.pane_rename.is_some() || self.settings.is_some() || self.files.is_some() || self.sidebar_focused() || self.rearranging();
         self.swallow_char = false;
         self.swallow_chord = None;
         self.swallow_control = (modal || self.tabs.is_empty()) && matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
@@ -1869,6 +1938,9 @@ impl App {
         if self.rename.is_some() {
             return self.rename_key(key, mods);
         }
+        if self.pane_rename.is_some() {
+            return self.pane_rename_key(key, mods);
+        }
         if self.files.is_some() {
             if self.keymap.press(Chord { key, mods }) == Outcome::Action(Action::OpenFiles) {
                 return self.close_files();
@@ -1904,6 +1976,13 @@ impl App {
             }
             return self.settings_key(key, mods);
         }
+        if self.sidebar_key(key, mods) {
+            return;
+        }
+        if self.rearrange_key(key, mods) {
+            self.swallow_chord = Some(key);
+            return;
+        }
         if key == Key::Other {
             return;
         }
@@ -1921,6 +2000,8 @@ impl App {
             }
             Outcome::Pending => self.swallow_chord = Some(key),
             Outcome::None if self.search.is_some() => {}
+            Outcome::None if self.sidebar_focused() => {}
+            Outcome::None if self.rearranging() => {}
             Outcome::None if self.tabs.is_empty() => {
                 if mods == Mods::NONE {
                     self.start_key(key);
@@ -1972,11 +2053,20 @@ impl App {
         if self.rename.is_some() {
             return self.rename_text(&c.to_string());
         }
+        if self.pane_rename.is_some() {
+            return self.pane_rename_text(&c.to_string());
+        }
         if self.files.is_some() {
             return self.files_text(&c.to_string());
         }
         if self.settings.is_some() {
             return self.settings_text(&c.to_string());
+        }
+        if self.sidebar_focused() {
+            return self.sidebar_text(&c.to_string());
+        }
+        if self.rearranging() {
+            return self.rearrange_char(c);
         }
         if let Some(pane) = self.offered_pane() {
             if !c.is_control() {
@@ -2011,7 +2101,7 @@ impl App {
 
     fn cell_at(&self, pane: PaneId, rect: Rect, x: f32, y: f32) -> (usize, usize, aster_vt::Side) {
         let Some(m) = self.metrics else { return (0, 0, aster_vt::Side::Left) };
-        let inner = view::pane_inner_with(rect, self.ui(), self.config.terminal.padding);
+        let inner = view::pane_inner_with(self.pane_terminal_rect(pane, rect), self.ui(), self.config.terminal.padding);
         let size = self.panes.get(&pane).map(|p| p.size).unwrap_or(Size::new(1, 1));
         let fx = ((x - inner.x) / m.w).max(0.0);
         let col = (fx as usize).min(size.cols - 1);
@@ -2023,7 +2113,7 @@ impl App {
     fn report(&mut self, pane: PaneId, rect: Rect, action: MouseAction, x: f32, y: f32, mods: Mods) -> bool {
         let Some(p) = self.panes.get(&pane) else { return false };
         let mode = p.terminal.lock().mode();
-        if !mode.intersects(TermMode::MOUSE_MODE) {
+        if !mode.intersects(TermMode::MOUSE_MODE) || (matches!(action, MouseAction::Motion(None)) && self.pane_header(pane, rect).contains(x, y)) {
             return false;
         }
         let (line, col, _) = self.cell_at(pane, rect, x, y);
@@ -2047,6 +2137,7 @@ impl App {
 
     fn on_move(&mut self, x: f32, y: f32) {
         let was_on_bar = self.chrome.tab_bar.contains(self.mouse.0, self.mouse.1);
+        let was_on_sidebar = self.chrome.profile_sidebar.contains(self.mouse.0, self.mouse.1);
         self.mouse = (x, y);
         if self.menu.is_some() {
             return self.menu_hover(x, y);
@@ -2063,10 +2154,12 @@ impl App {
             self.hover = hover;
             self.dirty = true;
         }
-        if was_on_bar || self.chrome.tab_bar.contains(x, y) {
+        if was_on_bar || was_on_sidebar || self.chrome.tab_bar.contains(x, y) {
             self.dirty = true;
         }
         match self.drag.clone() {
+            Drag::SidebarResize { .. } => return self.resize_sidebar(x),
+            Drag::Pane { pane, start, moved } => return self.drag_pane(pane, start, moved, x, y),
             Drag::Select { pane, .. } => {
                 if let Some(rect) = self.layout.panes.iter().find(|(id, _)| *id == pane).map(|(_, r)| *r) {
                     let (line, col, side) = self.cell_at(pane, rect, x, y);
@@ -2096,26 +2189,12 @@ impl App {
                 self.dirty = true;
                 return;
             }
-            Drag::Tab { index, start, moved } => {
-                let threshold = 6.0 * self.ui();
-                let coordinate = self.chrome.tab_axis(x, y);
-                if moved || (coordinate - start).abs() > threshold {
-                    self.drag = Drag::Tab { index, start, moved: true };
-                    if let Some(target) = self.chrome.tabs.iter().position(|t| {
-                        if self.chrome.vertical { t.rect.contains(t.rect.x, y) } else { t.rect.contains(x, t.rect.y) }
-                    }) {
-                        if target != index && self.can_move_tab(index, target) {
-                            let tab = self.tabs.remove(index);
-                            self.tabs.insert(target, tab);
-                            self.active = target;
-                            self.drag = Drag::Tab { index: target, start, moved: true };
-                        }
-                    }
-                    self.dirty = true;
-                }
-                return;
-            }
+            Drag::Tab { index, start, moved } => return self.drag_tab(index, start, moved, x, y),
             _ => {}
+        }
+        if self.sidebar_move(x, y) {
+            self.hover_link = None;
+            return;
         }
         if self.tabs.is_empty() && self.overlay.is_none() && self.chrome.content.contains(x, y) {
             let hit = self.start_page().hit(x, y);
@@ -2129,8 +2208,8 @@ impl App {
             self.set_cursor(CursorIcon::Default);
             return;
         }
-        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.rename.is_some();
-        if self.config.terminal.focus_follows_mouse && !modal && self.drag == Drag::None {
+        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.rename.is_some() || self.pane_rename.is_some() || self.sidebar_focused() || self.rearranging();
+        if self.config.panes.focus_follows_mouse && !modal && self.drag == Drag::None {
             if let Some((pane, _)) = self.pane_at(x, y) {
                 self.focus_pane(pane);
             }
@@ -2140,7 +2219,9 @@ impl App {
             self.hover_link = link;
             self.dirty = true;
         }
-        let icon = if let Some(s) = self.splitter_at(x, y) {
+        let icon = if self.pane_header_at(x, y).is_some() {
+            if self.pane_rename.is_some() { CursorIcon::Text } else { CursorIcon::Hand }
+        } else if let Some(s) = self.splitter_at(x, y) {
             if s.axis == Axis::Horizontal {
                 CursorIcon::ResizeHorizontal
             } else {
@@ -2164,6 +2245,9 @@ impl App {
             return None;
         }
         let (pane, rect) = self.pane_at(x, y)?;
+        if self.pane_header(pane, rect).contains(x, y) {
+            return None;
+        }
         let (line, col, _) = self.cell_at(pane, rect, x, y);
         let p = self.panes.get(&pane)?;
         let (text, cols) = {
@@ -2234,6 +2318,15 @@ impl App {
                 return;
             }
         }
+        if let Some(edit) = &self.pane_rename {
+            if self.pane_header_at(x, y) == Some(edit.pane) && button == MouseButton::Left {
+                return;
+            }
+            self.commit_pane_rename();
+        }
+        if self.sidebar_down(x, y, button, clicks) {
+            return;
+        }
         if self.files.is_some() && self.chrome.content.contains(x, y) {
             if button == MouseButton::Left {
                 let n = self.click_count(x, y, clicks);
@@ -2270,6 +2363,12 @@ impl App {
             return;
         }
         if !self.tab_bar_hidden() && self.chrome.tab_bar.contains(x, y) {
+            if self.chrome.tab_menu.contains(x, y) {
+                if button == MouseButton::Left {
+                    self.drag = Drag::TabMenu;
+                }
+                return;
+            }
             if self.chrome.plus.contains(x, y) {
                 self.drag = Drag::Plus;
                 return;
@@ -2280,14 +2379,38 @@ impl App {
                     MouseButton::Left if self.chrome.tabs[i].close.contains(x, y) => self.drag = Drag::TabClose(i),
                     MouseButton::Left if self.click_count(x, y, clicks) >= 2 => self.start_rename(i),
                     MouseButton::Left => {
-                        self.activate(i);
-                        self.drag = Drag::Tab { index: i, start: self.chrome.tab_axis(x, y), moved: false };
+                        self.drag = Drag::Tab { index: i, start: (x, y), moved: false };
                     }
                     MouseButton::Right => self.open_tab_menu(i, x, y),
                     _ => { self.non_keyboard_shortcut(chord); }
                 }
             }
             return;
+        }
+        if let Some(pane) = self.pane_header_at(x, y) {
+            match button {
+                MouseButton::Left => {
+                    self.focus_pane(pane);
+                    if self.click_count(x, y, clicks) >= 2 {
+                        self.start_pane_rename(pane);
+                    } else {
+                        self.start_pane_drag(pane, x, y);
+                    }
+                }
+                MouseButton::Right => {
+                    self.focus_pane(pane);
+                    self.open_terminal_menu(x, y);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if button == MouseButton::Left && self.mouse_mods.alt && self.rearranging() {
+            if let Some((pane, _)) = self.pane_at(x, y) {
+                self.focus_pane(pane);
+                self.start_pane_drag(pane, x, y);
+                return;
+            }
         }
         if let Some(s) = self.splitter_at(x, y) {
             self.drag = Drag::Splitter { path: s.path.clone(), axis: s.axis, span: s.span };
@@ -2365,6 +2488,9 @@ impl App {
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.dirty = true;
         match drag {
+            Drag::SidebarResize { width } if button == MouseButton::Left => self.save_sidebar_width(width),
+            Drag::Pane { pane, moved: true, .. } if button == MouseButton::Left => self.finish_pane_drag(pane, x, y),
+            Drag::Tab { index, moved, .. } if button == MouseButton::Left => self.finish_tab_drag(index, moved, x, y),
             Drag::Select { pane, open_link } => {
                 let has = self.panes.get(&pane).is_some_and(|p| p.terminal.lock().has_selection());
                 if !has {
@@ -2389,6 +2515,10 @@ impl App {
                 _ => Action::CloseWindow,
             }),
             Drag::TabClose(i) if self.chrome.tabs.get(i).is_some_and(|t| t.close.contains(x, y)) => self.close_tab_asking(i),
+            Drag::TabMenu if button == MouseButton::Left && self.chrome.tab_menu.contains(x, y) => {
+                let menu = self.chrome.tab_menu;
+                self.open_tab_menu(self.active, menu.x, menu.bottom());
+            }
             Drag::Plus if self.chrome.plus.contains(x, y) => self.open_default_tab(),
             _ => {}
         }
@@ -2415,6 +2545,10 @@ impl App {
             }
             return;
         }
+        let (x, y) = self.mouse;
+        if vertical && self.sidebar_wheel(x, y, dy) {
+            return;
+        }
         if self.files.is_some() {
             if vertical {
                 self.files_wheel(dy);
@@ -2427,11 +2561,14 @@ impl App {
             }
             return;
         }
-        let (x, y) = self.mouse;
         let Some((pane, rect)) = self.pane_at(x, y) else {
             self.non_keyboard_shortcut(chord);
             return;
         };
+        if self.pane_header(pane, rect).contains(x, y) {
+            self.non_keyboard_shortcut(chord);
+            return;
+        }
         let action = match direction {
             WheelDirection::Up => MouseAction::WheelUp,
             WheelDirection::Down => MouseAction::WheelDown,
@@ -2474,7 +2611,7 @@ impl App {
             HitArea::Maximize
         } else if c.close.contains(x, y) {
             HitArea::Close
-        } else if c.caption.contains(x, y) && !c.plus.contains(x, y) && !c.tabs.iter().any(|t| t.rect.contains(x, y)) {
+        } else if c.caption.contains(x, y) && !c.plus.contains(x, y) && !c.tab_menu.contains(x, y) && !c.tabs.iter().any(|t| t.rect.contains(x, y)) {
             HitArea::Caption
         } else {
             HitArea::Client
@@ -2505,10 +2642,13 @@ impl App {
             }
         }
         self.scan_prompts();
+        self.poll_background_activity(Instant::now());
         self.dirty = true;
     }
 
     pub fn exited(&mut self, pane: PaneId, code: Option<u32>) {
+        self.poll_background_activity(Instant::now());
+        let tab_key = self.tabs.iter().find(|tab| tab.root.contains(pane)).map(|tab| tab.key);
         let options = self.options();
         let Some(p) = self.panes.get_mut(&pane) else { return };
         if p.exited.is_some() {
@@ -2539,6 +2679,12 @@ impl App {
                 };
                 p.terminal.lock().feed(format!("\r\n\x1b[0;2m{notice}\x1b[0m\r\n").as_bytes());
             }
+        }
+        if let Some(p) = self.panes.get_mut(&pane) {
+            p.activity_seq = p.terminal.lock().output_seq();
+        }
+        if let Some(key) = tab_key {
+            self.notify_session_exit(key);
         }
         self.dirty = true;
     }

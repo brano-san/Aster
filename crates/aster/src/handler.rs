@@ -730,6 +730,7 @@ impl<P: Platform> Handler<P> {
             Effect::NewWindow => window.open_window(WindowOptions { title: "Aster".into(), placement: None, dark: self.windows.get(&id).is_none_or(|s| s.app.is_dark()), visible: true }),
             Effect::Timer(ms) => window.set_timer(ms),
             Effect::Attention => window.request_attention(),
+            Effect::Notify(notification) => window.notify(notification),
             Effect::ProbeCommand { request, pids } => {
                 let events = self.store_events.clone();
                 let started = std::thread::Builder::new().name("aster-command-probe".into()).spawn(move || {
@@ -854,7 +855,7 @@ impl<P: Platform> Handler<P> {
             Dock::Left => Edge::Left,
             Dock::Right => Edge::Right,
         };
-        Some(DockSpec { edge, fill: a.dock_fill, space: a.dock_space, on_top: a.dock_always_on_top })
+        Some(DockSpec { edge, fill: a.dock_fill, space: a.dock_space, on_top: a.dock_always_on_top, screen: self.config.dock.selection() })
     }
 
     fn apply_window_prefs(&mut self, window: &Win<P>) {
@@ -1257,6 +1258,12 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     }
 
     fn event(&mut self, window: &Win<P>, event: Event) {
+        if matches!(event, Event::NotificationClicked(_)) {
+            if !window.is_visible() {
+                window.set_visible(true);
+            }
+            window.activate();
+        }
         if matches!(event, Event::Focus(true)) {
             self.last_focused = Some(window.id());
             self.reload_config(false);

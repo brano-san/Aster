@@ -1,4 +1,7 @@
-use std::cell::Cell;
+use aster_core::notifications::Notification;
+use aster_platform::WindowId;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::*;
@@ -38,6 +41,26 @@ pub struct Tray {
     data: NOTIFYICONDATAW,
     enabled: Cell<bool>,
     pub installed: Cell<bool>,
+    balloons: RefCell<BTreeMap<u16, Balloon>>,
+    next_balloon: Cell<u16>,
+}
+
+struct Balloon {
+    window: WindowId,
+    tab: u64,
+    data: NOTIFYICONDATAW,
+}
+
+fn copy_text(text: &str, dest: &mut [u16]) {
+    let max = dest.len() - 1;
+    let mut at = 0;
+    for c in text.chars().filter(|c| !c.is_control()) {
+        let end = at + c.len_utf16();
+        if end > max { break; }
+        c.encode_utf16(&mut dest[at..end]);
+        at = end;
+    }
+    dest[at] = 0;
 }
 
 impl Tray {
@@ -49,7 +72,48 @@ impl Tray {
         }
         let data = NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: hub, uID: ICON_ID, uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
             uCallbackMessage: CALLBACK, hIcon: icon.unwrap_or_default(), szTip: tip, Anonymous: NOTIFYICONDATAW_0 { uVersion: NOTIFYICON_VERSION_4 }, ..Default::default() };
-        Self { data, enabled: Cell::new(false), installed: Cell::new(false) }
+        Self { data, enabled: Cell::new(false), installed: Cell::new(false), balloons: RefCell::default(), next_balloon: Cell::new(2) }
+    }
+
+    pub fn balloon(&self, window: WindowId, notification: Notification) {
+        let mut balloons = self.balloons.borrow_mut();
+        if balloons.len() >= 64 {
+            if let Some((_, balloon)) = balloons.pop_first() {
+                unsafe { let _ = Shell_NotifyIconW(NIM_DELETE, &balloon.data); }
+            }
+        }
+        let mut id = self.next_balloon.get();
+        while balloons.contains_key(&id) {
+            id = id.wrapping_add(1).max(2);
+        }
+        self.next_balloon.set(id.wrapping_add(1).max(2));
+        let mut data = NOTIFYICONDATAW { uID: u32::from(id), ..self.data };
+        unsafe {
+            if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+                return;
+            }
+            let _ = Shell_NotifyIconW(NIM_SETVERSION, &data);
+            data.uFlags = NIF_INFO;
+            data.dwInfoFlags = NIIF_INFO;
+            copy_text(&notification.title, &mut data.szInfoTitle);
+            copy_text(&notification.body, &mut data.szInfo);
+            if Shell_NotifyIconW(NIM_MODIFY, &data).as_bool() {
+                balloons.insert(id, Balloon { window, tab: notification.tab, data });
+            } else {
+                let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+            }
+        }
+    }
+
+    pub fn balloon_click(&self, wp: WPARAM, lp: LPARAM) -> Option<(WindowId, u64)> {
+        let event = lp.0 as u32 & 0xffff;
+        if !matches!(event, NIN_BALLOONHIDE | NIN_BALLOONTIMEOUT | NIN_BALLOONUSERCLICK) {
+            return None;
+        }
+        let id = (lp.0 as u32 >> 16) as u16;
+        let balloon = self.balloons.borrow_mut().remove(&if id == 0 { wp.0 as u16 } else { id })?;
+        unsafe { let _ = Shell_NotifyIconW(NIM_DELETE, &balloon.data); }
+        (event == NIN_BALLOONUSERCLICK).then_some((balloon.window, balloon.tab))
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -72,13 +136,15 @@ impl Tray {
     }
 
     pub fn taskbar_created(&self) {
+        self.balloons.borrow_mut().clear();
         self.installed.set(false);
         let enabled = self.enabled.replace(false);
         self.set_enabled(enabled);
     }
 
     pub fn command(&self, wp: WPARAM, lp: LPARAM) -> Option<Command> {
-        if !self.installed.get() {
+        let id = lp.0 as u32 >> 16;
+        if !self.installed.get() || (id != 0 && id != ICON_ID) {
             return None;
         }
         match lp.0 as u32 & 0xffff {
@@ -121,5 +187,8 @@ impl Tray {
 impl Drop for Tray {
     fn drop(&mut self) {
         self.set_enabled(false);
+        for balloon in self.balloons.get_mut().values() {
+            unsafe { let _ = Shell_NotifyIconW(NIM_DELETE, &balloon.data); }
+        }
     }
 }

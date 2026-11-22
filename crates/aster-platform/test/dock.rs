@@ -3,7 +3,7 @@ use super::*;
 const WORK: (i32, i32, i32, i32) = (100, 0, 1920, 1040);
 
 fn spec(edge: Edge, fill: f32, space: f32) -> DockSpec {
-    DockSpec { edge, fill, space, on_top: true }
+    DockSpec { edge, fill, space, on_top: true, screen: Default::default() }
 }
 
 #[test]

@@ -65,6 +65,7 @@ impl ProfileSection {
 #[derive(Clone, Copy)]
 pub(crate) enum ProfileFilter<'a> {
     All,
+    SinglePane,
     Section(ProfileSection),
     Group(&'a str),
 }
@@ -73,6 +74,7 @@ impl ProfileFilter<'_> {
     fn includes(self, p: &Profile, config: &Config) -> bool {
         match self {
             Self::All => true,
+            Self::SinglePane => p.layout.is_none(),
             Self::Section(section) => ProfileSection::of(p) == section,
             Self::Group(id) => p.group.as_deref().is_some_and(|name| {
                 crate::profile::group_chain(name.trim(), config).iter().any(|group| group.id == id)

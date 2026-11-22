@@ -1,7 +1,8 @@
 use crate::err;
 use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Preedit};
+use aster_core::notifications::Notification;
 use aster_gfx::render::Rect;
-use aster_platform::{dock_rect, DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
+use aster_platform::{DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -10,7 +11,7 @@ use std::sync::{mpsc, Arc};
 use windows::core::{w, BOOL, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_USE_IMMERSIVE_DARK_MODE};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, ScreenToClient, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromRect, MonitorFromWindow, ScreenToClient, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
@@ -33,6 +34,9 @@ enum HubEvent {
     Open(WindowOptions),
     Capture(Vec<Event>),
     ContinueQuit,
+    Balloon(WindowId, Notification),
+    Toast(windows::UI::Notifications::ToastNotification),
+    NotificationClicked(WindowId, u64),
 }
 
 #[derive(Clone)]
@@ -71,6 +75,7 @@ pub struct Win32Window {
     high_surrogate: Cell<u16>,
     ime_area: Cell<Rect>,
     restore: Cell<Option<(WINDOWPLACEMENT, isize)>>,
+    dock_spec: Cell<Option<DockSpec>>,
     pub(crate) sync: Rc<FrameSync>,
 }
 
@@ -114,6 +119,7 @@ impl Win32Window {
             high_surrogate: Cell::new(0),
             ime_area: Cell::new(Rect::default()),
             restore: Cell::new(None),
+            dock_spec: Cell::new(None),
             sync: Rc::new(FrameSync::default()),
         }
     }
@@ -230,6 +236,27 @@ impl Window for Win32Window {
                 let _ = ShowWindow(self.hwnd(), SW_RESTORE);
             }
             let _ = SetForegroundWindow(self.hwnd());
+        }
+    }
+
+    fn notify(&self, notification: Notification) {
+        let queue = self.queue.clone();
+        let window = self.id;
+        let fallback = notification.clone();
+        let started = std::thread::Builder::new().name("aster-notification".into()).spawn(move || {
+            let activate = queue.clone();
+            let tab = notification.tab;
+            match crate::notifications::toast(&notification, move || activate.post(HubEvent::NotificationClicked(window, tab))) {
+                Ok(Some(toast)) => queue.post(HubEvent::Toast(toast)),
+                Ok(None) => queue.post(HubEvent::Balloon(window, notification)),
+                Err(error) => {
+                    tracing::debug!("toast notification: {error}");
+                    queue.post(HubEvent::Balloon(window, notification));
+                }
+            }
+        });
+        if started.is_err() {
+            self.queue.post(HubEvent::Balloon(window, fallback));
         }
     }
 
@@ -406,26 +433,8 @@ impl Window for Win32Window {
     }
 
     fn dock(&self, spec: Option<DockSpec>) {
-        let h = self.hwnd();
-        unsafe {
-            let Some(spec) = spec else {
-                let _ = SetWindowPos(h, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-                return;
-            };
-            if IsZoomed(h).as_bool() {
-                let _ = ShowWindow(h, SW_RESTORE);
-            }
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-            if !GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
-                return;
-            }
-            let r = mi.rcWork;
-            let (x, y, w, hgt) = dock_rect((r.left, r.top, r.right - r.left, r.bottom - r.top), spec);
-            let after = if spec.on_top { HWND_TOPMOST } else { HWND_NOTOPMOST };
-            let _ = SetWindowPos(h, Some(after), x, y, w, hgt, SWP_NOACTIVATE);
-        }
+        self.dock_spec.set(spec);
+        crate::monitors::place_dock(self.hwnd(), spec);
     }
 
     fn set_progress(&self, progress: Option<aster_core::app::Progress>) {
@@ -527,6 +536,7 @@ pub(crate) struct Node<H> {
 
 struct Shared<H> {
     tray: crate::tray::Tray,
+    toasts: RefCell<VecDeque<windows::UI::Notifications::ToastNotification>>,
     new_window: WindowOptions,
     quit_window: Cell<Option<WindowId>>,
     queue: HubQueue,
@@ -756,6 +766,12 @@ fn capture_batch(keys: &str) -> Vec<Event> {
 fn capture_click(text: &str) -> Vec<Event> {
     let Some((kind, at)) = text.split_once('@') else { return Vec::new() };
     let Some((x, y)) = at.split_once(',').and_then(|(x, y)| Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))) else { return Vec::new() };
+    match kind {
+        "Down" => return vec![Event::MouseMove { x, y }, Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 }],
+        "Move" => return vec![Event::MouseMove { x, y }],
+        "Up" => return vec![Event::MouseUp { x, y, button: MouseButton::Left }],
+        _ => {}
+    }
     let (button, clicks) = match kind {
         "RightClick" => (MouseButton::Right, 1),
         "MiddleClick" => (MouseButton::Middle, 1),
@@ -829,7 +845,9 @@ unsafe fn hub_dispatch<H: WindowHandler<Win32>>(ctx: *const (), msg: u32, wp: WP
         return;
     }
     if msg == crate::tray::CALLBACK {
-        if let Some(command) = sh.tray.command(wp, lp) {
+        if let Some((window, tab)) = sh.tray.balloon_click(wp, lp) {
+            sh.queue.post(HubEvent::NotificationClicked(window, tab));
+        } else if let Some(command) = sh.tray.command(wp, lp) {
             sh.tray_command(command);
         }
         return;
@@ -859,6 +877,24 @@ unsafe fn hub_dispatch<H: WindowHandler<Win32>>(ctx: *const (), msg: u32, wp: WP
                 for ev in batch {
                     n.send(ev);
                 }
+                if n.window.redraw.get() {
+                    n.redraw_now();
+                }
+            }
+        }
+        Ok(HubEvent::Balloon(window, notification)) => {
+            if sh.nodes().iter().any(|n| n.window.id == window) {
+                sh.tray.balloon(window, notification);
+            }
+        }
+        Ok(HubEvent::Toast(toast)) => {
+            let mut toasts = sh.toasts.borrow_mut();
+            if toasts.len() >= 64 { toasts.pop_front(); }
+            toasts.push_back(toast);
+        }
+        Ok(HubEvent::NotificationClicked(window, tab)) => {
+            if let Some(n) = sh.nodes().iter().find(|n| n.window.id == window) {
+                n.send(Event::NotificationClicked(tab));
                 if n.window.redraw.get() {
                     n.redraw_now();
                 }
@@ -914,6 +950,7 @@ impl WindowSystem for Win32 {
                 queue: HubQueue { hwnd: self.hub.0 as isize, tx },
                 events,
                 tray: crate::tray::Tray::new(self.hub, self.hinst),
+                toasts: RefCell::default(),
                 quit_window: Cell::new(None),
                 new_window: WindowOptions { placement: None, visible: true, ..first.clone() },
                 handler: RefCell::new(handler),
@@ -1318,6 +1355,14 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
                 s.send(Event::AltChar(c));
             }
             Some(LRESULT(0))
+        }
+        WM_DISPLAYCHANGE => {
+            if let Some(spec) = w.dock_spec.get() {
+                crate::monitors::place_dock(w.hwnd(), Some(spec));
+            } else if !w.is_fullscreen() && crate::d3d::capture_path().is_none() {
+                crate::monitors::recover_normal_window(w.hwnd());
+            }
+            None
         }
         WM_SIZE => {
             if wp.0 as u32 != SIZE_MINIMIZED && update_size(w) {

@@ -9,6 +9,8 @@ mod explorer;
 pub mod config_lock;
 mod instance;
 mod jump_list;
+mod monitors;
+mod notifications;
 mod process;
 mod secrets;
 mod dwrite;
