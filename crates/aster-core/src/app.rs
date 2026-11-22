@@ -21,7 +21,7 @@ pub type Wake = Arc<dyn Fn() + Send + Sync>;
 pub type CwdProbe = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
 pub type ChildrenProbe = Arc<dyn Fn(u32) -> Vec<String> + Send + Sync>;
 
-pub const BLINK: Duration = Duration::from_millis(530);
+pub use crate::cursor_motion::BLINK;
 const BELL_FLASH: Duration = Duration::from_millis(150);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const CLOSED_TABS: usize = 10;
@@ -285,6 +285,9 @@ pub struct App {
     pub(crate) pane_rename: Option<crate::pane_header::Rename>,
     pub(crate) pane_profile_probe: Option<crate::pane_header::ProfileProbe>,
     pub(crate) profile_sidebar: crate::profile_sidebar::ProfileSidebar,
+    pub(crate) panel_motion: crate::panel_motion::Panels,
+    pub(crate) control_motion: crate::control_motion::Controls,
+    pub(crate) list_motion: crate::list_motion::Lists,
     pub(crate) rearrange: Option<crate::rearrange::Rearrange>,
     pub(crate) paste_confirm: Option<crate::paste::PasteConfirm>,
     pub(crate) files: Option<crate::files::FilesPage>,
@@ -322,8 +325,7 @@ pub struct App {
     pub(crate) settings_stash: Option<crate::settings::SettingsPage>,
     pub(crate) shown_progress: Option<Progress>,
     swallow_control: bool,
-    pub(crate) blink_on: bool,
-    blink_since: Instant,
+    blink: crate::cursor_motion::Blink,
     timer_due: Option<Instant>,
     pub(crate) metrics: Option<Metrics>,
     pub(crate) layout: Layout,
@@ -413,6 +415,9 @@ impl App {
             pane_rename: None,
             pane_profile_probe: None,
             profile_sidebar: Default::default(),
+            panel_motion: Default::default(),
+            control_motion: Default::default(),
+            list_motion: Default::default(),
             rearrange: None,
             paste_confirm: None,
             files: None,
@@ -450,8 +455,7 @@ impl App {
             profile_collapsed: Default::default(),
             shown_progress: None,
             swallow_control: false,
-            blink_on: true,
-            blink_since: Instant::now(),
+            blink: crate::cursor_motion::Blink::new(Instant::now()),
             timer_due: None,
             metrics: None,
             layout: Layout::default(),
@@ -786,6 +790,9 @@ impl App {
         let extension_index_changed = self.config.extensions.index_url != config.extensions.index_url;
         let profiles_changed = extensions_changed || self.config.groups != config.groups || self.config.profiles != config.profiles || self.config.hidden_profiles != config.hidden_profiles || self.config.profile_defaults != config.profile_defaults || self.config.terminal.profile != config.terminal.profile;
         let sidebar_changed = profiles_changed || self.config.appearance.profile_sidebar != config.appearance.profile_sidebar;
+        let blink_changed = self.config.appearance.animations != config.appearance.animations
+            || self.config.terminal.cursor_blink != config.terminal.cursor_blink
+            || self.config.terminal.cursor_blink_style != config.terminal.cursor_blink_style;
         let activity_changed = self.config.notifications.activity != config.notifications.activity
             || self.config.notifications.activity_silence_seconds != config.notifications.activity_silence_seconds;
         self.mru.cancel();
@@ -808,6 +815,8 @@ impl App {
         if schemes_changed || extensions_changed { self.refresh_extension_schemes(); }
         if !self.animations() {
             self.reset_animations();
+        } else if blink_changed {
+            self.reset_blink();
         }
         self.apply_language();
         if changed_version { self.warn_read_only_config(); }
@@ -994,7 +1003,7 @@ impl App {
 
     pub(crate) fn release_pane(&mut self, pane: PaneId) {
         if self.files.as_ref().is_some_and(|f| f.pane == pane) {
-            self.files = None;
+            self.close_files();
         }
         self.offers.remove(&pane);
         self.prompts.remove(&pane);
@@ -1055,7 +1064,7 @@ impl App {
                 self.close_overlay();
                 self.close_confirm = None;
                 self.paste_confirm = None;
-                self.files = None;
+                self.close_files();
                 self.search = None;
                 self.rename = None;
                 self.menu = None;
@@ -1646,6 +1655,7 @@ impl App {
     }
 
     pub(crate) fn open_overlay(&mut self, kind: OverlayKind) {
+        self.list_motion.overlay = Default::default();
         let items = match kind {
             OverlayKind::Commands => self.command_picks(),
             OverlayKind::Profiles => self.profile_picks(),
@@ -1757,6 +1767,9 @@ impl App {
     }
 
     fn overlay_key(&mut self, key: Key, mods: Mods) {
+        if self.scroll_overlay_key(key) {
+            return self.preview_scheme();
+        }
         let Some(o) = self.overlay.as_mut() else { return };
         self.dirty = true;
         match key {
@@ -1796,6 +1809,7 @@ impl App {
 
     fn reset_animations(&mut self) {
         self.motion = false;
+        self.list_motion = Default::default();
         self.bell = None;
         let now = self.clock();
         self.tab_toast.take_if(|toast| toast.tab_name || now >= toast.fade_at);
@@ -1803,8 +1817,7 @@ impl App {
     }
 
     fn reset_blink(&mut self) {
-        self.blink_on = true;
-        self.blink_since = self.clock();
+        self.blink = crate::cursor_motion::Blink::new(self.clock());
         self.dirty = true;
     }
 
@@ -1814,6 +1827,11 @@ impl App {
 
     pub(crate) fn cursor_blink_enabled(&self) -> bool {
         self.animations() && self.config.terminal.cursor_blink
+    }
+
+    pub(crate) fn cursor_blink(&self, now: Instant) -> (f32, bool) {
+        let smooth = self.config.terminal.cursor_blink_style == crate::config::CursorBlinkStyle::Smooth;
+        self.blink.sample(self.cursor_blink_enabled(), smooth, now)
     }
 
     fn blinking(&self) -> bool {
@@ -1840,9 +1858,7 @@ impl App {
             self.bell = None;
             self.dirty = true;
         }
-        if self.blinking() && now.saturating_duration_since(self.blink_since) >= BLINK {
-            self.blink_on = !self.blink_on;
-            self.blink_since = now;
+        if self.blinking() && self.blink.tick(now) {
             self.dirty = true;
         }
         self.schedule_timer_at(now);
@@ -1879,9 +1895,9 @@ impl App {
         self.ssh_forward_form.take_if(|form| form.pane == pane);
         self.offers.remove(&pane);
         self.prompts.remove(&pane);
-        if self.files.as_ref().is_some_and(|page| page.pane == pane) { self.files = None; }
         let now = Instant::now();
         p.reconnect_at = Some(now);
+        if self.files.as_ref().is_some_and(|page| page.pane == pane) { self.close_files(); }
         self.resume_connections(now);
     }
 
@@ -2098,7 +2114,13 @@ impl App {
             }
             Event::Wheel { dx, dy } => {
                 self.modifier_gesture.cancel();
-                self.on_wheel(dx, dy);
+                self.on_wheel(dx, dy, None);
+            }
+            Event::PreciseWheel { dx, dy, pixels_per_notch } => {
+                self.modifier_gesture.cancel();
+                if pixels_per_notch.is_finite() && pixels_per_notch > 0.0 {
+                    self.on_wheel(dx / pixels_per_notch, dy / pixels_per_notch, Some(dy));
+                }
             }
             Event::MouseLeave => {
                 self.mouse = (-1.0, -1.0);
@@ -2813,8 +2835,9 @@ impl App {
         }
     }
 
-    fn on_wheel(&mut self, dx: f32, dy: f32) {
+    fn on_wheel(&mut self, dx: f32, dy: f32, pixels: Option<f32>) {
         use crate::input::WheelDirection;
+        if !dx.is_finite() || !dy.is_finite() { return; }
         let Some(direction) = WheelDirection::from_delta(dx, dy) else { return };
         let chord = Chord { key: Key::Wheel(direction), mods: self.mouse_mods };
         if self.capture_shortcut(chord) {
@@ -2827,6 +2850,7 @@ impl App {
         if vertical && self.update_wheel(dy) {
             return;
         }
+        if vertical && self.scroll_overlay_wheel(dy, pixels) { return; }
         if let Some(o) = self.overlay.as_mut() {
             if vertical {
                 o.step(if dy > 0.0 { -3 } else { 3 });
@@ -2835,18 +2859,18 @@ impl App {
             return;
         }
         let (x, y) = self.mouse;
-        if vertical && self.sidebar_wheel(x, y, dy) {
+        if vertical && self.sidebar_wheel(x, y, dy, pixels) {
             return;
         }
         if self.files.is_some() {
             if vertical {
-                self.files_wheel(dy);
+                self.files_wheel(dy, pixels);
             }
             return;
         }
         if self.settings.is_some() {
             if !self.non_keyboard_shortcut(chord) && vertical {
-                self.settings_wheel(dy);
+                self.settings_wheel(dy, pixels);
             }
             return;
         }
@@ -3054,7 +3078,7 @@ impl App {
 
     fn schedule_timer_at(&mut self, now: Instant) {
         let next = [
-            self.blinking().then_some(self.blink_since + BLINK),
+            self.blinking().then(|| self.blink.deadline()),
             self.bell.map(|(_, start)| start + BELL_FLASH),
             self.tab_toast.as_ref().map(|toast| toast.deadline(now, self.animations())),
             self.tabs.iter().filter_map(|t| t.command_watch.deadline()).min(),

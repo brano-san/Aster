@@ -20,6 +20,17 @@ fn defaults_serialize_to_only_the_version_and_round_trip() {
 }
 
 #[test]
+fn cursor_blink_style_preserves_existing_boolean_configs() {
+    let old = Config::parse("[terminal]\ncursor-blink = false").unwrap();
+    assert!(!old.terminal.cursor_blink);
+    assert_eq!(old.terminal.cursor_blink_style, CursorBlinkStyle::Step);
+    let smooth = Config::parse("[terminal]\ncursor-blink-style = \"smooth\"").unwrap();
+    assert!(smooth.terminal.cursor_blink);
+    assert_eq!(smooth.terminal.cursor_blink_style, CursorBlinkStyle::Smooth);
+    assert_eq!(Config::parse(&smooth.to_text()).unwrap(), smooth);
+}
+
+#[test]
 fn only_changed_nested_fields_and_user_tables_are_serialized() {
     let mut config = Config::default();
     config.terminal.search_options.regex = true;

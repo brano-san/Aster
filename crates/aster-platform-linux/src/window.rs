@@ -446,14 +446,13 @@ fn capture_keys(keys: &str) -> Vec<Event> {
     out
 }
 
-fn wheel(delta: MouseScrollDelta, scale: f32) -> (f32, f32) {
+fn wheel(delta: MouseScrollDelta, scale: f32) -> Option<Event> {
     match delta {
-        MouseScrollDelta::LineDelta(x, y) => (-x, y),
-        MouseScrollDelta::PixelDelta(p) => {
-            let notch = WHEEL_PIXELS_PER_NOTCH * scale;
-            (-p.x as f32 / notch, p.y as f32 / notch)
-        }
-        _ => (0.0, 0.0),
+        MouseScrollDelta::LineDelta(x, y) => Some(Event::Wheel { dx: -x, dy: y }),
+        MouseScrollDelta::PixelDelta(p) => Some(Event::PreciseWheel {
+            dx: -p.x as f32, dy: p.y as f32, pixels_per_notch: WHEEL_PIXELS_PER_NOTCH * scale,
+        }),
+        _ => None,
     }
 }
 
@@ -770,8 +769,9 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let (dx, dy) = wheel(delta, w.scale.get());
-                handler.event(w, Event::Wheel { dx, dy });
+                if let Some(event) = wheel(delta, w.scale.get()) {
+                    handler.event(w, event);
+                }
             }
             WindowEvent::ThemeChanged(theme) => handler.event(w, Event::ThemeChanged { dark: theme == Theme::Dark }),
             _ => {}

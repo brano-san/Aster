@@ -27,7 +27,7 @@ pub(crate) struct ProfileSidebar {
     pub profiles: Vec<ProfileRow>,
     pub rows: Vec<TreeRow>,
     pub selected: usize,
-    pub scroll: usize,
+    pub scroll: f32,
     pub focus: Focus,
 }
 
@@ -44,13 +44,16 @@ impl Geometry {
         (self.list.h / self.row_height).floor() as usize
     }
 
-    pub fn row(&self, position: usize) -> Rect {
-        Rect::new(self.list.x, self.list.y + position as f32 * self.row_height, self.list.w, self.row_height)
+    pub fn row(&self, position: usize, scroll: f32) -> Rect {
+        Rect::new(self.list.x, self.list.y + position as f32 * self.row_height - (scroll * self.row_height).round(), self.list.w, self.row_height)
     }
 
-    pub fn hit_row(&self, x: f32, y: f32) -> Option<usize> {
-        let index = ((y - self.list.y) / self.row_height) as usize;
-        (self.list.contains(x, y) && index < self.visible()).then_some(index)
+    pub fn row_view(&self) -> Rect {
+        Rect::new(self.list.x, self.list.y, self.list.w, self.visible() as f32 * self.row_height)
+    }
+
+    pub fn hit_row(&self, x: f32, y: f32, scroll: f32) -> Option<usize> {
+        self.row_view().contains(x, y).then(|| ((y - self.list.y + (scroll * self.row_height).round()) / self.row_height) as usize)
     }
 }
 
@@ -67,11 +70,12 @@ impl ProfileSidebar {
     }
 
     fn reveal(&mut self, visible: usize) {
-        self.scroll = self.scroll.min(self.rows.len().saturating_sub(visible));
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if visible > 0 && self.selected >= self.scroll + visible {
-            self.scroll = self.selected + 1 - visible;
+        self.scroll = self.scroll.min(self.rows.len().saturating_sub(visible) as f32);
+        let selected = self.selected as f32;
+        if selected < self.scroll {
+            self.scroll = selected;
+        } else if visible > 0 && selected + 1.0 > self.scroll + visible as f32 {
+            self.scroll = (self.selected + 1).saturating_sub(visible) as f32;
         }
     }
 }
@@ -103,6 +107,10 @@ impl App {
         if rect.w <= 0.0 || !self.config.appearance.profile_sidebar || self.files.is_some() || self.focused_pane() == Some(SETTINGS_PANE) {
             return None;
         }
+        Some(self.sidebar_geometry_at(rect))
+    }
+
+    pub(crate) fn sidebar_geometry_at(&self, rect: Rect) -> Geometry {
         let s = self.ui();
         let pad = (8.0 * s).round();
         let filter = Rect::new(rect.x + pad, rect.y + pad, rect.w - 2.0 * pad, (30.0 * s).round());
@@ -110,7 +118,7 @@ impl App {
         let list = Rect::new(rect.x + (4.0 * s).round(), list_y, rect.w - pad, (rect.bottom() - list_y - pad).max(0.0));
         let grip_w = (5.0 * s).round();
         let grip = Rect::new(rect.right() - grip_w, rect.y, grip_w, rect.h);
-        Some(Geometry { rect, filter, list, grip, row_height: (26.0 * s).round().max(1.0) })
+        Geometry { rect, filter, list, grip, row_height: (26.0 * s).round().max(1.0) }
     }
 
     pub(crate) fn sync_profile_sidebar(&mut self) {
@@ -121,7 +129,8 @@ impl App {
         let profiles = self.profile_rows().into_iter().filter(|row| !row.hidden).collect();
         self.profile_sidebar.profiles = profiles;
         self.profile_sidebar.refilter(&self.config.groups);
-        self.profile_sidebar.scroll = 0;
+        self.profile_sidebar.scroll = 0.0;
+        self.list_motion.sidebar = Default::default();
         self.dirty = true;
     }
 
@@ -150,8 +159,9 @@ impl App {
         let browser = &mut self.profile_sidebar;
         browser.refilter(&self.config.groups);
         browser.selected = browser.rows.iter().position(|row| matches!(row.kind, TreeKind::Profile(_))).unwrap_or(0);
-        browser.scroll = 0;
+        browser.scroll = 0.0;
         browser.reveal(visible);
+        self.list_motion.sidebar = Default::default();
         self.dirty = true;
     }
 
@@ -165,6 +175,7 @@ impl App {
     pub(crate) fn sidebar_key(&mut self, key: Key, mods: Mods) -> bool {
         let Some(geo) = self.sidebar_geometry().filter(|_| self.profile_sidebar.focus != Focus::None) else { return false };
         let browser = &mut self.profile_sidebar;
+        let previous = browser.scroll;
         let visible = geo.visible();
         let last = browser.rows.len().saturating_sub(1);
         let page = visible.max(1);
@@ -196,6 +207,10 @@ impl App {
             _ => return false,
         }
         self.profile_sidebar.reveal(visible);
+        if crate::list_motion::scroll_key(key) {
+            let (animate, now) = (self.animations(), self.clock());
+            self.list_motion.sidebar.retarget(previous, self.profile_sidebar.scroll, animate, now);
+        }
         self.dirty = true;
         true
     }
@@ -234,7 +249,7 @@ impl App {
             self.dirty = true;
             return true;
         }
-        if let Some(i) = geo.hit_row(x, y).map(|i| i + browser.scroll).filter(|&i| i < browser.rows.len()) {
+        if let Some(i) = geo.hit_row(x, y, browser.scroll).filter(|&i| i < browser.rows.len()) {
             let kind = browser.rows[i].kind.clone();
             browser.selected = i;
             browser.focus = Focus::Tree;
@@ -262,15 +277,13 @@ impl App {
         true
     }
 
-    pub(crate) fn sidebar_wheel(&mut self, x: f32, y: f32, dy: f32) -> bool {
+    pub(crate) fn sidebar_wheel(&mut self, x: f32, y: f32, dy: f32, pixels: Option<f32>) -> bool {
         let Some(geo) = self.sidebar_geometry().filter(|geo| geo.rect.contains(x, y)) else { return false };
+        let (animate, now) = (self.animations(), self.clock());
         let browser = &mut self.profile_sidebar;
-        let rows = (dy.abs() * 3.0).round().max(1.0) as usize;
-        browser.scroll = if dy > 0.0 {
-            browser.scroll.saturating_sub(rows)
-        } else {
-            browser.scroll.saturating_add(rows).min(browser.rows.len().saturating_sub(geo.visible()))
-        };
+        let max = browser.rows.len().saturating_sub(geo.visible()) as f32;
+        let rows = dy.signum() * (dy.abs() * 3.0).round().max(1.0);
+        browser.scroll = self.list_motion.sidebar.wheel(browser.scroll, max, rows, pixels.map(|px| px / geo.row_height), animate, now);
         self.dirty = true;
         true
     }

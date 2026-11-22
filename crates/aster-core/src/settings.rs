@@ -98,6 +98,7 @@ pub(crate) const SYSTEM: &str = "Application";
 pub(crate) const CONFIG_FILE: &str = "Config file";
 
 const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("underline", "Underline")];
+const CURSOR_BLINK_STYLES: &[(&str, &str)] = &[("step", "Step"), ("smooth", "Smooth")];
 const LINK_MODIFIERS: &[(&str, &str)] = &[("none", "None"), ("ctrl", "Ctrl"), ("shift", "Shift")];
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
 const SCHEME_MODES: &[(&str, &str)] = &[("auto", "Follow the system"), ("dark", "Always dark"), ("light", "Always light")];
@@ -161,6 +162,7 @@ pub const SETTINGS: &[Setting] = &[
     item(APPEARANCE, "terminal.padding", "Text padding", "Space between the text and the edges of a pane", Control::Number { min: 0.0, max: 64.0, step: 1.0 }),
     item(APPEARANCE, "terminal.cursor", "Cursor shape", "Shape of the text cursor", Control::Segments(CURSORS)),
     item(APPEARANCE, "terminal.cursor-blink", "Blinking cursor", "The cursor blinks while the window has focus", Control::Toggle),
+    item(APPEARANCE, "terminal.cursor-blink-style", "Cursor blink style", "Switch the cursor on and off or fade it smoothly", Control::Segments(CURSOR_BLINK_STYLES)),
     item(APPEARANCE, "terminal.minimum-contrast-ratio", "Minimum contrast ratio", "Adjust text color for readability; 1 disables the adjustment", Control::Number { min: 1.0, max: 21.0, step: 0.5 }),
     item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Font { monospace: false }),
     item(APPEARANCE, "appearance.ui-from-scheme", "Interface colors from the scheme", "Use the terminal scheme for tabs, settings, menus and dialogs", Control::Toggle),
@@ -550,6 +552,7 @@ pub struct SettingsPage {
     pub(crate) defaults_kind: Option<&'static str>,
     pub(crate) groups: Vec<crate::profile::ProfileGroup>,
     pub(crate) collapsed: BTreeSet<Header>,
+    pub(crate) collapsed_sections: BTreeSet<&'static str>,
     tree: Vec<TreeRow>,
     pub deleting: Option<String>,
     pub page: usize,
@@ -559,6 +562,18 @@ pub struct SettingsPage {
 }
 
 impl SettingsPage {
+    pub(crate) fn section_open(&self, section: &'static str) -> bool {
+        self.searching() || !self.collapsed_sections.contains(section)
+    }
+
+    fn set_section_open(&mut self, section: &'static str, open: bool) {
+        if open {
+            self.collapsed_sections.remove(section);
+        } else if self.collapsed_sections.insert(section) {
+            self.scroll = 0.0;
+        }
+    }
+
     pub(crate) fn colors_page(&self) -> bool {
         PAGES[self.page.min(PAGES.len() - 1)] == COLORS
     }
@@ -821,6 +836,7 @@ pub struct SettingsGeometry {
     pub restart: Option<Rect>,
     pub profile_tabs: Option<[Rect; 2]>,
     pub height: f32,
+    pub(crate) scroll: f32,
     pub(crate) scheme_bar: Option<SchemeBar>,
     pub(crate) font_sample: Option<Rect>,
 }
@@ -948,7 +964,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
     let item_h = (58.0 * s).round();
     let control_h = (30.0 * s).round();
     let mut rows = Vec::new();
-    let mut y = list.y - page.scroll;
+    let mut y = list.y;
     let mut section = "";
     for (n, &i) in page.shown.iter().enumerate() {
         if page.section(i) != section {
@@ -959,6 +975,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
                 y += section_h;
             }
         }
+        if !page.section_open(section) { continue; }
         let sync_row = page.sync_row(i);
         let item_h = match page.tree_at(i).map(|r| &r.kind) {
             Some(TreeKind::Profile(_)) => (50.0 * s).round(),
@@ -981,7 +998,15 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
         rows.push(Row { kind: RowKind::Item(n), rect, control });
         y += item_h;
     }
-    let height = y + page.scroll - list.y;
+    let height = y - list.y;
+    let scroll = page.scroll.clamp(0.0, (height - list.h).max(0.0));
+    let snapped = scroll.round();
+    for row in &mut rows {
+        row.rect.y -= snapped;
+        if matches!(row.kind, RowKind::Item(_)) {
+            row.control.y -= snapped;
+        }
+    }
     let mut suggestions = Vec::new();
     if page.editing() && matches!(page.current().map(|s| s.control), Some(Control::Font { .. })) {
         if let Some(row) = rows.iter().find(|r| r.kind == RowKind::Item(page.selected)) {
@@ -999,7 +1024,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
             }
         }
     }
-    SettingsGeometry { page: content, title, field, close, list, rows, pages, suggestions, height, scheme_bar, font_sample, restart, profile_tabs }
+    SettingsGeometry { page: content, title, field, close, list, rows, pages, suggestions, height, scroll, scheme_bar, font_sample, restart, profile_tabs }
 }
 
 pub fn part_at(control: Control, r: Rect, s: f32, x: f32) -> Part {
@@ -1104,6 +1129,7 @@ impl App {
         self.config_editor.focus = None;
         self.config_editor.cancel_paste();
         let Some(page) = self.settings.as_mut() else { return };
+        self.list_motion.settings = Default::default();
         page.show_page(k);
         page.sync.delete = None;
         if page.colors_page() {
@@ -1116,6 +1142,7 @@ impl App {
 
     fn show_profiles_tab(&mut self, advanced: bool) {
         self.commit_edit();
+        self.list_motion.settings = Default::default();
         if let Some(page) = self.settings.as_mut() {
             page.profiles_advanced = advanced;
             page.refilter();
@@ -1124,6 +1151,7 @@ impl App {
     }
 
     pub(crate) fn restore_settings_page(&mut self) {
+        self.list_motion.settings = Default::default();
         self.settings = Some(self.settings_stash.take().unwrap_or_else(|| self.fresh_settings_page()));
         self.effects.push(Effect::CheckConfigFile);
         self.refresh_sync_page();
@@ -1568,7 +1596,8 @@ impl App {
         let Some(row) = geo.rows.iter().find(|r| r.kind == RowKind::Item(page.selected)) else { return };
         let header = geo.rows.iter().position(|r| r.kind == RowKind::Item(page.selected)).filter(|&i| i > 0 && matches!(geo.rows[i - 1].kind, RowKind::Section(_))).map(|i| geo.rows[i - 1].rect.h).unwrap_or(0.0);
         let top = row.rect.y - header;
-        let old_scroll = page.scroll;
+        let old_scroll = geo.scroll;
+        page.scroll = old_scroll;
         if top < geo.list.y {
             page.scroll -= geo.list.y - top;
         } else if row.rect.bottom() > geo.list.bottom() {
@@ -1617,6 +1646,18 @@ impl App {
             return;
         }
         let Some(page) = self.settings.as_mut() else { return };
+        let section = PAGES[page.page];
+        if section != PROFILES && !page.searching() && !page.editing() && mods.alt && matches!(key, Key::Up | Key::Down) {
+            page.set_section_open(section, key == Key::Down);
+            return;
+        }
+        let navigate = matches!(key, Key::Escape | Key::Backspace) || mods.ctrl && matches!(key, Key::PageUp | Key::PageDown);
+        if !page.section_open(section) && !navigate {
+            if key == Key::Enter {
+                page.set_section_open(section, true);
+            }
+            return;
+        }
         match (key, page.current_item().filter(|_| !page.editing()).and_then(|item| page.vault_at(item))) {
             (Key::Delete, Some(VaultRow::Entry(i))) => {
                 let entry = page.vault.entries[i].clone();
@@ -1629,6 +1670,7 @@ impl App {
             return;
         }
         let Some(page) = self.settings.as_mut() else { return };
+        let previous_scroll = page.scroll;
         if key != Key::Other {
             page.notice = None;
         }
@@ -1679,6 +1721,7 @@ impl App {
             Key::Escape if !page.query.is_empty() => {
                 page.query.clear();
                 page.refilter();
+                self.list_motion.settings = Default::default();
             }
             Key::Escape => return self.close_settings(),
             Key::Up => page.step(-1),
@@ -1693,8 +1736,8 @@ impl App {
             }
             Key::PageUp => page.step(-6),
             Key::PageDown => page.step(6),
-            Key::Home if mods.ctrl => page.step(isize::MIN / 2),
-            Key::End if mods.ctrl => page.step(isize::MAX / 2),
+            Key::Home => page.step(isize::MIN / 2),
+            Key::End => page.step(isize::MAX / 2),
             Key::Backspace => {
                 if mods.ctrl {
                     page.query.clear();
@@ -1702,6 +1745,7 @@ impl App {
                     page.query.pop();
                 }
                 page.refilter();
+                self.list_motion.settings = Default::default();
             }
             Key::Enter => {
                 if page.restart_pending && page.selected == page.shown.len() {
@@ -1725,6 +1769,12 @@ impl App {
             _ => {}
         }
         self.reveal_selected();
+        if crate::list_motion::scroll_key(key) {
+            let (animate, now) = (self.animations(), self.clock());
+            if let Some(page) = self.settings.as_ref() {
+                self.list_motion.settings.retarget(previous_scroll, page.scroll, animate, now);
+            }
+        }
     }
 
     pub(crate) fn settings_text(&mut self, text: &str) {
@@ -1765,6 +1815,7 @@ impl App {
             None => {
                 page.query.push_str(&clean);
                 page.refilter();
+                self.list_motion.settings = Default::default();
             }
         }
         self.dirty = true;
@@ -1809,7 +1860,16 @@ impl App {
         }
         if self.extensions_click(geo.list, x, y) || self.config_editor_click(x, y) { return; }
         let Some(row) = geo.rows.iter().find(|r| r.rect.contains(x, y)).copied() else { return self.commit_edit() };
-        let RowKind::Item(n) = row.kind else { return self.commit_edit() };
+        let n = match row.kind {
+            RowKind::Item(n) => n,
+            RowKind::Section(section) => {
+                self.commit_edit();
+                if let Some(page) = self.settings.as_mut().filter(|page| !page.searching()) {
+                    page.set_section_open(section, !page.section_open(section));
+                }
+                return;
+            }
+        };
         let scale = self.ui();
         let editing_same = self.settings.as_ref().is_some_and(|p| p.selected == n && p.editing.is_some());
         let item = self.settings.as_ref().and_then(|p| p.shown.get(n).copied());
@@ -1862,14 +1922,16 @@ impl App {
         }
     }
 
-    pub(crate) fn settings_wheel(&mut self, dy: f32) {
+    pub(crate) fn settings_wheel(&mut self, dy: f32, pixels: Option<f32>) {
         if self.vault_dialog_wheel(dy) || self.config_editor_wheel(dy) || self.profile_modal_wheel(dy) { return; }
         let Some(geo) = self.settings_geometry() else { return };
         if self.scheme_editor_wheel(geo.page, dy) { return; }
         if self.extensions_scroll(geo.list, -dy * 60.0 * self.ui()) { return; }
         let step = 60.0 * self.ui();
+        let (animate, now) = (self.animations(), self.clock());
         let Some(page) = self.settings.as_mut() else { return };
-        page.scroll = (page.scroll - dy * step).clamp(0.0, (geo.height - geo.list.h).max(0.0));
+        let animate = animate && !page.editing();
+        page.scroll = self.list_motion.settings.wheel(geo.scroll, (geo.height - geo.list.h).max(0.0), dy * step, pixels, animate, now);
         self.dirty = true;
     }
 }

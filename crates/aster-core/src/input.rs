@@ -124,6 +124,7 @@ pub enum Event {
     MouseUp { x: f32, y: f32, button: MouseButton },
     Modifiers(Mods),
     Wheel { dx: f32, dy: f32 },
+    PreciseWheel { dx: f32, dy: f32, pixels_per_notch: f32 },
     MouseLeave,
     Key { key: Key, mods: Mods, pressed: bool },
     Char(char),

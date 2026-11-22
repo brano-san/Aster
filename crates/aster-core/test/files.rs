@@ -58,6 +58,24 @@ fn opening_lists_the_home_folder_and_enter_walks_into_folders() {
 }
 
 #[test]
+fn growing_the_file_list_keeps_the_bottom_row_clickable() {
+    let (mut a, pane) = ssh_app();
+    a.run(Action::OpenFiles);
+    let entries = (0..35).map(|i| entry(&format!("{i:02}.txt"), false, 14)).collect();
+    a.files_reply(pane, FileReply::Listing { path: "/".into(), entries });
+    key(&mut a, Key::End);
+    let before = a.files_page().unwrap().scroll;
+    a.set_viewport(1000, 900, 1.0);
+    a.chrome = a.tab_chrome();
+    let geo = a.files_geometry().unwrap();
+    assert!(geo.scroll < before);
+    let r = geo.rows.last().unwrap().1;
+    assert_eq!(r.bottom(), geo.list.bottom());
+    a.files_click(r.x + 2.0, r.y + 2.0, 2);
+    assert!(requests(&mut a).iter().any(|request| matches!(request, FileRequest::Download { remote, .. } if remote == "/34.txt")));
+}
+
+#[test]
 fn enter_on_a_file_downloads_it_and_progress_updates_the_transfer() {
     let (mut a, pane) = ssh_app();
     a.run(Action::OpenFiles);

@@ -24,6 +24,10 @@ impl OverlayKind {
     pub(crate) fn is_profile_picker(self) -> bool {
         matches!(self, Self::Profiles | Self::PaneProfile(_))
     }
+
+    pub(crate) fn scrolls_smoothly(self) -> bool {
+        self.is_profile_picker() || matches!(self, Self::Commands | Self::Schemes)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -47,6 +51,7 @@ pub struct Overlay {
     pub shown: Vec<(usize, Vec<Range<usize>>)>,
     pub selected: usize,
     pub scroll: usize,
+    pub(crate) scroll_offset: Option<crate::overlay_list::Position>,
     quick_provider: Option<Provider>,
     quick_ssh: bool,
     base: usize,
@@ -72,7 +77,7 @@ fn quick_pick(label: String, kind: &str, value: String) -> Pick {
 impl Overlay {
     pub fn new(kind: OverlayKind, items: Vec<Pick>) -> Self {
         let base = items.len();
-        let mut o = Self { kind, opened_at: Instant::now(), items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0, quick_provider: None, quick_ssh: false, base };
+        let mut o = Self { kind, opened_at: Instant::now(), items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0, scroll_offset: None, quick_provider: None, quick_ssh: false, base };
         o.refilter();
         o
     }
@@ -114,6 +119,7 @@ impl Overlay {
     }
 
     fn refilter(&mut self) {
+        self.scroll_offset = None;
         self.items.truncate(self.base);
         if matches!(self.kind, OverlayKind::SerialSpeed(_)) {
             self.filter_serial_speeds();
@@ -194,9 +200,7 @@ impl Overlay {
         if self.shown.is_empty() {
             return;
         }
-        let n = self.shown.len() as isize;
-        let next = self.selected as isize + delta;
-        self.selected = if delta.abs() == 1 { next.rem_euclid(n) } else { next.clamp(0, n - 1) } as usize;
+        self.selected = self.selection_after(delta);
         if self.selected < self.scroll {
             self.scroll = self.selected;
         } else if self.selected >= self.scroll + VISIBLE {
@@ -204,10 +208,18 @@ impl Overlay {
         }
     }
 
+    pub(crate) fn selection_after(&self, delta: isize) -> usize {
+        let n = self.shown.len() as isize;
+        if n == 0 { return 0; }
+        let next = (self.selected as isize).saturating_add(delta);
+        if delta == -1 || delta == 1 { next.rem_euclid(n) as usize } else { next.clamp(0, n - 1) as usize }
+    }
+
     pub fn select(&mut self, index: usize) {
         if index < self.shown.len() {
             self.selected = index;
             self.scroll = index.saturating_sub(VISIBLE / 2).min(self.shown.len().saturating_sub(VISIBLE));
+            self.scroll_offset = None;
         }
     }
 

@@ -169,12 +169,17 @@ fn draw_tab_badge<B: TextBackend>(g: &mut Gfx<B>, r: Rect, label: &str, tint: u3
 pub struct OverlayGeometry {
     pub frame: Rect,
     pub input: Rect,
+    pub list: Rect,
     pub items: Vec<(usize, Rect)>,
     pub headers: Vec<(String, Rect)>,
     pub dividers: Vec<Rect>,
 }
 
 pub fn overlay_geometry(app: &App, o: &Overlay) -> OverlayGeometry {
+    if o.kind.scrolls_smoothly() {
+        let layout = crate::overlay_list::OverlayList::new(app.chrome.content, app.ui(), o);
+        return layout.geometry(layout.target(o));
+    }
     let s = app.ui();
     let content = app.chrome.content;
     let profiles = o.kind.is_profile_picker();
@@ -208,7 +213,8 @@ pub fn overlay_geometry(app: &App, o: &Overlay) -> OverlayGeometry {
         cursor += item_h;
     }
     let frame = Rect::new(x, y, width, cursor + pad - y);
-    OverlayGeometry { frame, input, items, headers, dividers }
+    let list = Rect::new(x, input.bottom(), width, (frame.bottom() - input.bottom()).max(0.0));
+    OverlayGeometry { frame, input, list, items, headers, dividers }
 }
 
 pub fn overlay_hit(app: &App, o: &Overlay, x: f32, y: f32) -> Option<Option<usize>> {
@@ -216,11 +222,15 @@ pub fn overlay_hit(app: &App, o: &Overlay, x: f32, y: f32) -> Option<Option<usiz
     if !geo.frame.contains(x, y) {
         return None;
     }
-    Some(geo.items.iter().find(|(i, r)| {
-        if !r.contains(x, y) { return false; }
-        let item = &o.items[o.shown[*i].0];
-        !matches!(o.kind, OverlayKind::SshPorts(_)) || item.badge.is_empty() || crate::ssh_toolbar::forward_action_rect(*r, app.ui()).contains(x, y)
-    }).map(|(i, _)| *i))
+    Some(overlay_row_at(&geo, (x, y)).filter(|&(i, r)| {
+        let item = &o.items[o.shown[i].0];
+        !matches!(o.kind, OverlayKind::SshPorts(_)) || item.badge.is_empty() || crate::ssh_toolbar::forward_action_rect(r, app.ui()).contains(x, y)
+    }).map(|(i, _)| i))
+}
+
+fn overlay_row_at(geo: &OverlayGeometry, (x, y): (f32, f32)) -> Option<(usize, Rect)> {
+    if !geo.list.contains(x, y) { return None; }
+    geo.items.iter().find(|(_, r)| r.contains(x, y)).copied()
 }
 
 impl App {
@@ -279,7 +289,18 @@ impl App {
         }
         let content = self.chrome.content;
         g.dl.rect(content, theme.background);
-        self.draw_profile_sidebar(g, now);
+        let sidebar = self.sidebar_geometry().map(|geo| (geo.rect.w, geo.rect));
+        let slide_sidebar = self.animations() && !matches!(self.drag, Drag::SidebarResize { .. });
+        let sidebar_width = self.panel_motion.sidebar.update(sidebar, slide_sidebar, now, &mut self.motion);
+        let sidebar_gap = if sidebar_width < self.chrome.profile_sidebar.w { self.chrome.profile_sidebar.w } else { 0.0 };
+        let closing_sidebar_right = if sidebar.is_none() && sidebar_width > 0.0 {
+            content.x + self.panel_motion.sidebar.content.map_or(0.0, |(full, _)| full)
+        } else {
+            content.x
+        };
+        if sidebar_gap > 0.0 {
+            g.dl.rect(self.chrome.profile_sidebar, theme.background);
+        }
         let gap = (1.0 * s).round().max(1.0);
         let layout = match self.tabs.get(self.active) {
             Some(tab) => match tab.zoomed {
@@ -297,10 +318,13 @@ impl App {
         let broadcast = self.broadcast_targets();
         let show_pane_busy = self.settings.is_none() && self.files.is_none()
             && self.vault_prompt.as_ref().is_none_or(|dialog| dialog.kind != crate::vault_settings::DialogKind::Startup);
+        let blink = self.cursor_blink(now);
+        self.panel_motion.headers.retain(|id, _| self.panes.contains_key(id));
         for (id, rect) in &layout.panes {
             let visual = self.pane_motion.pane(*id, now);
             let pane_from = g.dl.instances.len();
-            self.draw_pane(g, *id, *rect, visual, focus == Some(*id), m);
+            let gap = if rect.x == content.x { sidebar_gap } else { 0.0 };
+            self.draw_pane(g, *id, (*rect, visual), focus == Some(*id), (m, gap, closing_sidebar_right), blink);
             if split && focus != Some(*id) {
                 g.dl.rect(visual, theme.dim);
             }
@@ -335,7 +359,7 @@ impl App {
                 self.motion = true;
                 g.dl.rect(*rect, theme.foreground.alpha((44.0 * flash).round() as u8));
             }
-            self.draw_pane_header(g, *id, *rect, focus == Some(*id), show_pane_busy);
+            self.draw_pane_header(g, *id, *rect, focus == Some(*id), show_pane_busy, now);
             let layer = Layer::SshAuth(*id);
             let panel = self.ssh_auth.get(id);
             let from = self.layers.start(&mut g.dl, layer, panel.map(|panel| panel.opened_at), POP);
@@ -355,10 +379,19 @@ impl App {
             g.dl.rect(self.pane_motion.splitter(&sp.path, now), theme.divider);
         }
         self.draw_pane_rearrangement(g, now);
+        let mut controls = std::mem::take(&mut self.control_motion);
+        let mut control_frame = controls.begin(now, self.animations());
+        let sidebar_above_settings = sidebar.is_none() && self.settings.as_ref().is_some_and(|page| {
+            page.editor.is_none() && page.group_editor.is_none() && page.scheme_editor.is_none() && page.vault_dialog.is_none()
+        });
+        if !sidebar_above_settings {
+            self.draw_sliding_sidebar(g, sidebar_width, now, &mut control_frame);
+        }
         if self.vault_prompt.as_ref().is_some_and(|dialog| dialog.kind == crate::vault_settings::DialogKind::Startup) {
             g.dl.rect(content, theme.surface);
             self.draw_window_vault(g, content);
-            self.motion |= self.layers.finish() | self.busy.finish();
+            self.motion |= self.layers.finish() | self.busy.finish() | control_frame.finish();
+            self.control_motion = controls;
             self.mark_drawn(now);
             return;
         }
@@ -366,9 +399,14 @@ impl App {
             self.draw_start_page(g);
         }
         let content_layers = g.dl.instances.len();
-        self.draw_search(g);
-        self.draw_settings(g, now);
-        self.draw_files(g, now);
+        self.draw_sliding_search(g, now);
+        self.draw_settings(g, now, &mut control_frame);
+        if sidebar_above_settings {
+            self.draw_sliding_sidebar(g, sidebar_width, now, &mut control_frame);
+        }
+        self.motion |= control_frame.finish();
+        self.control_motion = controls;
+        self.draw_sliding_files(g, now);
         self.draw_overlay(g, now);
         if let Some(form) = &self.ssh_forward_form {
             if let Some(caret) = self.draw_ssh_forward_form(g, content, form) {
@@ -443,29 +481,49 @@ impl App {
         g.dl.set_clip(None);
     }
 
-    fn draw_profile_sidebar<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
-        use crate::profile_sidebar::Focus;
-        use crate::profiles_page::TreeKind;
-        let Some(geo) = self.sidebar_geometry() else {
+    fn draw_sliding_sidebar<B: TextBackend>(&mut self, g: &mut Gfx<B>, width: f32, now: Instant, controls: &mut crate::control_motion::Frame<'_>) {
+        let Some((full, mut rect)) = self.panel_motion.sidebar.content else {
             self.hover_state.profiles = Default::default();
             return;
         };
+        let open = self.sidebar_geometry().is_some();
+        if !open {
+            rect.x = self.chrome.content.x;
+            rect.y = self.chrome.content.y;
+            rect.h = self.chrome.content.h;
+        }
+        let from = g.dl.instances.len();
+        let geo = self.sidebar_geometry_at(rect);
+        let max = self.profile_sidebar.rows.len().saturating_sub(geo.visible()) as f32;
+        self.profile_sidebar.scroll = self.profile_sidebar.scroll.min(max);
+        let animate = self.animations();
+        let scroll = self.list_motion.sidebar.sample(self.profile_sidebar.scroll, max, animate, now, &mut self.motion);
+        let (mx, my) = self.mouse;
+        let hot = if open { geo.hit_row(mx, my, self.profile_sidebar.scroll).filter(|&i| i < self.profile_sidebar.rows.len()) } else { None };
+        self.motion |= self.hover_state.profiles.aim(hot, animate, now);
+        self.draw_profile_sidebar(g, geo, (open, scroll), now, controls);
+        if width <= 0.0 {
+            g.dl.instances.truncate(from);
+        } else if width < full {
+            g.dl.shift(from, width - full, 0.0);
+            g.dl.confine(from, Rect::new(rect.x, rect.y, width, rect.h));
+        }
+    }
+
+    fn draw_profile_sidebar<B: TextBackend>(&mut self, g: &mut Gfx<B>, geo: crate::profile_sidebar::Geometry, (open, scroll): (bool, f32), now: Instant, controls: &mut crate::control_motion::Frame<'_>) {
+        use crate::profile_sidebar::Focus;
+        use crate::profiles_page::TreeKind;
         let s = self.ui();
         let theme = self.theme;
-        let (mx, my) = self.mouse;
+        let (mx, my) = if open { self.mouse } else { (-1.0, -1.0) };
         let line = (1.0 * s).round().max(1.0);
         let ui = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), false);
         let bold = FontStyle::new(FontFamily::Ui, ui.px(), true);
         let radius = (5.0 * s).round();
         let visible = geo.visible();
         let max_scroll = self.profile_sidebar.rows.len().saturating_sub(visible);
-        self.profile_sidebar.scroll = self.profile_sidebar.scroll.min(max_scroll);
         let browser = &self.profile_sidebar;
-        let rows = browser.rows.iter().skip(browser.scroll).take(visible).enumerate();
-        let hot = rows.clone().find(|(position, _)| geo.row(*position).contains(mx, my))
-            .map(|(position, _)| browser.scroll + position);
-        self.motion |= self.hover_state.profiles.aim(hot, self.animations(), now);
-        let focused = browser.focus == Focus::Filter;
+        let focused = open && browser.focus == Focus::Filter;
         g.dl.set_clip(Some(geo.rect));
         g.dl.rect(geo.rect, theme.surface);
         g.dl.round_rect(geo.filter, theme.overlay, radius);
@@ -495,12 +553,16 @@ impl App {
         let resizing = matches!(self.drag, Drag::SidebarResize { .. });
         let divider = Rect::new(geo.rect.right() - line, geo.rect.y, line, geo.rect.h);
         g.dl.rect(divider, if resizing || geo.grip.contains(mx, my) { theme.accent } else { theme.divider });
-        for (position, row) in rows {
-            let r = geo.row(position);
-            let selected = browser.selected == browser.scroll + position && browser.focus != Focus::None;
+        let list = geo.row_view();
+        g.dl.set_clip(Some(list));
+        let first = scroll.floor() as usize;
+        for (position, row) in browser.rows.iter().enumerate().skip(first).take(visible + 1) {
+            let r = geo.row(position, scroll);
+            if r.y >= list.bottom() { break; }
+            let selected = open && browser.selected == position && browser.focus != Focus::None;
             if selected {
                 g.dl.round_rect(r, theme.accent.alpha(0x30), radius);
-            } else if let Some(fill) = hover_fill(&self.hover_state.profiles, browser.scroll + position, now, theme.button_hover) {
+            } else if let Some(fill) = hover_fill(&self.hover_state.profiles, position, now, theme.button_hover) {
                 g.dl.round_rect(r, fill, radius);
             }
             let x = r.x + 8.0 * s + row.indent(s).min((r.w - 44.0 * s).max(0.0));
@@ -508,7 +570,8 @@ impl App {
             match &row.kind {
                 TreeKind::Header(header) => {
                     let open = !browser.query.trim().is_empty() || !browser.collapsed.contains(header);
-                    g.dl.chevron((x + 4.0 * s, r.y + r.h * 0.5), 7.0 * s, if open { 90.0 } else { 0.0 }, 1.5 * s, theme.text_dim);
+                    let angle = controls.angle(crate::control_motion::Control::Group(true, header.clone()), open);
+                    g.dl.chevron((x + 4.0 * s, r.y + r.h * 0.5), 7.0 * s, angle, 1.5 * s, theme.text_dim);
                     let mut x = x + 16.0 * s;
                     if let Some(group) = header.group_index(&self.config.groups).map(|i| &self.config.groups[i]) {
                         x = self.draw_profile_group_mark(g, r, x, group, bold);
@@ -528,13 +591,14 @@ impl App {
             }
         }
         if browser.rows.is_empty() && visible > 0 {
-            let r = geo.row(0);
+            let r = geo.row(0, scroll);
             let y = baseline(g, r, ui);
             g.text(x, y, t("Nothing matches the filter"), ui, theme.text_dim, width);
         }
+        g.dl.set_clip(Some(geo.rect));
         if max_scroll > 0 && visible > 0 {
             let height = (geo.list.h * visible as f32 / browser.rows.len() as f32).max(12.0 * s);
-            let y = geo.list.y + (geo.list.h - height) * browser.scroll as f32 / max_scroll as f32;
+            let y = (geo.list.y + (geo.list.h - height) * scroll / max_scroll as f32).round();
             g.dl.round_rect(Rect::new(geo.rect.right() - 4.0 * s, y, 2.0 * s, height), theme.text_dim.alpha(0x80), s);
         }
         g.dl.set_clip(None);
@@ -934,15 +998,13 @@ impl App {
         }
     }
 
-    fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, visual: Rect, focused: bool, m: Metrics) {
+    fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, (pane_rect, visual): (Rect, Rect), focused: bool, (m, sidebar_gap, show_from): (Metrics, f32, f32), (blink_alpha, blinking): (f32, bool)) {
         let s = self.ui();
-        let visual = self.pane_terminal_rect(id, visual);
-        let rect = self.pane_terminal_rect(id, rect);
+        let rect = self.pane_terminal_rect(id, pane_rect);
         let inner = pane_inner_with(rect, s, self.config.terminal.padding);
         let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
         self.prepare_pane(id, size, m);
         let window_focused = self.terminal_has_focus();
-        let blink_on = self.blink_on || !self.cursor_blink_enabled();
         let palette = self.pane_palette(id);
         let Some(pane) = self.panes.get_mut(&id) else { return };
         let theme = self.theme;
@@ -966,12 +1028,13 @@ impl App {
         let default_bg = palette.background(&overrides);
         if default_bg != self.palette.background {
             let from = g.dl.instances.len();
-            g.dl.rect(rect, rgb(default_bg));
-            if visual != rect {
-                g.dl.refit(from, rect, visual);
+            g.dl.rect(Rect::new(pane_rect.x - sidebar_gap, pane_rect.y, pane_rect.w + sidebar_gap, pane_rect.h), rgb(default_bg));
+            if visual != pane_rect {
+                g.dl.refit(from, pane_rect, visual);
             }
         }
-        g.dl.set_clip(Some(rect));
+        let left = rect.x.max(show_from);
+        g.dl.set_clip(Some(Rect::new(left, rect.y, (rect.right() - left).max(0.0), rect.h)));
         self.draw_terminal_background(g, rect);
         let (ox, oy) = (inner.x, inner.y);
         let cell_rect = |line: usize, col: usize, cols: usize| Rect::new(ox + col as f32 * m.w, oy + line as f32 * m.h, m.w * cols as f32, m.h);
@@ -1003,15 +1066,19 @@ impl App {
         let cur_cols = if cursor.wide { 2 } else { 1 };
         let cr = cell_rect(cursor.line, cursor.col, cur_cols);
         let active_cursor = focused && window_focused;
-        let draw_cursor = show_cursor && (!active_cursor || (blink_on && self.preedit.is_empty()));
+        let cursor_alpha = if active_cursor { blink_alpha } else { 1.0 };
+        let cursor_visible = show_cursor && (!active_cursor || self.preedit.is_empty());
+        self.motion |= active_cursor && cursor_visible && blinking;
+        let draw_cursor = cursor_visible && cursor_alpha > 0.0;
         let thin = (1.0 * dpi).round().max(1.0);
         let block = draw_cursor && active_cursor && matches!(cursor.shape, CursorShape::Block);
         if draw_cursor {
+            let ink = rgb(cursor_color).alpha((255.0 * cursor_alpha).round() as u8);
             match (active_cursor, cursor.shape) {
-                (true, CursorShape::Block) => g.dl.rect(cr, rgb(cursor_color)),
-                (true, CursorShape::Beam) => g.dl.rect(Rect::new(cr.x, cr.y, (2.0 * dpi).round().max(1.0), cr.h), rgb(cursor_color)),
-                (true, CursorShape::Underline) => g.dl.rect(Rect::new(cr.x, cr.bottom() - (2.0 * dpi).round().max(1.0), cr.w, (2.0 * dpi).round().max(1.0)), rgb(cursor_color)),
-                _ => g.dl.outline(cr, rgb(cursor_color), 0.0, thin),
+                (true, CursorShape::Block) => g.dl.rect(cr, ink),
+                (true, CursorShape::Beam) => g.dl.rect(Rect::new(cr.x, cr.y, (2.0 * dpi).round().max(1.0), cr.h), ink),
+                (true, CursorShape::Underline) => g.dl.rect(Rect::new(cr.x, cr.bottom() - (2.0 * dpi).round().max(1.0), cr.w, (2.0 * dpi).round().max(1.0)), ink),
+                _ => g.dl.outline(cr, ink, 0.0, thin),
             }
         }
         let px = m.px;
@@ -1035,7 +1102,7 @@ impl App {
             }
             let at_cursor = block && v.line == cursor.line && v.col == cursor.col;
             if at_cursor {
-                fg = cursor_text;
+                fg = crate::theme::mix(fg, cursor_text, cursor_alpha);
             }
             let x = ox + v.col as f32 * m.w;
             let y = oy + v.line as f32 * m.h;
@@ -1048,7 +1115,7 @@ impl App {
                         backdrop = if mt.current { selection_bg } else { crate::theme::mix(backdrop, theme.search_match, 0x58 as f32 / 255.0) };
                     }
                 }
-                let backdrop = if at_cursor { cursor_color } else { backdrop };
+                let backdrop = if at_cursor { crate::theme::mix(backdrop, cursor_color, cursor_alpha) } else { backdrop };
                 let ink = rgb(crate::theme::ensure_contrast(fg, backdrop, min_contrast));
                 if ligatures && aster_gfx::boxdraw::is_procedural(c) {
                     run.flush(g);
@@ -1121,25 +1188,55 @@ impl App {
         }
     }
 
-    fn draw_pane_header<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, show_busy: bool) {
+    fn draw_pane_header<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, show_busy: bool, now: Instant) {
         let header = self.pane_header(id, rect);
         let s = self.ui();
         let theme = self.theme;
         let checking = self.pane_profile_probe.as_ref().is_some_and(|probe| probe.pane == id);
         let busy = show_busy && (self.pane_connecting(id) || checking);
-        if header.h <= 0.0 || header.w <= 0.0 {
-            if busy && rect.w >= 28.0 * s && rect.h >= 24.0 * s {
-                let area = Rect::new(rect.right() - 25.0 * s, rect.y + 3.0 * s, 22.0 * s, 20.0 * s);
-                g.dl.round_rect(area, theme.overlay, 4.0 * s);
-                draw_busy_spinner(&mut g.dl, &mut self.busy, area, s, theme.accent);
-            }
-            return;
+        let toolbar = self.ssh_toolbar(id, rect);
+        let open = toolbar.is_some();
+        let animate = self.animations();
+        let slides = self.panel_motion.headers.entry(id).or_default();
+        let height = slides.title.update((header.h > 0.0).then_some((header.h, ())), animate, now, &mut self.motion);
+        let toolbar_height = slides.toolbar.update(toolbar.map(|toolbar| (header.h, toolbar)), animate, now, &mut self.motion);
+        let floating_busy = busy && (header.h <= 0.0 || header.w <= 0.0) && rect.w >= 28.0 * s && rect.h >= 24.0 * s;
+        if floating_busy {
+            let area = Rect::new(rect.right() - 25.0 * s, rect.y + 3.0 * s, 22.0 * s, 20.0 * s);
+            g.dl.round_rect(area, theme.overlay, 4.0 * s);
+            draw_busy_spinner(&mut g.dl, &mut self.busy, area, s, theme.accent);
         }
+        let Some((full, ())) = slides.title.content else { return };
+        if header.w <= 0.0 || height <= 0.0 { return; }
+        let toolbar = slides.toolbar.content;
+        let title_right = toolbar.filter(|_| open).map(|(_, toolbar)| toolbar.buttons[0].x);
+        let header = Rect::new(header.x, header.y, header.w, full);
+        let from = g.dl.instances.len();
+        self.draw_pane_title(g, id, header, focused, title_right, busy && !floating_busy);
+        let shown = Rect::new(header.x, header.y, header.w, height);
+        if height < full {
+            g.dl.shift(from, 0.0, height - full);
+            g.dl.confine(from, shown);
+        }
+        if let Some((full, toolbar)) = toolbar.filter(|_| toolbar_height > 0.0) {
+            let from = g.dl.instances.len();
+            g.dl.set_clip(Some(header));
+            self.draw_ssh_toolbar(g, id, &toolbar, open);
+            g.dl.set_clip(None);
+            if toolbar_height < full {
+                g.dl.shift(from, 0.0, toolbar_height - full);
+            }
+            g.dl.confine(from, shown);
+        }
+    }
+
+    fn draw_pane_title<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, header: Rect, focused: bool, title_right: Option<f32>, busy: bool) {
         let Some(pane) = self.panes.get(&id) else { return };
+        let s = self.ui();
+        let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
         let line = (1.0 * s).round().max(1.0);
-        let toolbar = self.ssh_toolbar(id, rect);
-        let right = toolbar.as_ref().map_or(header.right(), |toolbar| toolbar.buttons[0].x);
+        let right = title_right.unwrap_or_else(|| header.right());
         let field = Rect::new(header.x, header.y, right - header.x, header.h).inset((5.0 * s).round(), (2.0 * s).round());
         let x = field.x + (4.0 * s).round();
         let y = baseline(g, header, ui);
@@ -1175,9 +1272,6 @@ impl App {
             }
             g.text(x, y, title, ui, if focused { theme.text } else { theme.text_dim }, (right - x - 8.0 * s).max(0.0));
         }
-        if let Some(toolbar) = toolbar {
-            self.draw_ssh_toolbar(g, id, &toolbar);
-        }
         g.dl.set_clip(None);
     }
 
@@ -1196,11 +1290,29 @@ impl App {
         }
     }
 
-    fn draw_search<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+    fn draw_sliding_search<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
+        let open = self.search_geometry().filter(|geo| geo.frame.h > 0.0);
+        let snapshot = open.as_ref().zip(self.search.clone()).map(|(geo, bar)| (geo.frame.h, bar));
+        let animate = self.animations();
+        let height = self.panel_motion.search.update(snapshot, animate, now, &mut self.motion);
+        let Some((full, bar)) = self.panel_motion.search.content.as_ref() else { return };
+        let Some((_, pane)) = self.layout.panes.iter().find(|(id, _)| *id == bar.pane) else { return };
+        let geo = crate::search::geometry(*pane, self.ui());
+        let from = self.draw_search(g, &geo, bar, open.is_some());
+        if height <= 0.0 {
+            g.dl.instances.truncate(from);
+        } else if height < *full {
+            g.dl.shift(from, 0.0, height - full);
+            g.dl.confine(from, Rect::new(pane.x, geo.frame.y, pane.w, height + (14.0 * self.ui()).round()));
+        }
+    }
+
+    fn draw_search<B: TextBackend>(&self, g: &mut Gfx<B>, geo: &crate::search::SearchGeometry, bar: &crate::search::SearchBar, open: bool) -> usize {
         use crate::search::SearchHit;
-        let Some(geo) = self.search_geometry() else { return };
-        let Some(bar) = self.search.clone() else { return };
-        self.draw_search_ruler(g, bar.pane);
+        if open {
+            self.draw_search_ruler(g, bar.pane);
+        }
+        let from = g.dl.instances.len();
         let s = self.ui();
         let theme = self.theme;
         let radius = (6.0 * s).round();
@@ -1238,7 +1350,7 @@ impl App {
             };
             if on {
                 g.dl.round_rect(r, theme.accent.alpha(0x50), (4.0 * s).round());
-            } else if r.contains(mx, my) {
+            } else if open && r.contains(mx, my) {
                 g.dl.round_rect(r, theme.button_hover, (4.0 * s).round());
             }
             let ink = if on { theme.text } else { theme.text_dim };
@@ -1252,6 +1364,7 @@ impl App {
                 SearchHit::Field => {}
             }
         }
+        from
     }
 
     fn draw_popup_hint<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, layer: Layer, text: Option<&str>) {
@@ -1356,7 +1469,7 @@ impl App {
         self.layers.pop(&mut g.dl, layer, from, geo.frame, 1, POP);
     }
 
-    fn draw_ssh_toolbar<B: TextBackend>(&self, g: &mut Gfx<B>, pane: PaneId, toolbar: &crate::ssh_toolbar::Toolbar) {
+    fn draw_ssh_toolbar<B: TextBackend>(&self, g: &mut Gfx<B>, pane: PaneId, toolbar: &crate::ssh_toolbar::Toolbar, open: bool) {
         let s = self.ui();
         let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), false);
@@ -1364,7 +1477,7 @@ impl App {
         let (mx, my) = self.mouse;
         let names = [if toolbar.buttons[0].w >= 72.0 * s { t("Reconnect") } else { "↻" }, t("SFTP"), t("Ports")];
         for ((button, label), enabled) in toolbar.buttons.iter().zip(names).zip(self.ssh_toolbar_buttons(pane)) {
-            let active = enabled && button.contains(mx, my);
+            let active = open && enabled && button.contains(mx, my);
             g.dl.round_rect(*button, if active { theme.button_hover } else { theme.surface }, 4.0 * s);
             g.dl.outline(*button, if active { theme.accent } else { theme.overlay_border }, 4.0 * s, line);
             centered(g, *button, label, ui, if enabled { theme.text } else { theme.text_dim });
@@ -1797,26 +1910,51 @@ impl App {
         self.layers.save(&g.dl, layer, from);
     }
 
-    fn draw_files<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
-        use crate::files::{date, human_size, Prompt, TransferState};
+    fn draw_sliding_files<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
         if self.files.as_ref().is_some_and(|f| !self.panes.contains_key(&f.pane)) {
-            self.files = None;
+            self.close_files();
         }
-        let Some(geo) = self.files_geometry() else {
+        let content = self.chrome.content;
+        let open = self.files.is_some();
+        let animate = self.animations();
+        let width = self.panel_motion.files.update(open.then_some((content.w, content)), animate, now, &mut self.motion);
+        let Some((full, rect)) = self.panel_motion.files.content else {
+            self.panel_motion.closed_files = None;
             self.hover_state.files = Default::default();
             return;
         };
-        let Some(page) = self.files.clone() else { return };
-        let transfers: Vec<_> = self.transfers_of(page.pane).into_iter().cloned().collect();
+        if width <= 0.0 { return; }
+        let Some(page) = self.files.as_ref().or(self.panel_motion.closed_files.as_ref()) else { return };
+        let geo = crate::files::geometry(rect, self.ui(), page, &self.transfers_of(page.pane));
+        let max_scroll = (geo.height - geo.list.h).max(0.0);
+        let scroll = self.list_motion.files.sample(geo.scroll, max_scroll, animate, now, &mut self.motion);
+        let (mx, my) = self.mouse;
+        let hot = if open && geo.list.contains(mx, my) {
+            geo.rows.iter().find(|(_, r)| r.contains(mx, my)).map(|(row, _)| *row)
+        } else {
+            None
+        };
+        self.motion |= self.hover_state.files.aim(hot, animate, now);
+        if let Some(page) = self.files.as_mut() { page.scroll = geo.scroll; }
+        let Some(page) = self.files.as_ref().or(self.panel_motion.closed_files.as_ref()) else { return };
+        let pane = page.pane;
+        let from = g.dl.instances.len();
+        self.draw_files(g, rect, page, &geo, (open, scroll, now));
+        self.draw_file_transfers(g, pane, &geo, open);
+        if width < full {
+            g.dl.shift(from, full - width, 0.0);
+            g.dl.confine(from, Rect::new(rect.right() - width, rect.y, width, rect.h));
+        }
+    }
+
+    fn draw_files<B: TextBackend>(&self, g: &mut Gfx<B>, content: Rect, page: &crate::files::FilesPage, geo: &crate::files::FilesGeometry, (open, scroll, now): (bool, f32, Instant)) {
+        use crate::files::{date, human_size, Prompt};
         let s = self.ui();
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let radius = (6.0 * s).round();
-        let (mx, my) = self.mouse;
-        let hot = geo.rows.iter().find(|(_, r)| geo.list.contains(mx, my) && r.contains(mx, my)).map(|(row, _)| *row);
-        let animate = self.animations();
-        self.motion |= self.hover_state.files.aim(hot, animate, now);
-        g.dl.rect(self.chrome.content, theme.surface);
+        let (mx, my) = if open { self.mouse } else { (-1.0, -1.0) };
+        g.dl.rect(content, theme.surface);
         let title = FontStyle::new(FontFamily::Ui, (17.0 * s).round(), true);
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
         let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
@@ -1852,7 +1990,7 @@ impl App {
             None => (page.path.clone(), t("Loading").to_owned(), false),
         };
         field(g, geo.path, &path_text, &path_hint, editing);
-        if let Some(Prompt::Delete { .. }) = page.prompt {
+        if matches!(page.prompt, Some(Prompt::Delete { .. })) {
             g.dl.outline(geo.path, Color::rgb(0xD9534F), radius, line);
         }
         field(g, geo.filter, &page.query, t("Filter"), page.prompt.is_none());
@@ -1861,16 +1999,17 @@ impl App {
         let name_x = geo.list.x + (40.0 * s).round();
         let date_w = (100.0 * s).round();
         let size_w = (90.0 * s).round();
-        for (row, r) in &geo.rows {
-            if r.bottom() < geo.list.y || r.y > geo.list.bottom() {
+        for (row, hit) in &geo.rows {
+            let r = Rect::new(hit.x, hit.y + geo.scroll.round() - scroll.round(), hit.w, hit.h);
+            if r.bottom() <= geo.list.y || r.y >= geo.list.bottom() {
                 continue;
             }
             if *row == page.selected {
-                g.dl.round_rect(*r, theme.accent.alpha(0x30), radius);
+                g.dl.round_rect(r, theme.accent.alpha(0x30), radius);
             } else if let Some(fill) = hover_fill(&self.hover_state.files, *row, now, theme.button_hover) {
-                g.dl.round_rect(*r, fill, radius);
+                g.dl.round_rect(r, fill, radius);
             }
-            let y = baseline(g, *r, ui);
+            let y = baseline(g, r, ui);
             let icon = Rect::new(r.x + (14.0 * s).round(), r.y + ((r.h - 14.0 * s) / 2.0).round(), (16.0 * s).round(), (14.0 * s).round());
             if page.is_up(*row) {
                 g.dl.round_rect(icon, theme.text_dim.alpha(0x70), (2.0 * s).round());
@@ -1891,19 +2030,19 @@ impl App {
             if !entry.dir {
                 let size = human_size(entry.size);
                 let w = g.measure(&size, small);
-                let sy = baseline(g, *r, small);
+                let sy = baseline(g, r, small);
                 g.text(right - date_w - w - 12.0 * s, sy, &size, small, theme.text_dim, size_w);
             }
             if let Some(mode) = entry.mode {
                 let p = crate::files::permissions(mode);
-                let py = baseline(g, *r, small);
+                let py = baseline(g, r, small);
                 let pw = g.measure(&p, small);
                 g.text(right - date_w - size_w - pw - 24.0 * s, py, &p, small, theme.text_dim, pw + 1.0);
             }
             if let Some(m) = entry.modified {
                 let d = date(m);
                 let w = g.measure(&d, small);
-                let dy = baseline(g, *r, small);
+                let dy = baseline(g, r, small);
                 g.text(right - w, dy, &d, small, theme.text_dim, date_w);
             }
         }
@@ -1920,10 +2059,19 @@ impl App {
         if let Some((text, color)) = status {
             centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (60.0 * s).round()), &text, ui, color);
         }
+    }
 
+    fn draw_file_transfers<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: PaneId, geo: &crate::files::FilesGeometry, open: bool) {
+        use crate::files::{human_size, TransferState};
+        let s = self.ui();
+        let theme = self.theme;
+        let radius = (6.0 * s).round();
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let (mx, my) = self.mouse;
         for (id, r) in &geo.transfers {
-            let Some(t) = transfers.iter().find(|t| t.id == *id) else { continue };
-            if r.contains(mx, my) {
+            let Some(t) = self.transfers.iter().rev().find(|t| t.pane == pane && t.id == *id) else { continue };
+            if open && r.contains(mx, my) {
                 g.dl.round_rect(*r, theme.button_hover, radius);
             }
             let pad = (12.0 * s).round();
@@ -1961,14 +2109,13 @@ impl App {
         g.text(geo.hint.x, hy, hint, small, theme.text_dim, geo.hint.w);
     }
 
-    fn draw_profile_tree_row<B: TextBackend>(&self, g: &mut Gfx<B>, page: &crate::settings::SettingsPage, tree: &crate::profiles_page::TreeRow, rect: Rect, selected: bool) {
+    fn draw_profile_tree_row<B: TextBackend>(&self, g: &mut Gfx<B>, page: &crate::settings::SettingsPage, tree: &crate::profiles_page::TreeRow, rect: Rect, (selected, (mx, my)): (bool, (f32, f32)), controls: &mut crate::control_motion::Frame<'_>) {
         use crate::profiles_page::{kind_label, layout::row_action, TreeKind};
         let theme = self.theme;
         let s = self.ui();
         let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
         let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
         let bold = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), true);
-        let (mx, my) = self.mouse;
         let line = s.round().max(1.0);
         let action = row_action(rect, s);
         let mut x = rect.x + (14.0 * s).round() + tree.indent(s).min(rect.w * 0.25);
@@ -2015,7 +2162,8 @@ impl App {
             }
             TreeKind::Header(header) => {
                 let open = page.searching() || !page.collapsed.contains(header);
-                g.dl.chevron((x + 4.0 * s, rect.y + rect.h * 0.5), 8.0 * s, if open { 90.0 } else { 0.0 }, 1.5 * s, theme.text_dim);
+                let angle = controls.angle(crate::control_motion::Control::Group(false, header.clone()), open);
+                g.dl.chevron((x + 4.0 * s, rect.y + rect.h * 0.5), 8.0 * s, angle, 1.5 * s, theme.text_dim);
                 x += 20.0 * s;
                 let group = header.group_index(&page.groups).map(|i| &page.groups[i]);
                 if let Some(group) = group {
@@ -2107,7 +2255,7 @@ impl App {
         }
     }
 
-    fn draw_profile_editor<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, page: &crate::settings::SettingsPage) {
+    fn draw_profile_editor<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, page: &crate::settings::SettingsPage, controls: &mut crate::control_motion::Frame<'_>) {
         use crate::profiles_page::{kind_label, layout::editor_layout, KINDS};
         let s = self.ui();
         let theme = self.theme;
@@ -2133,21 +2281,20 @@ impl App {
         let y = baseline(g, layout.title, title);
         g.text(layout.title.x, y, &heading, title, theme.text, layout.title.w);
         if let Some(editor) = &page.editor {
-            for (i, tab) in layout.tabs.iter().enumerate() {
-                let active = i == editor.tab;
-                g.dl.round_rect(*tab, if active { theme.accent.alpha(0x30) } else if tab.contains(mx, my) { theme.button_hover } else { theme.surface }, 5.0 * s);
-                if active {
-                    g.dl.outline(*tab, theme.accent, 5.0 * s, line);
-                }
-                centered(g, *tab, &editor.tabs[i].label, ui, if active { theme.text } else { theme.text_dim });
-            }
+            let labels = editor.tabs.iter().map(|tab| tab.label.as_str());
+            self.draw_page_tabs(g, controls, crate::control_motion::Tabs::ProfileEditor, &layout.tabs, (editor.tab, labels), ui);
             for &(i, slot) in &layout.fields {
                 let field = &editor.tabs[editor.tab].fields[i];
                 if let Some(checked) = field.checked() {
                     let r = Rect::new(slot.x, slot.y + 13.0 * s, 19.0 * s, 19.0 * s).snap();
                     g.dl.round_rect(r, if checked { theme.accent.alpha(0x48) } else { theme.surface }, 4.0 * s);
                     g.dl.outline(r, if i == editor.focus || checked { theme.accent } else { theme.overlay_border }, 4.0 * s, line);
-                    if checked { centered(g, r, "✓", ui, theme.text); }
+                    let progress = controls.check(editor.tab, i, checked);
+                    if progress > 0.0 {
+                        let from = g.dl.instances.len();
+                        centered(g, r, "✓", ui, theme.text);
+                        g.dl.grow(from, progress, (r.x + r.w * 0.5, r.y + r.h * 0.5), 0.6);
+                    }
                     let label = Rect::new(r.right() + 9.0 * s, r.y, (slot.right() - r.right() - 9.0 * s).max(0.0), r.h);
                     let y = baseline(g, label, ui);
                     g.text(label.x, y, &field.label, ui, theme.text, label.w);
@@ -2487,7 +2634,33 @@ impl App {
         }
     }
 
-    fn draw_extensions_page<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, page: &crate::settings::SettingsPage, ui: FontStyle, small: FontStyle) {
+    fn draw_page_tabs<'a, B: TextBackend>(&self, g: &mut Gfx<B>, controls: &mut crate::control_motion::Frame<'_>, bar: crate::control_motion::Tabs, tabs: &[Rect], (selected, labels): (usize, impl IntoIterator<Item = &'a str>), font: FontStyle) {
+        use crate::control_motion::Tabs;
+        let Some(&target) = tabs.get(selected) else { return };
+        let indicator = controls.indicator(bar, target);
+        let s = self.ui();
+        let radius = if bar == Tabs::ProfileEditor { 5.0 * s } else { (6.0 * s).round() };
+        let line = s.round().max(1.0);
+        let theme = self.theme;
+        let (mx, my) = self.mouse;
+        for &tab in tabs {
+            if tab == indicator { continue; }
+            let base = if bar == Tabs::ProfileEditor { theme.surface } else { theme.overlay };
+            g.dl.round_rect(tab, if tab.contains(mx, my) { theme.button_hover } else { base }, radius);
+            if matches!(bar, Tabs::Schemes | Tabs::Extensions) {
+                g.dl.outline(tab, theme.overlay_border, radius, line);
+            }
+        }
+        g.dl.round_rect(indicator, theme.accent.alpha(0x30), radius);
+        g.dl.outline(indicator, theme.accent, radius, line);
+        for (i, (&tab, label)) in tabs.iter().zip(labels).enumerate() {
+            let ink = if i != selected && bar == Tabs::ProfileEditor { theme.text_dim } else { theme.text };
+            let tab = if bar == Tabs::Extensions { tab.inset(5.0 * s, 0.0) } else { tab };
+            centered(g, tab, label, font, ink);
+        }
+    }
+
+    fn draw_extensions_page<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, page: &crate::settings::SettingsPage, ui: FontStyle, small: FontStyle, controls: &mut crate::control_motion::Frame<'_>) {
         use crate::extensions_page::Target;
         let state = &page.extensions;
         let rows = self.extension_rows(page);
@@ -2498,23 +2671,25 @@ impl App {
         let radius = (6.0 * s).round();
         let border = s.round().max(1.0);
         let error = Color::rgb(if theme.dark { 0xFF9490 } else { 0xA52320 });
-        let button = |g: &mut Gfx<B>, rect: Rect, label: &str, target: Target, enabled: bool, active: bool| {
-            let fill = if active { theme.accent.alpha(0x30) } else if enabled && rect.contains(mx, my) { theme.button_hover } else { theme.overlay };
-            let focused = state.focus == Some(target) || active;
+        let button = |g: &mut Gfx<B>, rect: Rect, label: &str, target: Target, enabled: bool| {
+            let fill = if enabled && rect.contains(mx, my) { theme.button_hover } else { theme.overlay };
+            let focused = state.focus == Some(target);
             g.dl.round_rect(rect, fill, radius);
             g.dl.outline(rect, if focused { theme.accent } else { theme.overlay_border }, radius, border);
             let inner = rect.inset(5.0 * s, 0.0);
             centered(g, inner, label, ui, if enabled { theme.text } else { theme.text_dim });
         };
         g.dl.set_clip(Some(area));
-        button(g, layout.tabs[0], t("Installed"), Target::Tab(false), true, !state.available);
-        button(g, layout.tabs[1], t("Available"), Target::Tab(true), true, state.available);
+        self.draw_page_tabs(g, controls, crate::control_motion::Tabs::Extensions, &layout.tabs, (usize::from(state.available), [t("Installed"), t("Available")]), ui);
+        if let Some(Target::Tab(tab)) = state.focus.filter(|target| *target != Target::Tab(state.available)) {
+            g.dl.outline(layout.tabs[usize::from(tab)], theme.accent, radius, border);
+        }
         let field_label = if state.available { t("Extension index URL") } else { t("ZIP archive path") };
         self.draw_editor_field(g, layout.field, (field_label, &state.input), ProfileFieldControl::Text, state.editing);
         let submit_label = if state.available { t("Save") } else { t("Install from file…") };
-        button(g, layout.submit, submit_label, Target::Submit, !state.busy && (state.available || !state.input.trim().is_empty()), false);
+        button(g, layout.submit, submit_label, Target::Submit, !state.busy && (state.available || !state.input.trim().is_empty()));
         if let Some(rect) = layout.root {
-            button(g, rect, t("Open extensions folder"), Target::Root, !state.busy, false);
+            button(g, rect, t("Open extensions folder"), Target::Root, !state.busy);
         }
         if let Some(text) = state.feedback.as_deref().or_else(|| state.busy.then(|| t("Please wait…"))) {
             let y = baseline(g, layout.feedback, small);
@@ -2542,7 +2717,7 @@ impl App {
                 g.text(line.x, y, text, font, ink, line.w);
             }
             for (j, (rect, control)) in buttons.iter().zip(row.buttons.iter()).enumerate() {
-                button(g, *rect, &control.label, Target::Row(i, j), control.enabled, false);
+                button(g, *rect, &control.label, Target::Row(i, j), control.enabled);
             }
         }
         if let Some(rect) = layout.scrollbar {
@@ -2551,7 +2726,8 @@ impl App {
         g.dl.set_clip(None);
     }
 
-    fn draw_scheme_bar<B: TextBackend>(&self, g: &mut Gfx<B>, page: &crate::settings::SettingsPage, bar: crate::settings_colors::SchemeBar, ui: FontStyle) {
+    fn draw_scheme_bar<B: TextBackend>(&self, g: &mut Gfx<B>, page: &crate::settings::SettingsPage, bar: crate::settings_colors::SchemeBar, ui: FontStyle, controls: &mut crate::control_motion::Frame<'_>) {
+        use crate::settings_colors::SchemeTab;
         let s = self.ui();
         let theme = self.theme;
         let radius = (6.0 * s).round();
@@ -2560,13 +2736,7 @@ impl App {
         let name = page.scheme_tab.name(&self.config.appearance);
         let scheme = page.scheme_item(name).and_then(|item| page.scheme_at(item));
         let pending = page.deleting_scheme.as_deref();
-        for (tab, rect) in crate::settings_colors::SchemeTab::ALL.into_iter().zip(bar.tabs) {
-            let active = tab == page.scheme_tab;
-            let fill = if active { theme.accent.alpha(0x30) } else if rect.contains(mx, my) { theme.button_hover } else { theme.overlay };
-            g.dl.round_rect(rect, fill, radius);
-            g.dl.outline(rect, if active { theme.accent } else { theme.overlay_border }, radius, line);
-            centered(g, rect, tab.label(), ui, theme.text);
-        }
+        self.draw_page_tabs(g, controls, crate::control_motion::Tabs::Schemes, &bar.tabs, (usize::from(page.scheme_tab == SchemeTab::Light), SchemeTab::ALL.map(SchemeTab::label)), ui);
         let mut current = bar.current;
         let caption = if let Some(name) = pending {
             tf("Delete the color scheme {name}?", &[("name", name)])
@@ -2634,7 +2804,7 @@ impl App {
         }
     }
 
-    fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
+    fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant, controls: &mut crate::control_motion::Frame<'_>) {
         use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
         let s = self.ui();
         let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
@@ -2679,7 +2849,10 @@ impl App {
             }
         }
         let Some(geo) = self.settings_geometry() else { return };
+        let animate = self.animations();
+        self.settings.as_mut().unwrap().scroll = geo.scroll;
         let page = self.settings.as_ref().unwrap();
+        let scroll = self.list_motion.settings.sample(geo.scroll, (geo.height - geo.list.h).max(0.0), animate && !page.editing(), now, &mut self.motion);
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let (mx, my) = self.mouse;
@@ -2723,7 +2896,7 @@ impl App {
             g.text(inner.x, y, t(crate::settings::PAGES[k]), ui, if current { theme.text } else { theme.text_dim }, inner.w);
         }
         if let Some(bar) = geo.scheme_bar {
-            self.draw_scheme_bar(g, page, bar, ui);
+            self.draw_scheme_bar(g, page, bar, ui, controls);
         }
         if let Some(sample) = geo.font_sample {
             self.draw_font_sample(g, sample, small);
@@ -2737,17 +2910,11 @@ impl App {
             self.layers.pop(&mut g.dl, layer, from, button, 0, TOAST_IN);
         }
         if page.extensions_page() {
-            self.draw_extensions_page(g, geo.list, page, ui, small);
+            self.draw_extensions_page(g, geo.list, page, ui, small, controls);
             return;
         }
         if let Some(tabs) = geo.profile_tabs {
-            for (i, (rect, label)) in tabs.into_iter().zip([t("Profiles"), t("Advanced")]).enumerate() {
-                let active = (i == 1) == page.profiles_advanced;
-                let fill = if active { theme.accent.alpha(0x30) } else if rect.contains(mx, my) { theme.button_hover } else { theme.overlay };
-                g.dl.round_rect(rect, fill, radius);
-                if active { g.dl.outline(rect, theme.accent, radius, line); }
-                centered(g, rect, label, ui, theme.text);
-            }
+            self.draw_page_tabs(g, controls, crate::control_motion::Tabs::Profiles, &tabs, (usize::from(page.profiles_advanced), [t("Profiles"), t("Advanced")]), ui);
         }
         if self.config_editor_layout().is_some() {
             self.draw_config_editor(g, geo.list);
@@ -2766,13 +2933,27 @@ impl App {
         self.motion |= self.hover_state.settings.aim(hot, animate, now);
         g.dl.set_clip(Some(geo.list));
         let current_scheme = page.scheme_item(if page.colors_page() { page.scheme_tab.name(&self.config.appearance) } else { self.current_scheme() });
+        let offset = geo.scroll.round() - scroll.round();
+        let (mx, my) = if geo.list.contains(mx, my) { (mx, my + offset) } else { (-1.0, -1.0) };
         for row in &geo.rows {
+            let row = crate::settings::Row {
+                rect: Rect::new(row.rect.x, row.rect.y + offset, row.rect.w, row.rect.h),
+                control: Rect::new(row.control.x, row.control.y + offset, row.control.w, row.control.h),
+                ..*row
+            };
             if row.rect.bottom() < geo.list.y || row.rect.y > geo.list.bottom() {
                 continue;
             }
             match row.kind {
                 RowKind::Section(name) => {
-                    let r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), row.rect.w, (28.0 * s).round());
+                    let mut r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), row.rect.w, (28.0 * s).round());
+                    if !page.searching() {
+                        let angle = controls.angle(crate::control_motion::Control::Section(name), page.section_open(name));
+                        let ink = if row.rect.contains(mx, my) { theme.accent } else { theme.text_dim };
+                        g.dl.chevron((r.x + 4.0 * s, r.y + r.h * 0.5), 8.0 * s, angle, 1.5 * s, ink);
+                        r.x += (18.0 * s).round();
+                        r.w = (row.rect.right() - r.x).max(0.0);
+                    }
                     let y = baseline(g, r, section);
                     g.text(r.x, y, t(name), section, theme.accent, r.w);
                     if name == crate::settings::SYSTEM && !page.searching() {
@@ -2816,7 +2997,7 @@ impl App {
                     }
                     let item = page.shown[n];
                     if let Some(sync_row) = page.sync_row(item) {
-                        self.draw_sync_row(g, page, *row, sync_row, ui, small);
+                        self.draw_sync_row(g, page, row, sync_row, ui, small);
                         continue;
                     }
                     if let Some(vault_row) = page.vault_at(item) {
@@ -2873,7 +3054,7 @@ impl App {
                         continue;
                     }
                     if let Some(tree) = page.tree_at(item) {
-                        self.draw_profile_tree_row(g, page, tree, row.rect, selected);
+                        self.draw_profile_tree_row(g, page, tree, row.rect, (selected, (mx, my)), controls);
                         continue;
                     }
                     let setting = &SETTINGS[page.shown[n]];
@@ -2930,11 +3111,11 @@ impl App {
                             g.dl.outline(c, theme.overlay_border, radius, line);
                         }
                         Control::Toggle => {
-                            let on = self.setting_on(setting);
-                            g.dl.round_rect(c, if on { theme.accent } else { theme.overlay_border }, c.h / 2.0);
+                            let progress = controls.switch(setting.key, self.setting_on(setting));
+                            g.dl.round_rect(c, crate::control_motion::blend(theme.overlay_border, theme.accent, progress), c.h / 2.0);
                             let knob = (c.h - 6.0 * s).round();
-                            let kx = if on { c.right() - knob - 3.0 * s } else { c.x + 3.0 * s };
-                            g.dl.circle(Rect::new(kx.round(), c.y + ((c.h - knob) / 2.0).round(), knob, knob), if on { theme.on_accent } else { theme.text_dim });
+                            let kx = crate::control_motion::knob_x(c, knob, 3.0 * s, progress);
+                            g.dl.circle(Rect::new(kx, c.y + ((c.h - knob) / 2.0).round(), knob, knob), crate::control_motion::blend(theme.text_dim, theme.on_accent, progress));
                         }
                         Control::Run(action) => {
                             g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
@@ -2952,7 +3133,9 @@ impl App {
                         Control::Slider { min, max, .. } if !(selected && page.editing()) => {
                             let track = crate::settings::slider_track(c, s);
                             let value = self.slider_value(setting, min).clamp(min, max);
-                            let fill = (track.w * ((value - min) / (max - min)) as f32).round();
+                            let dragging = matches!(self.drag, Drag::SettingsSlider { item, .. } if item == page.shown[n]);
+                            let fraction = controls.slider(setting.key, ((value - min) / (max - min)) as f32, dragging);
+                            let fill = (track.w * fraction).round();
                             g.dl.round_rect(track, theme.overlay_border, track.h / 2.0);
                             g.dl.round_rect(Rect::new(track.x, track.y, fill, track.h), theme.accent, track.h / 2.0);
                             let knob = (12.0 * s).round();
@@ -3013,6 +3196,7 @@ impl App {
                 }
             }
         }
+        let (mx, my) = self.mouse;
         for &(index, r) in &geo.suggestions {
             g.dl.rect(r, theme.surface);
             g.dl.rect(r, if index == page.font_index { theme.accent.alpha(0x42) } else if r.contains(mx, my) { theme.button_hover } else { theme.overlay });
@@ -3040,14 +3224,14 @@ impl App {
             return;
         }
         if page.editor.is_some() || page.group_editor.is_some() {
-            self.draw_profile_editor(g, geo.page, page);
+            self.draw_profile_editor(g, geo.page, page, controls);
             return;
         }
         if geo.height > geo.list.h {
             let track = geo.list;
             let thumb_h = (track.h * track.h / geo.height).max(24.0 * s);
             let max_scroll = geo.height - track.h;
-            let thumb_y = track.y + (track.h - thumb_h) * (page.scroll / max_scroll).clamp(0.0, 1.0);
+            let thumb_y = track.y + (track.h - thumb_h) * (scroll / max_scroll).clamp(0.0, 1.0);
             let w = (4.0 * s).round();
             g.dl.round_rect(Rect::new(track.right() + (8.0 * s).round(), thumb_y.round(), w, thumb_h.round()), theme.overlay_border, w / 2.0);
         }
@@ -3155,16 +3339,25 @@ impl App {
         let layer = Layer::Overlay;
         let overlay = self.overlay.clone();
         let from = self.layers.start(&mut g.dl, layer, overlay.as_ref().map(|overlay| overlay.opened_at), POP);
-        let Some(overlay) = overlay else {
+        let Some(o) = overlay else {
             self.hover_state.overlay = Default::default();
             return;
         };
-        let geo = overlay_geometry(self, &overlay);
-        let (mx, my) = self.mouse;
-        let hot = geo.items.iter().find(|(_, rect)| rect.contains(mx, my)).map(|(i, _)| overlay.shown[*i].0);
         let animate = self.animations();
+        let (geo, hover) = if o.kind.scrolls_smoothly() {
+            let layout = crate::overlay_list::OverlayList::new(self.chrome.content, self.ui(), &o);
+            let target = layout.target(&o);
+            let scroll = self.list_motion.overlay.sample(target, layout.max, animate && o.scroll_offset.is_some(), now, &mut self.motion);
+            let hover = layout.hit_row(target, self.mouse);
+            (layout.geometry(scroll), hover)
+        } else {
+            let geo = overlay_geometry(self, &o);
+            let hover = overlay_row_at(&geo, self.mouse).map(|(i, _)| i);
+            (geo, hover)
+        };
+        let hot = hover.map(|i| o.shown[i].0);
         self.motion |= self.hover_state.overlay.aim(hot, animate, now);
-        self.draw_overlay_content(g, &overlay, &geo, now);
+        self.draw_overlay_content(g, &o, &geo, now);
         self.layers.pop(&mut g.dl, layer, from, geo.frame, 0, POP);
     }
 
@@ -3197,6 +3390,7 @@ impl App {
             centered(g, r, message, ui, theme.text_dim);
             return;
         }
+        g.dl.set_clip(Some(geo.list));
         let bold = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), true);
         for (title, r) in &geo.headers {
             let y = baseline(g, *r, bold);
@@ -3268,6 +3462,7 @@ impl App {
                 }
             }
         }
+        g.dl.set_clip(None);
     }
 }
 

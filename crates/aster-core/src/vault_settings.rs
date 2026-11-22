@@ -535,7 +535,7 @@ impl App {
                     dialog.revealed = !dialog.revealed;
                 }
             }
-            Event::Preedit(_) | Event::Wheel { .. } | Event::DroppedFiles(_) | Event::Pasted(_)
+            Event::Preedit(_) | Event::Wheel { .. } | Event::PreciseWheel { .. } | Event::DroppedFiles(_) | Event::Pasted(_)
             | Event::MouseDown { .. } | Event::MouseUp { .. } | Event::Key { .. } => {}
             _ => return false,
         }

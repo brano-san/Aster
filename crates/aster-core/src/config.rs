@@ -14,6 +14,14 @@ pub enum CursorStyle {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
+pub enum CursorBlinkStyle {
+    #[default]
+    Step,
+    Smooth,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum RightClick {
     Off,
     Menu,
@@ -177,6 +185,7 @@ pub struct Terminal {
     pub scrollback_lines: usize,
     pub cursor: CursorStyle,
     pub cursor_blink: bool,
+    pub cursor_blink_style: CursorBlinkStyle,
     pub alt_is_meta: bool,
     pub copy_on_select: bool,
     pub copy_as_html: bool,
@@ -223,6 +232,7 @@ impl Default for Terminal {
             scrollback_lines: 25_000,
             cursor: CursorStyle::Block,
             cursor_blink: true,
+            cursor_blink_style: CursorBlinkStyle::Step,
             alt_is_meta: true,
             copy_on_select: true,
             copy_as_html: false,

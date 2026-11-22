@@ -122,6 +122,36 @@ fn opacity_uses_the_pointer_position_and_keyboard_steps() {
 }
 
 #[test]
+fn settings_section_can_fold_and_still_appears_in_search() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    a.run(Action::Settings);
+    a.show_settings_page(PAGES.iter().position(|&page| page == WINDOW).unwrap());
+    let geo = a.settings_geometry().unwrap();
+    let heading = geo.rows.iter().find(|row| row.kind == RowKind::Section(WINDOW)).unwrap().rect;
+    a.settings_click(heading.x + 15.0, heading.y + 18.0);
+    let folded = a.settings_geometry().unwrap();
+    assert_eq!(folded.rows.len(), 1);
+    assert_eq!(folded.rows[0].kind, RowKind::Section(WINDOW));
+    key(&mut a, Key::Enter);
+    assert!(a.settings_geometry().unwrap().rows.len() > 1);
+    a.settings_click(heading.x + 15.0, heading.y + 18.0);
+    typed(&mut a, "opacity");
+    assert!(a.settings_geometry().unwrap().rows.iter().any(|row| matches!(row.kind, RowKind::Item(_))));
+}
+
+#[test]
+fn settings_geometry_clamps_saved_scroll_to_the_new_viewport() {
+    let mut page = SettingsPage::new();
+    page.show_page(PAGES.iter().position(|&page| page == WINDOW).unwrap());
+    page.scroll = 2000.0;
+    let small = geometry(Rect::new(0.0, 0.0, 1000.0, 450.0), 1.0, &page);
+    let large = geometry(Rect::new(0.0, 0.0, 1000.0, 1000.0), 1.0, &page);
+    assert!(large.scroll < small.scroll);
+    assert_eq!(large.rows.last().unwrap().rect.bottom(), large.list.bottom());
+}
+
+#[test]
 fn restart_button_tracks_startup_changes_and_uses_the_restart_effect() {
     let mut a = app();
     a.chrome = a.tab_chrome();

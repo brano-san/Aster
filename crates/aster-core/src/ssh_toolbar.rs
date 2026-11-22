@@ -8,6 +8,7 @@ use aster_proto::ssh_forward::{Command, Forward, ForwardStatus};
 
 const ADD_FORWARD: &str = "add";
 
+#[derive(Clone, Copy)]
 pub(crate) struct Toolbar {
     pub buttons: [Rect; 3],
 }

@@ -194,6 +194,7 @@ pub struct FilesGeometry {
     pub list: Rect,
     pub rows: Vec<(usize, Rect)>,
     pub height: f32,
+    pub(crate) scroll: f32,
     pub transfers: Vec<(u64, Rect)>,
     pub hint: Rect,
 }
@@ -219,8 +220,10 @@ pub fn geometry(content: Rect, s: f32, page: &FilesPage, transfers: &[&Transfer]
     let list_top = bar_y + bar_h + (10.0 * s).round();
     let list = Rect::new(x, list_top, width, (transfers_top - list_top - 6.0 * s).max(0.0));
     let rh = (ROW_H * s).round();
-    let rows = (0..page.rows()).map(|r| (r, Rect::new(x, list.y + r as f32 * rh - page.scroll, width, rh))).collect();
-    FilesGeometry { title, close, path, filter, list, rows, height: page.rows() as f32 * rh, transfers: transfer_rects, hint }
+    let height = page.rows() as f32 * rh;
+    let scroll = page.scroll.clamp(0.0, (height - list.h).max(0.0));
+    let rows = (0..page.rows()).map(|r| (r, Rect::new(x, list.y + r as f32 * rh - scroll.round(), width, rh))).collect();
+    FilesGeometry { title, close, path, filter, list, rows, height, scroll, transfers: transfer_rects, hint }
 }
 
 impl App {
@@ -255,13 +258,17 @@ impl App {
             page.path = last.clone();
         }
         let path = page.path.clone();
+        self.panel_motion.closed_files = None;
+        self.list_motion.files = Default::default();
         self.files = Some(page);
         self.request(pane, FileRequest::List(path));
         self.dirty = true;
     }
 
     pub(crate) fn close_files(&mut self) {
-        self.files = None;
+        if let Some(page) = self.files.take() {
+            self.panel_motion.closed_files = Some(page);
+        }
         self.dirty = true;
     }
 
@@ -345,6 +352,7 @@ impl App {
                 page.error = None;
                 page.query.clear();
                 page.refilter();
+                self.list_motion.files = Default::default();
                 if let Some(name) = keep {
                     if let Some(row) = (0..page.rows()).find(|&r| page.entry(r).is_some_and(|e| e.name == name)) {
                         page.selected = row;
@@ -420,6 +428,7 @@ impl App {
         let Some(geo) = self.files_geometry() else { return };
         let rh = (ROW_H * self.ui()).round();
         let Some(page) = self.files.as_mut() else { return };
+        page.scroll = geo.scroll;
         let top = page.selected as f32 * rh;
         if top < page.scroll {
             page.scroll = top;
@@ -481,10 +490,12 @@ impl App {
             }
             return;
         }
+        let previous_scroll = page.scroll;
         match key {
             Key::Escape if !page.query.is_empty() => {
                 page.query.clear();
                 page.refilter();
+                self.list_motion.files = Default::default();
             }
             Key::Escape => return self.close_files(),
             Key::Up => page.step(-1),
@@ -500,6 +511,7 @@ impl App {
             Key::Backspace if !page.query.is_empty() => {
                 page.query.pop();
                 page.refilter();
+                self.list_motion.files = Default::default();
             }
             Key::Backspace => {
                 let up = parent(&page.path);
@@ -549,6 +561,12 @@ impl App {
             _ => {}
         }
         self.reveal_file();
+        if crate::list_motion::scroll_key(key) {
+            let (animate, now) = (self.animations(), self.clock());
+            if let Some(page) = self.files.as_ref() {
+                self.list_motion.files.retarget(previous_scroll, page.scroll, animate, now);
+            }
+        }
     }
 
     pub(crate) fn files_text(&mut self, text: &str) {
@@ -563,6 +581,7 @@ impl App {
             None => {
                 page.query.push_str(&clean);
                 page.refilter();
+                self.list_motion.files = Default::default();
             }
         }
         self.dirty = true;
@@ -602,11 +621,12 @@ impl App {
         }
     }
 
-    pub(crate) fn files_wheel(&mut self, dy: f32) {
+    pub(crate) fn files_wheel(&mut self, dy: f32, pixels: Option<f32>) {
         let Some(geo) = self.files_geometry() else { return };
         let rh = (ROW_H * self.ui()).round();
+        let (animate, now) = (self.animations(), self.clock());
         let Some(page) = self.files.as_mut() else { return };
-        page.scroll = (page.scroll - dy * 3.0 * rh).clamp(0.0, (geo.height - geo.list.h).max(0.0));
+        page.scroll = self.list_motion.files.wheel(geo.scroll, (geo.height - geo.list.h).max(0.0), dy * 3.0 * rh, pixels, animate, now);
         self.dirty = true;
     }
 

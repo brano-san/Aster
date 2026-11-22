@@ -339,12 +339,12 @@ fn turning_animations_off_clears_transients_and_stops_the_cursor_timer() {
     let (mut a, mut gfx) = app();
     a.open_default_tab();
     let pane = a.focused_pane().unwrap();
-    a.blink_on = false;
+    a.blink.tick(a.blink.deadline());
     a.bell = Some((pane, Instant::now()));
     a.tab_toast = Some(crate::notices::Toast::new(String::new(), Instant::now(), TOAST, true));
     a.set_config(Config::parse("[appearance]\nanimations = false").unwrap());
     a.frame(&mut gfx, false);
-    assert!(a.blink_on);
+    assert_eq!(a.cursor_blink(a.clock()), (1.0, false));
     assert!(a.tab_toast.is_none() && a.bell.is_none());
     assert!(!a.take_effects().iter().any(|effect| matches!(effect, Effect::Timer(_))));
     a.terminal(pane).unwrap().lock().feed(b"\x07");
@@ -385,7 +385,7 @@ fn system_preference_clears_animations_and_combines_with_config() {
     a.terminal(a.focused_pane().unwrap()).unwrap().lock().feed(b"\x07");
     a.woken();
     assert!(a.bell.is_some());
-    a.blink_on = false;
+    a.blink.tick(a.blink.deadline());
     a.motion = true;
     a.take_effects();
 
@@ -393,7 +393,8 @@ fn system_preference_clears_animations_and_combines_with_config() {
     assert!(!a.animations());
     assert!(!a.cursor_blink_enabled());
     assert!(a.bell.is_none() && a.tab_toast.is_none());
-    assert!(a.blink_on && !a.motion);
+    assert_eq!(a.cursor_blink(a.clock()), (1.0, false));
+    assert!(!a.motion);
     assert!(a.needs_redraw());
     a.activate(1);
     a.on_event(Event::Modifiers(Mods::NONE));
