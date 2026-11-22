@@ -55,7 +55,8 @@ fn window_and_appearance_list_their_own_settings() {
         assert!(keys(APPEARANCE).contains(&key));
     }
     assert_eq!(&PAGES[..4], [SYSTEM, APPEARANCE, PROFILES, TERMINAL]);
-    assert!(PAGES[4..PAGES.len() - 1].iter().map(|name| name.to_ascii_lowercase()).is_sorted());
+    assert!(PAGES[4..PAGES.len() - 1].iter().filter(|&&name| name != EXTENSIONS).map(|name| name.to_ascii_lowercase()).is_sorted());
+    assert!(PAGES.windows(2).any(|pages| pages == [SHORTCUTS, EXTENSIONS]));
     assert_eq!(PAGES.last(), Some(&CONFIG_FILE));
 }
 
@@ -346,7 +347,7 @@ fn the_query_filters_by_every_word_across_label_hint_and_section() {
         }
     }
     let tab_settings: Vec<_> = SETTINGS.iter().enumerate().filter(|(i, _)| !listed.contains(i)).map(|(_, setting)| setting.key).collect();
-    assert_eq!(tab_settings, ["appearance.color-scheme", "appearance.light-color-scheme"]);
+    assert_eq!(tab_settings, ["extensions.index-url", "appearance.color-scheme", "appearance.light-color-scheme"]);
     for key in tab_settings {
         page.show_page(0);
         page.query = key.into();
@@ -869,7 +870,7 @@ fn color_scheme_page_lists_settings_then_custom_and_builtin_palettes() {
     assert_eq!(controls, ["appearance.color-scheme-mode", "colors.generate-256", "colors.harmonious"]);
     let rows: Vec<_> = page.shown.iter().filter_map(|&i| page.scheme_at(i)).collect();
     assert_eq!(rows.len(), a.scheme_names().len());
-    assert_eq!(*rows[0], SchemeRow { name: "Sample".into(), custom: true, foreground: 0x123456, background: 0xabcdef, colors });
+    assert_eq!(*rows[0], SchemeRow { name: "Sample".into(), custom: true, source: None, foreground: 0x123456, background: 0xabcdef, colors });
     assert!(rows[1..].iter().all(|s| !s.custom));
     assert!(rows[1..].windows(2).all(|pair| pair[0].name.to_lowercase() <= pair[1].name.to_lowercase()));
 }

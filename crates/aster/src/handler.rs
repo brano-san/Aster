@@ -36,6 +36,7 @@ struct State<P: Platform> {
 }
 
 enum StoreEvent {
+    Extensions(crate::extensions::Event),
     Launcher(Option<WindowId>, std::io::Result<bool>),
     BackgroundImage { window: WindowId, revision: u64, bitmap: Option<aster_core::background::Bitmap> },
     FontFamilies { monospace: Vec<String>, all: Vec<String> },
@@ -87,6 +88,8 @@ struct AccessPrompt {
 }
 
 pub struct Handler<P: Platform> {
+    extensions: crate::extensions::Host,
+    installed_extensions: Arc<aster_core::extensions::Snapshot>,
     desktop: crate::desktop::Worker,
     launcher_installed: Option<bool>,
     font_families: Option<(Vec<String>, Vec<String>)>,
@@ -236,7 +239,7 @@ fn load_session<P: Platform>() -> SessionState {
 }
 
 impl<P: Platform> Handler<P> {
-    pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker, encrypted: bool) -> std::io::Result<(Self, VaultWorker)> {
+    pub fn new(config: Config, waker: <P::Windows as WindowSystem>::Waker, encrypted: bool) -> std::io::Result<(Self, VaultWorker, crate::extensions::Worker)> {
         let mut profiles = P::shells();
         let ssh = P::ssh_command().or_else(|| (config.ssh.client == SshClient::Native).then(|| "ssh".to_owned()));
         if let Some(cmd) = &ssh {
@@ -290,12 +293,21 @@ impl<P: Platform> Handler<P> {
             let events = store_events.clone();
             shell_integration.shortcut(None, move |result| events.post(StoreEvent::StartMenuShortcut(None, result)));
         }
-        let handler = Self { desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false, restart_preparing: false };
+        let extension_events = store_events.clone();
+        let root = config_path.as_deref().and_then(std::path::Path::parent).map(|path| path.join("extensions"));
+        let (extensions, extension_worker) = crate::extensions::Host::start::<P>(root, move |event| extension_events.post(StoreEvent::Extensions(event)))?;
+        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false, restart_preparing: false };
         if !encrypted {
+            handler.scan_extensions(&handler.config);
             handler.update_launcher(&handler.config, None);
             handler.apply_autostart(&handler.config);
         }
-        Ok((handler, worker))
+        Ok((handler, worker, extension_worker))
+    }
+
+    fn scan_extensions(&self, config: &Config) {
+        let language = aster_core::i18n::resolve(&config.appearance.language, &P::ui_language());
+        self.extensions.scan(config.extensions.disabled.clone(), language.into());
     }
 
     pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
@@ -525,6 +537,9 @@ impl<P: Platform> Handler<P> {
             }
         }
         let starting = self.config_startup == ConfigStartup::Prompt;
+        if starting || config.extensions.disabled != self.config.extensions.disabled {
+            self.scan_extensions(&config);
+        }
         let explorer = config.system.explorer_menu;
         if (starting && (explorer || cfg!(target_os = "linux"))) || explorer != self.config.system.explorer_menu || (explorer && config.appearance.language != self.config.appearance.language) {
             self.apply_explorer_menu(explorer);
@@ -1012,6 +1027,7 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::ImeArea(r) => window.set_ime_area(r),
+            Effect::Extension(request) => self.extensions.send(id, request),
             Effect::Update(request) => {
                 self.update_window = Some(id);
                 self.updates.submit(request);
@@ -1166,6 +1182,24 @@ impl<P: Platform> Handler<P> {
     fn drain_store(&mut self) {
         while let Ok(event) = self.store_rx.try_recv() {
             match event {
+                StoreEvent::Extensions(crate::extensions::Event::Snapshot(snapshot)) => {
+                    for state in self.windows.values_mut() {
+                        state.app.set_extensions(snapshot.clone());
+                    }
+                    self.installed_extensions = snapshot;
+                }
+                StoreEvent::Extensions(crate::extensions::Event::Action { extension, action }) => {
+                    if !self.config.extensions.disabled.contains(&extension) {
+                        if let Some(target) = self.request_target().and_then(|id| self.windows.get_mut(&id)) {
+                            target.app.extension_action(action);
+                        }
+                    }
+                }
+                StoreEvent::Extensions(crate::extensions::Event::Reply(window, reply)) => {
+                    if let Some(state) = self.windows.get_mut(&window) {
+                        state.app.extension_reply(reply);
+                    }
+                }
                 StoreEvent::Launcher(window, result) => match result {
                     Ok(installed) => {
                         self.launcher_installed = Some(installed);
@@ -1526,6 +1560,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let flow = crate::session::OutputFlow::new(move || waker.wake());
         text.set_font_waker(flow.wake.clone());
         let mut app = App::new(self.config.clone(), self.profiles.clone(), window.is_dark_mode(), home, flow.wake.clone());
+        app.set_extensions(self.installed_extensions.clone());
         app.set_ssh_algorithm_catalog(aster_ssh::algorithm_catalog());
         app.set_restart_baseline(self.restart_baseline.clone());
         if let Some((monospace, all)) = &self.font_families {

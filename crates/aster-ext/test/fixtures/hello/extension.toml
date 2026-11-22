@@ -1,0 +1,8 @@
+id = "hello"
+name = "Hello"
+version = "1.0.0"
+author = "Aster"
+description = "Adds the Hello Night color scheme"
+
+[[schemes]]
+file = "schemes/night.toml"

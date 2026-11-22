@@ -1417,7 +1417,11 @@ impl App {
             let hint_w = if hint.is_empty() { 0.0 } else { g.measure(&hint, small) };
             let pad = (12.0 * s).round();
             let y = baseline(g, *r, ui);
-            g.text(r.x + pad, y, t(label), ui, ink, (r.w - hint_w - 3.0 * pad).max(0.0));
+            let label = match label {
+                std::borrow::Cow::Borrowed(label) => t(label),
+                std::borrow::Cow::Owned(label) => label,
+            };
+            g.text(r.x + pad, y, label, ui, ink, (r.w - hint_w - 3.0 * pad).max(0.0));
             if hint_w > 0.0 {
                 let hy = baseline(g, *r, small);
                 g.text(r.right() - pad - hint_w, hy, &hint, small, theme.text_dim, hint_w + 1.0);
@@ -2083,6 +2087,70 @@ impl App {
         }
     }
 
+    fn draw_extensions_page<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, page: &crate::settings::SettingsPage, ui: FontStyle, small: FontStyle) {
+        use crate::extensions_page::Target;
+        let state = &page.extensions;
+        let rows = self.extension_rows(page);
+        let layout = state.layout(area, self.ui(), &rows);
+        let s = self.ui();
+        let theme = self.theme;
+        let (mx, my) = self.mouse;
+        let radius = (6.0 * s).round();
+        let border = s.round().max(1.0);
+        let error = Color::rgb(if theme.dark { 0xFF9490 } else { 0xA52320 });
+        let button = |g: &mut Gfx<B>, rect: Rect, label: &str, target: Target, enabled: bool, active: bool| {
+            let fill = if active { theme.accent.alpha(0x30) } else if enabled && rect.contains(mx, my) { theme.button_hover } else { theme.overlay };
+            let focused = state.focus == Some(target) || active;
+            g.dl.round_rect(rect, fill, radius);
+            g.dl.outline(rect, if focused { theme.accent } else { theme.overlay_border }, radius, border);
+            let inner = rect.inset(5.0 * s, 0.0);
+            centered(g, inner, label, ui, if enabled { theme.text } else { theme.text_dim });
+        };
+        g.dl.set_clip(Some(area));
+        button(g, layout.tabs[0], t("Installed"), Target::Tab(false), true, !state.available);
+        button(g, layout.tabs[1], t("Available"), Target::Tab(true), true, state.available);
+        let field_label = if state.available { t("Extension index URL") } else { t("ZIP archive path") };
+        self.draw_editor_field(g, layout.field, (field_label, &state.input), ProfileFieldControl::Text, state.editing);
+        let submit_label = if state.available { t("Save") } else { t("Install from file…") };
+        button(g, layout.submit, submit_label, Target::Submit, !state.busy && (state.available || !state.input.trim().is_empty()), false);
+        if let Some(rect) = layout.root {
+            button(g, rect, t("Open extensions folder"), Target::Root, !state.busy, false);
+        }
+        if let Some(text) = state.feedback.as_deref().or_else(|| state.busy.then(|| t("Please wait…"))) {
+            let y = baseline(g, layout.feedback, small);
+            g.text(layout.feedback.x, y, text, small, theme.text_dim, layout.feedback.w);
+        }
+        g.dl.set_clip(Some(layout.list));
+        if rows.is_empty() {
+            let text = state.empty_message(!self.config.extensions.index_url.trim().is_empty());
+            let message = Rect::new(layout.list.x, layout.list.y + 12.0 * s, layout.list.w, 27.0 * s);
+            let y = baseline(g, message, ui);
+            g.text(message.x, y, &text, ui, theme.text_dim, message.w);
+        }
+        let name_font = FontStyle { bold: true, ..ui };
+        for (i, ((rect, buttons), row)) in layout.rows.iter().zip(rows.iter()).enumerate() {
+            if rect.bottom() <= layout.list.y || rect.y >= layout.list.bottom() { continue; }
+            g.dl.round_rect(*rect, theme.overlay, radius);
+            g.dl.outline(*rect, theme.overlay_border, radius, border);
+            let inner = rect.inset(12.0 * s, 7.0 * s);
+            let lines = [(&row.title, name_font, theme.text), (&row.metadata, small, theme.text_dim),
+                (&row.description, small, if row.failed && row.status.is_empty() { error } else { theme.text_dim }),
+                (&row.status, small, if row.failed { error } else { theme.text_dim })];
+            for (j, (text, font, ink)) in lines.into_iter().enumerate() {
+                let line = Rect::new(inner.x, inner.y + j as f32 * 19.0 * s, inner.w, 19.0 * s);
+                let y = baseline(g, line, font);
+                g.text(line.x, y, text, font, ink, line.w);
+            }
+            for (j, (rect, control)) in buttons.iter().zip(row.buttons.iter()).enumerate() {
+                button(g, *rect, &control.label, Target::Row(i, j), control.enabled, false);
+            }
+        }
+        if let Some(rect) = layout.scrollbar {
+            g.dl.round_rect(rect, theme.overlay_border, 1.5 * s);
+        }
+        g.dl.set_clip(None);
+    }
+
     fn draw_scheme_bar<B: TextBackend>(&self, g: &mut Gfx<B>, page: &crate::settings::SettingsPage, bar: crate::settings_colors::SchemeBar, ui: FontStyle) {
         let s = self.ui();
         let theme = self.theme;
@@ -2174,19 +2242,22 @@ impl App {
         let ty = baseline(g, geo.title, title);
         g.text(geo.title.x, ty, t("Settings"), title, theme.text, geo.title.w);
         let radius = (6.0 * s).round();
-        g.dl.round_rect(geo.field, theme.overlay, radius);
-        let editing = page.editing() || self.config_editor_focused();
-        g.dl.outline(geo.field, if editing { theme.overlay_border } else { theme.accent }, radius, line);
-        let field_text = geo.field.inset((10.0 * s).round(), 0.0);
-        let fy = baseline(g, field_text, ui);
-        if page.query.is_empty() {
-            let prompt = if page.colors_page() { t("Search color schemes") } else if page.searching_vault() { t("Search secrets") } else { t("Search settings") };
-            g.text(field_text.x, fy, prompt, ui, theme.text_dim, field_text.w);
-        }
-        let qw = g.text(field_text.x, fy, &page.query, ui, theme.text, field_text.w);
+        let extension_search = page.extensions_page() && page.extensions.available;
         let caret_h = (16.0 * s).round();
-        if !editing {
-            g.dl.rect(Rect::new(field_text.x + qw + 1.0, geo.field.y + ((geo.field.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
+        if !page.extensions_page() || extension_search {
+            g.dl.round_rect(geo.field, theme.overlay, radius);
+            let editing = page.editing() || page.extensions.editing || self.config_editor_focused();
+            g.dl.outline(geo.field, if editing { theme.overlay_border } else { theme.accent }, radius, line);
+            let field_text = geo.field.inset((10.0 * s).round(), 0.0);
+            let fy = baseline(g, field_text, ui);
+            if page.query.is_empty() {
+                let prompt = if extension_search { t("Search extensions") } else if page.colors_page() { t("Search color schemes") } else if page.searching_vault() { t("Search secrets") } else { t("Search settings") };
+                g.text(field_text.x, fy, prompt, ui, theme.text_dim, field_text.w);
+            }
+            let qw = g.text(field_text.x, fy, &page.query, ui, theme.text, field_text.w);
+            if !editing {
+                g.dl.rect(Rect::new(field_text.x + qw + 1.0, geo.field.y + ((geo.field.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
+            }
         }
         if geo.close.contains(mx, my) {
             g.dl.round_rect(geo.close, theme.button_hover, radius);
@@ -2214,6 +2285,10 @@ impl App {
             g.dl.round_rect(button, if button.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
             g.dl.outline(button, theme.accent, radius, if page.selected == page.shown.len() { 2.0 * line } else { line });
             centered(g, button, t("Restart to apply"), ui, theme.text);
+        }
+        if page.extensions_page() {
+            self.draw_extensions_page(g, geo.list, page, ui, small);
+            return;
         }
         if let Some(tabs) = geo.profile_tabs {
             for (i, (rect, label)) in tabs.into_iter().zip([t("Profiles"), t("Advanced")]).enumerate() {
@@ -2317,12 +2392,12 @@ impl App {
                             if marked {
                                 g.dl.check(Rect::new(tx, row.rect.y + (32.0 * s).round(), 14.0 * s, 14.0 * s), theme.accent);
                             }
-                            if scheme.custom {
+                            if let Some(source) = scheme.source.as_deref().or_else(|| scheme.custom.then(|| t("Custom scheme"))) {
                                 let offset = if marked { 20.0 * s } else { 0.0 };
-                                g.text(tx + offset, detail_y, t("Custom scheme"), small, theme.text_dim, (tw - offset).max(0.0));
+                                g.text(tx + offset, detail_y, source, small, theme.text_dim, (tw - offset).max(0.0));
                             }
                         } else {
-                            let mut detail = if scheme.custom { t("Custom") } else { t("Built-in") }.to_owned();
+                            let mut detail = scheme.source.as_deref().unwrap_or_else(|| if scheme.custom { t("Custom") } else { t("Built-in") }).to_owned();
                             if marked {
                                 detail.push_str(" · ");
                                 detail.push_str(t("Current"));

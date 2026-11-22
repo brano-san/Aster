@@ -1,0 +1,6 @@
+name = "Hello Night"
+foreground = "#cbd5e1"
+background = "#17202b"
+cursor = "#e2e8f0"
+selection = "#33465a"
+colors = ["#17202b", "#e38083", "#9ac98d", "#e3bc77", "#81a8de", "#c7a3de", "#83c6c8", "#cbd5e1", "#5c6b7b", "#ee9da0", "#b9d9a9", "#f6ce94", "#a5c6ef", "#dec0ec", "#a7dade", "#f1f5f9"]

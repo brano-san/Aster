@@ -4,6 +4,9 @@ mod background;
 mod cli;
 mod config_file;
 mod desktop;
+mod extension_package;
+mod extension_process;
+mod extensions;
 mod handler;
 mod log;
 mod local_spawn;
@@ -109,10 +112,11 @@ fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::Pla
     }
     let dark = config.appearance.color_scheme_mode != SchemeMode::Light;
     let placement = state_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| parse_placement(&t));
-    let (mut handler, _vault_worker) = handler::Handler::<P>::new(config, waker, encrypted)
+    let (mut handler, _vault_worker, extensions) = handler::Handler::<P>::new(config, waker, encrypted)
         .map_err(|e| aster_platform::PlatformError::new(0, format!("vault worker: {e}")))?;
     handler.set_instance(requests, (!hidden || cfg!(windows)).then_some(request));
     let result = windows.run(WindowOptions { title: "Aster".into(), placement, dark, visible: !hidden }, handler);
+    drop(extensions);
     update::relaunch_if_requested();
     result
 }

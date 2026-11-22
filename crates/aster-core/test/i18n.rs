@@ -218,7 +218,7 @@ fn every_label_drawn_from_constants_has_a_russian_entry() {
     menus.extend(a.menu.take().expect("pinned tab menu").entries);
     a.open_terminal_menu(10.0, 10.0);
     menus.extend(a.menu.take().expect("terminal menu").entries);
-    texts.extend(menus.into_iter().filter_map(|e| if let Entry::Item { label, .. } = e { Some(label.to_owned()) } else { None }));
+    texts.extend(menus.into_iter().filter_map(|e| if let Entry::Item { label: std::borrow::Cow::Borrowed(label), .. } = e { Some(label.to_owned()) } else { None }));
     let missing: Vec<_> = texts.iter().filter(|t| !UNTRANSLATED.contains(&t.as_str()) && !russian().contains_key(t.as_str())).collect();
     assert!(missing.is_empty(), "missing translations: {missing:?}");
 }

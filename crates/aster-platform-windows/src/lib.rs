@@ -74,6 +74,12 @@ impl Platform for Windows {
     type Renderer = D3dRenderer;
     type Text = DWriteText;
 
+    fn spawn_extension(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+        command.creation_flags(CREATE_NO_WINDOW.0).spawn()
+    }
+
     fn reveal_file(path: &std::path::Path) {
         if !reveal::select(path) {
             if let Some(parent) = path.parent() {

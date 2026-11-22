@@ -12,7 +12,7 @@ fn hex(c: Rgb) -> String {
 }
 
 impl CustomScheme {
-    pub(crate) fn palette(&self) -> Option<Palette> {
+    pub fn palette(&self) -> Option<Palette> {
         let colors: Vec<_> = self.colors.iter().filter_map(|s| schemes::parse_hex(s)).collect();
         let cursor = self.cursor.as_deref().and_then(schemes::parse_hex);
         let mut palette = schemes::from_colors(schemes::parse_hex(&self.foreground)?, schemes::parse_hex(&self.background)?, cursor, &colors)?;
@@ -185,7 +185,7 @@ pub(crate) fn geometry(area: Rect, scale: f32, scroll: f32) -> EditorGeometry {
 impl App {
     fn scheme_name_taken(&self, name: &str, ignore: Option<usize>) -> bool {
         self.config.color_schemes.iter().enumerate().any(|(i, scheme)| Some(i) != ignore && scheme.name.eq_ignore_ascii_case(name))
-            || self.available_schemes().any(|(scheme, custom)| !custom && scheme.name.eq_ignore_ascii_case(name))
+            || self.available_schemes().any(|(scheme, custom, _)| !custom && scheme.name.eq_ignore_ascii_case(name))
     }
 
     fn current_settings_scheme(&self) -> Option<&crate::settings::SchemeRow> {

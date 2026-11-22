@@ -142,6 +142,7 @@ name = "aster"
 version = "0.10.0"
 dependencies = [
  "aster-core",
+ "aster-ext",
  "aster-gfx",
  "aster-net",
  "aster-platform",
@@ -162,6 +163,7 @@ dependencies = [
  "serde_json",
  "tar",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "zip",
@@ -171,9 +173,19 @@ dependencies = [
 name = "aster-core"
 version = "0.10.0"
 dependencies = [
+ "aster-ext",
  "aster-gfx",
  "aster-proto",
  "aster-vt",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "aster-ext"
+version = "0.10.0"
+dependencies = [
  "serde",
  "serde_json",
  "toml",

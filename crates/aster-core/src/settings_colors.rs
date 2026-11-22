@@ -87,9 +87,10 @@ fn replace_config_scheme(config: &mut Config, old: &str, new: Option<&str>) {
 impl App {
     pub(crate) fn scheme_rows(&self) -> Vec<SchemeRow> {
         let rgb = |c: aster_vt::Rgb| u32::from_be_bytes([0, c.r, c.g, c.b]);
-        let mut rows: Vec<_> = self.available_schemes().map(|(scheme, custom)| SchemeRow {
+        let mut rows: Vec<_> = self.available_schemes().map(|(scheme, custom, source)| SchemeRow {
             name: scheme.name,
             custom,
+            source: source.map(str::to_owned),
             foreground: rgb(scheme.palette.foreground),
             background: rgb(scheme.palette.background),
             colors: scheme.palette.ansi.map(rgb),

@@ -24,8 +24,8 @@ fn right_click(a: &mut App, x: f32, y: f32) {
     a.on_event(Event::MouseDown { x, y, button: MouseButton::Right, clicks: 1 });
 }
 
-fn labels(a: &App) -> Vec<(&'static str, bool)> {
-    a.menu.as_ref().unwrap().entries.iter().filter_map(|e| if let Entry::Item { label, enabled, .. } = e { Some((*label, *enabled)) } else { None }).collect()
+fn labels(a: &App) -> Vec<(&str, bool)> {
+    a.menu.as_ref().unwrap().entries.iter().filter_map(|e| if let Entry::Item { label, enabled, .. } = e { Some((label.as_ref(), *enabled)) } else { None }).collect()
 }
 
 #[test]

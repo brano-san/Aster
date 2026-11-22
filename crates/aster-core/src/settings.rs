@@ -116,6 +116,7 @@ const SHARE: Control = Control::Slider { min: 0.1, max: 1.0, step: 0.05 };
 
 pub const SETTINGS: &[Setting] = &[
     item(SHORTCUTS, "palette.hidden-commands", "Hidden palette commands", "Comma-separated action IDs to hide from the command palette", Control::StringList),
+    item(EXTENSIONS, "extensions.index-url", "Extension index URL", "HTTPS address of the extension catalog", Control::Text),
     item(PROFILES, "terminal.profile", "Default profile for new tabs", "Shell for new tabs and windows", Control::Profiles),
     item(PROFILES, "terminal.recent-profiles", "Recent profiles", "Number of recent profiles to show; zero hides the list", Control::Number { min: 0.0, max: 100.0, step: 1.0 }),
     item(PROFILES, "picker.show-builtin-profiles", "Show built-in profiles", "Include built-in shells in the profile picker", Control::Toggle),
@@ -276,8 +277,9 @@ pub(crate) fn found(hay: &str, query: &str) -> bool {
 }
 
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
+pub const EXTENSIONS: &str = "Extensions";
 pub const PROFILES: &str = "Profiles";
-pub const PAGES: [&str; 13] = [SYSTEM, APPEARANCE, PROFILES, TERMINAL, INPUT, COLORS, DOCK, SHORTCUTS, SEARCH, SSH, VAULT, WINDOW, CONFIG_FILE];
+pub const PAGES: [&str; 14] = [SYSTEM, APPEARANCE, PROFILES, TERMINAL, INPUT, COLORS, DOCK, SHORTCUTS, EXTENSIONS, SEARCH, SSH, VAULT, WINDOW, CONFIG_FILE];
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileRow {
     pub group: Option<String>,
@@ -295,6 +297,7 @@ pub struct ProfileRow {
 pub struct SchemeRow {
     pub name: String,
     pub custom: bool,
+    pub source: Option<String>,
     pub foreground: u32,
     pub background: u32,
     pub colors: [u32; 16],
@@ -524,6 +527,7 @@ pub struct SettingsPage {
     pub deleting: Option<String>,
     pub page: usize,
     pub(crate) profiles_advanced: bool,
+    pub(crate) extensions: crate::extensions_page::Page,
     pub(crate) restart_pending: bool,
 }
 
@@ -574,7 +578,9 @@ impl SettingsPage {
         shown.splice(after_colors..after_colors, schemes);
         shown.extend((base..base + self.tree.len()).chain(shortcuts));
         self.deleting = None;
-        self.shown = if self.searching_vault() && !self.query.trim().is_empty() {
+        self.shown = if self.extensions_page() {
+            Vec::new()
+        } else if self.searching_vault() && !self.query.trim().is_empty() {
             shown.into_iter().filter(|i| matches!(self.vault_at(*i), Some(VaultRow::Entry(_)))).collect()
         } else if colors_page || self.query.trim().is_empty() {
             let page = PAGES[self.page.min(PAGES.len() - 1)];
@@ -612,7 +618,7 @@ impl SettingsPage {
     }
 
     pub fn searching(&self) -> bool {
-        !self.colors_page() && !self.query.trim().is_empty()
+        !self.colors_page() && !self.extensions_page() && !self.query.trim().is_empty()
     }
 
     pub(crate) fn show_page(&mut self, page: usize) {
@@ -719,6 +725,8 @@ impl SettingsPage {
             VAULT
         } else if self.scheme_at(item).is_some() {
             COLORS
+        } else if self.profile_action(item).is_some_and(|entry| matches!(entry.action, Action::Extension { .. })) {
+            SHORTCUTS
         } else if self.tree_at(item).is_some() || self.profile_action(item).is_some() {
             PROFILES
         } else {
@@ -1038,7 +1046,7 @@ impl App {
     }
 
     pub(crate) fn fresh_settings_page(&self) -> SettingsPage {
-        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.profile_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes: self.scheme_rows(), vault: self.vault.clone(), launcher_installed: self.launcher_installed, restart_pending: self.restart_pending(), ..SettingsPage::default() };
+        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.dynamic_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes: self.scheme_rows(), vault: self.vault.clone(), launcher_installed: self.launcher_installed, restart_pending: self.restart_pending(), ..SettingsPage::default() };
         page.refilter();
         page
     }
@@ -1052,6 +1060,7 @@ impl App {
         if page.colors_page() {
             self.select_scheme_tab(tab);
         }
+        self.visit_extensions_page();
         self.reveal_selected();
     }
 
@@ -1501,6 +1510,7 @@ impl App {
     }
 
     pub(crate) fn settings_key(&mut self, key: Key, mods: Mods) {
+        if self.extensions_key(key, mods) { return; }
         if self.config_editor_key(key, mods) {
             self.dirty = true;
             return;
@@ -1650,6 +1660,7 @@ impl App {
         if clean.is_empty() {
             return;
         }
+        if self.extensions_text(&clean) { return; }
         if self.config_editor_text(&clean) { return; }
         let Some(page) = self.settings.as_mut() else { return };
         if let Some(editor) = page.scheme_editor.as_mut() {
@@ -1701,6 +1712,7 @@ impl App {
             return self.close_settings();
         }
         if geo.field.contains(x, y) {
+            self.extension_search_focus();
             self.config_editor.focus = None;
             self.config_editor.cancel_paste();
             return self.commit_edit();
@@ -1720,7 +1732,7 @@ impl App {
         if !geo.list.contains(x, y) {
             return self.commit_edit();
         }
-        if self.config_editor_click(x, y) { return; }
+        if self.extensions_click(geo.list, x, y) || self.config_editor_click(x, y) { return; }
         let Some(row) = geo.rows.iter().find(|r| r.rect.contains(x, y)).copied() else { return self.commit_edit() };
         let RowKind::Item(n) = row.kind else { return self.commit_edit() };
         let scale = self.ui();
@@ -1776,6 +1788,7 @@ impl App {
         if self.vault_dialog_wheel(dy) || self.config_editor_wheel(dy) || self.profile_modal_wheel(dy) { return; }
         let Some(geo) = self.settings_geometry() else { return };
         if self.scheme_editor_wheel(geo.page, dy) { return; }
+        if self.extensions_scroll(geo.list, -dy * 60.0 * self.ui()) { return; }
         let step = 60.0 * self.ui();
         let Some(page) = self.settings.as_mut() else { return };
         page.scroll = (page.scroll - dy * step).clamp(0.0, (geo.height - geo.list.h).max(0.0));

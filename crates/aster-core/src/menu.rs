@@ -2,10 +2,11 @@ use crate::app::App;
 use crate::input::{CursorIcon, Key};
 use crate::keymap::Action;
 use aster_gfx::render::Rect;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
-    Item { label: &'static str, action: Action, enabled: bool },
+    Item { label: Cow<'static, str>, action: Action, enabled: bool },
     Separator,
 }
 
@@ -30,7 +31,7 @@ const SEPARATOR_H: f32 = 9.0;
 const PAD: f32 = 5.0;
 
 fn item(label: &'static str, action: Action, enabled: bool) -> Entry {
-    Entry::Item { label, action, enabled }
+    Entry::Item { label: Cow::Borrowed(label), action, enabled }
 }
 
 impl Menu {
@@ -154,6 +155,7 @@ impl App {
             item("Close tabs to the left", Action::CloseTabsToLeft, left),
             item("Reopen closed tab", Action::ReopenTab, !self.closed_tabs.is_empty()),
         ]);
+        self.append_extension_menu(&mut entries, aster_ext::Menu::Tab);
         entries
     }
 
@@ -188,6 +190,7 @@ impl App {
                 item("Send a break on the serial line", Action::SerialBreak, true),
             ]);
         }
+        self.append_extension_menu(&mut entries, aster_ext::Menu::Terminal);
         entries
     }
 

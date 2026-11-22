@@ -8,6 +8,8 @@ mod config_editor;
 mod text_editor;
 mod config_defaults;
 mod config_schema;
+pub mod extensions;
+mod extensions_page;
 pub mod files;
 pub mod fuzzy;
 pub mod i18n;

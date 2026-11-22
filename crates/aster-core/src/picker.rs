@@ -178,7 +178,7 @@ impl App {
             .iter()
             .filter(|p| visible(p))
             .map(|p| {
-                let (rank, group) = group_of(p, &self.config);
+                let (rank, group) = self.extension_profile_group(&p.id).map_or_else(|| group_of(p, &self.config), |group| (7, group.to_owned()));
                 let pick = pick(&crate::profile::effective(p, &self.config), group.clone(), rank, p.id.clone());
                 (rank, group, pick)
             })

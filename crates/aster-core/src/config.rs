@@ -469,6 +469,13 @@ pub struct Colors {
     pub harmonious: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Extensions {
+    pub index_url: String,
+    pub disabled: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
@@ -485,6 +492,7 @@ pub struct Config {
     pub ssh: Ssh,
     pub system: System,
     pub updates: Updates,
+    pub extensions: Extensions,
     pub picker: Picker,
     pub hotkeys: BTreeMap<String, Vec<String>>,
     pub profiles: Vec<Profile>,
@@ -514,6 +522,7 @@ impl Default for Config {
             ssh: Ssh::default(),
             system,
             updates: Updates::default(),
+            extensions: Extensions::default(),
             picker: Picker::default(),
             palette: Palette::default(),
             hotkeys: BTreeMap::new(),

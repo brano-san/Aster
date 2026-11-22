@@ -211,6 +211,7 @@ pub trait Platform: 'static {
     fn font_families(monospace: bool) -> Vec<String>;
     fn shells() -> Vec<Profile>;
     fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError>;
+    fn spawn_extension(command: &mut std::process::Command) -> std::io::Result<std::process::Child>;
     fn config_dir() -> Option<PathBuf>;
     fn home_dir() -> Option<PathBuf>;
     fn open(target: &str);

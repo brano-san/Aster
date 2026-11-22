@@ -22,13 +22,13 @@ impl App {
             .map(|action| self.command_pick(&action, action.label(), action.source_label()))
             .collect();
 
-        picks.extend(self.profile_actions().into_iter().map(|entry| {
+        picks.extend(self.dynamic_actions().into_iter().map(|entry| {
             let name = entry.name.as_deref();
             self.command_pick(&entry.action, entry.action.label_for(name), entry.action.source_label_for(name))
         }));
         for (parent, entries) in [("Tab", self.tab_menu_entries(self.active)), ("Terminal", self.terminal_menu_entries())] {
             picks.extend(entries.into_iter().filter_map(|entry| {
-                let Entry::Item { label, action, .. } = entry else { return None };
+                let Entry::Item { label: std::borrow::Cow::Borrowed(label), action, .. } = entry else { return None };
                 Some(self.command_pick(&action, menu_path(&[parent], label, t), menu_path(&[parent], label, |name| name)))
             }));
         }

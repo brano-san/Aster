@@ -105,6 +105,7 @@ pub enum Action {
     OpenProfile(String),
     SelectProfileSection(ProfileSection),
     SelectProfileGroup(String),
+    Extension { extension: String, command: String },
 }
 
 const NAMED: &[(Action, &str, &str)] = &[
@@ -231,6 +232,7 @@ impl Action {
             Action::OpenProfile(id) => format!("profile.{id}"),
             Action::SelectProfileSection(section) => format!("profile-selector.{}", section.id()),
             Action::SelectProfileGroup(id) => format!("group-selector.{id}"),
+            Action::Extension { extension, command } => format!("extension.{extension}:{command}"),
             a => NAMED.iter().find(|(x, _, _)| x == a).map_or("", |(_, id, _)| id).to_owned(),
         }
     }
@@ -265,10 +267,12 @@ impl Action {
     }
 
     pub(crate) fn label_for(&self, name: Option<&str>) -> String {
+        if let Self::Extension { command, .. } = self { return name.unwrap_or(command).to_owned(); }
         crate::i18n::tf(self.label_template(), &[("n", &self.label_argument(name, true))])
     }
 
     pub(crate) fn source_label_for(&self, name: Option<&str>) -> String {
+        if let Self::Extension { command, .. } = self { return name.unwrap_or(command).to_owned(); }
         self.label_template().replace("{n}", &self.label_argument(name, false))
     }
 
@@ -281,6 +285,8 @@ impl Action {
                 "profile" => Some(Action::OpenProfile(target.to_owned())),
                 "profile-selector" => ProfileSection::from_id(target).map(Action::SelectProfileSection),
                 "group-selector" => Some(Action::SelectProfileGroup(target.to_owned())),
+                "extension" => target.split_once(':').filter(|(extension, command)| aster_ext::valid_id(extension) && !command.is_empty())
+                    .map(|(extension, command)| Action::Extension { extension: extension.to_owned(), command: command.to_owned() }),
                 _ => None,
             };
         }
@@ -521,6 +527,20 @@ impl Keymap {
 
     pub fn with_mru(overrides: &BTreeMap<String, Vec<String>>, mru_tabs: bool) -> Self {
         Self::for_platform(overrides, mru_tabs, cfg!(windows))
+    }
+
+    pub(crate) fn with_extensions(overrides: &BTreeMap<String, Vec<String>>, mru_tabs: bool, commands: Vec<(Action, Option<&str>)>) -> Self {
+        let mut overrides = overrides.clone();
+        overrides.retain(|id, _| !id.starts_with("extension.") || commands.iter().any(|(action, _)| action.id() == *id));
+        let mut keymap = Self::with_mru(&overrides, mru_tabs);
+        for (action, shortcut) in commands {
+            if overrides.contains_key(&action.id()) { continue; }
+            let Some(binding) = shortcut.and_then(parse_binding) else { continue };
+            if !keymap.bindings.iter().any(|(bound, _)| bound.starts_with(&binding) || binding.starts_with(bound)) {
+                keymap.bindings.push((binding, action));
+            }
+        }
+        keymap
     }
 
     fn for_platform(overrides: &BTreeMap<String, Vec<String>>, mru_tabs: bool, windows: bool) -> Self {

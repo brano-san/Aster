@@ -143,6 +143,7 @@ pub enum Effect {
     ProtectConfig { request: u64, enabled: bool, passphrase: String },
     ImeArea(Rect),
     Update(crate::update::UpdateRequest),
+    Extension(crate::extensions::Request),
 }
 
 pub(crate) struct Pane {
@@ -214,6 +215,7 @@ pub struct App {
     pub(crate) profiles: Vec<Profile>,
     detected: Vec<Profile>,
     schemes: Vec<Scheme>,
+    extension_color_schemes: Vec<(Scheme, String)>,
     scheme_before: Option<String>,
     pub(crate) keymap: Keymap,
     pub(crate) palette: Palette,
@@ -231,6 +233,7 @@ pub struct App {
     system_dark: bool,
     system_animations: bool,
     pub(crate) effects: Vec<Effect>,
+    pub(crate) extensions: std::sync::Arc<crate::extensions::Snapshot>,
     pub(crate) dirty: bool,
     pub(crate) motion: bool,
     last_frame: Option<Instant>,
@@ -343,6 +346,7 @@ impl App {
             palette: Palette::default(),
             background: Default::default(),
             profile_palettes: Default::default(),
+            extension_color_schemes: Vec::new(),
             theme: Theme::from_palette(&Palette::default()),
             tabs: Vec::new(),
             active: 0,
@@ -355,6 +359,7 @@ impl App {
             system_dark,
             system_animations: true,
             effects: Vec::new(),
+            extensions: Default::default(),
             dirty: true,
             motion: false,
             last_frame: None,
@@ -626,17 +631,37 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn available_schemes(&self) -> impl Iterator<Item = (Scheme, bool)> + '_ {
-        self.custom_schemes().into_iter().map(|s| (s, true)).chain(self.schemes.iter().cloned().map(|s| (s, false)))
+    pub(crate) fn available_schemes(&self) -> impl Iterator<Item = (Scheme, bool, Option<&str>)> + '_ {
+        self.custom_schemes().into_iter().map(|s| (s, true, None))
+            .chain(self.schemes.iter().cloned().map(|s| (s, false, None)))
+            .chain(self.extension_color_schemes.iter().map(|(s, source)| (s.clone(), false, Some(source.as_str()))))
     }
 
     pub fn scheme_names(&self) -> Vec<String> {
-        self.available_schemes().map(|(s, _)| s.name).collect()
+        self.available_schemes().map(|(s, _, _)| s.name).collect()
     }
 
     pub(crate) fn scheme(&self, name: &str) -> Option<Palette> {
         self.config.color_schemes.iter().filter(|s| s.name.eq_ignore_ascii_case(name)).find_map(|s| s.palette())
             .or_else(|| self.schemes.iter().find(|s| s.name.eq_ignore_ascii_case(name)).map(|s| s.palette))
+            .or_else(|| self.extension_color_schemes.iter().find(|(s, _)| s.name.eq_ignore_ascii_case(name)).map(|(s, _)| s.palette))
+    }
+
+    fn refresh_extension_schemes(&mut self) {
+        self.extension_color_schemes = self.extension_schemes(self.config.color_schemes.iter().map(|s| s.name.clone())
+            .chain(self.schemes.iter().map(|s| s.name.clone())));
+        self.sync_scheme_rows();
+    }
+
+    pub(crate) fn refresh_extension_contributions(&mut self) {
+        self.profiles.clone_from(&self.detected);
+        self.profiles.extend(self.config.profiles.iter().cloned());
+        self.profiles.extend(self.extension_profiles());
+        self.keymap = self.extension_keymap();
+        self.sync_profile_page();
+        self.sync_profile_sidebar();
+        self.refresh_extension_schemes();
+        self.restyle();
     }
 
     fn extended_palette(&self, palette: Palette) -> Palette {
@@ -728,25 +753,28 @@ impl App {
         let background_changed = self.config.appearance.background_image != config.appearance.background_image;
         let schemes_changed = self.config.color_schemes != config.color_schemes;
         let changed_version = config.version != self.config.version;
-        let mut profiles = self.detected.clone();
-        profiles.extend(config.profiles.iter().cloned());
-        let profiles_changed = self.config.groups != config.groups || self.config.profiles != config.profiles || self.config.hidden_profiles != config.hidden_profiles || self.config.profile_defaults != config.profile_defaults || self.config.terminal.profile != config.terminal.profile;
+        let extensions_changed = self.config.extensions.disabled != config.extensions.disabled;
+        let extension_index_changed = self.config.extensions.index_url != config.extensions.index_url;
+        let profiles_changed = extensions_changed || self.config.groups != config.groups || self.config.profiles != config.profiles || self.config.hidden_profiles != config.hidden_profiles || self.config.profile_defaults != config.profile_defaults || self.config.terminal.profile != config.terminal.profile;
         let sidebar_changed = profiles_changed || self.config.appearance.profile_sidebar != config.appearance.profile_sidebar;
         let activity_changed = self.config.notifications.activity != config.notifications.activity
             || self.config.notifications.activity_silence_seconds != config.notifications.activity_silence_seconds;
-        self.profiles = profiles;
-        self.keymap = Keymap::with_mru(&config.hotkeys, config.appearance.mru_tabs);
         self.mru.cancel();
         if config.appearance.backdrop != self.config.appearance.backdrop {
             self.effects.push(Effect::Surface(config.appearance.backdrop));
         }
         self.config = config;
+        if extension_index_changed { self.extension_index_changed(); }
+        self.profiles.clone_from(&self.detected);
+        self.profiles.extend(self.config.profiles.iter().cloned());
+        self.profiles.extend(self.extension_profiles());
+        self.keymap = self.extension_keymap();
         if background_changed { self.request_background_image(); }
         self.update_restart_pending();
         if profiles_changed { self.sync_profile_page(); }
         if sidebar_changed { self.sync_profile_sidebar(); }
         if activity_changed { self.reset_activity_tracking(); }
-        if schemes_changed { self.sync_scheme_rows(); }
+        if schemes_changed || extensions_changed { self.refresh_extension_schemes(); }
         if !self.animations() {
             self.reset_animations();
         }
@@ -1132,7 +1160,7 @@ impl App {
         self.panes.get(&tab.focus).map(|p| p.title.clone().unwrap_or_else(|| p.profile.name.clone())).unwrap_or_default()
     }
 
-    fn write(&mut self, pane: PaneId, bytes: Vec<u8>) {
+    pub(crate) fn write(&mut self, pane: PaneId, bytes: Vec<u8>) {
         let Some(p) = self.panes.get_mut(&pane) else { return };
         if p.reconnect_at.is_some() {
             return;
@@ -1382,6 +1410,7 @@ impl App {
             CommandSelector => self.open_overlay(OverlayKind::Commands),
             ProfileSelector => self.open_overlay(OverlayKind::Profiles),
             OpenProfile(id) => self.open_profile_by_id(&id),
+            Extension { extension, command } => self.run_extension(extension, command),
             SelectProfileSection(section) => self.open_filtered_profiles(crate::picker::ProfileFilter::Section(section)),
             SelectProfileGroup(id) => self.open_filtered_profiles(crate::picker::ProfileFilter::Group(&id)),
             Search => self.open_search(),
@@ -1586,7 +1615,9 @@ impl App {
             OverlayKind::ProfileCreate => crate::profiles_page::profile_creation(),
             OverlayKind::ProfileTemplates => crate::profiles_page::profile_templates(),
             OverlayKind::ProfileIcons => crate::profiles_page::profile_icons(),
-            OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), value: n, ..Pick::default() }).collect(),
+            OverlayKind::Schemes => self.available_schemes().map(|(s, _, source)| Pick {
+                label: s.name.clone(), value: s.name, hint: source.unwrap_or_default().into(), ..Pick::default()
+            }).collect(),
             OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string(), ..Pick::default() }).collect(),
             OverlayKind::SerialSpeed(pane) => {
                 self.overlay = Some(Overlay::serial_speed(pane));
@@ -2101,7 +2132,7 @@ impl App {
             if page.editing_passphrase() || page.editor.is_some() || page.group_editor.is_some() || page.scheme_editor.is_some() || page.deleting_scheme.is_some() {
                 return self.settings_key(key, mods);
             }
-            let editing = page.editing() || self.config_editor_focused();
+            let editing = page.editing() || page.extensions.editing || self.config_editor_focused();
             if !editing && page.current_shortcut().is_some() && crate::settings::shortcut_edit_key(key, mods) {
                 self.keymap.reset();
                 return self.settings_key(key, mods);

@@ -53,6 +53,10 @@ impl Platform for Linux {
         pty::spawn(req)
     }
 
+    fn spawn_extension(command: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+        command.spawn()
+    }
+
     fn config_dir() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).or_else(|| Self::home_dir().map(|h| h.join(".config")))?;
         Some(base.join("aster"))
