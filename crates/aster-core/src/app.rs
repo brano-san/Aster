@@ -113,6 +113,7 @@ pub enum Effect {
     ProbeCommand { request: u64, pids: Vec<u32> },
     Beep,
     Surface(crate::config::Backdrop),
+    LoadBackgroundImage { revision: u64, path: String },
     Progress(Option<Progress>),
     Files { pane: PaneId, request: crate::files::FileRequest },
     SendFiles { pane: PaneId, files: Vec<std::path::PathBuf> },
@@ -205,6 +206,8 @@ pub struct App {
     scheme_before: Option<String>,
     pub(crate) keymap: Keymap,
     pub(crate) palette: Palette,
+    pub(crate) background: crate::background::State,
+    profile_palettes: std::cell::RefCell<HashMap<String, Palette>>,
     pub(crate) theme: Theme,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
@@ -312,6 +315,8 @@ impl App {
             scheme_before: None,
             keymap,
             palette: Palette::default(),
+            background: Default::default(),
+            profile_palettes: Default::default(),
             theme: Theme::from_palette(&Palette::default()),
             tabs: Vec::new(),
             active: 0,
@@ -404,6 +409,7 @@ impl App {
         app.apply_language();
         app.sync_profile_sidebar();
         app.effects.push(Effect::Surface(app.config.appearance.backdrop));
+        app.request_background_image();
         app
     }
 
@@ -562,10 +568,11 @@ impl App {
         };
         let name = if dark { self.config.appearance.color_scheme.clone() } else { self.config.appearance.light_color_scheme.clone() };
         let fallback = if dark { Palette::DARK } else { Palette::LIGHT };
-        let mut palette = self.scheme(&name).unwrap_or(fallback);
+        self.profile_palettes.get_mut().clear();
+        let mut palette = self.extended_palette(self.scheme(&name).unwrap_or(fallback));
         palette.bold_is_bright = self.config.terminal.draw_bold_text_in_bright_colors;
         self.palette = palette;
-        let mut theme = Theme::from_palette(&palette);
+        let mut theme = if self.config.appearance.ui_from_scheme { Theme::from_palette(&palette) } else { Theme::fixed(&palette, dark) };
         let opacity = if self.translucent { self.config.appearance.opacity.clamp(0.2, 1.0) } else { 1.0 };
         let alpha = (opacity * 255.0).round() as u8;
         theme.background = theme.background.alpha(alpha);
@@ -579,9 +586,7 @@ impl App {
             .color_schemes
             .iter()
             .filter_map(|c| {
-                let colors: Vec<_> = c.colors.iter().filter_map(|s| schemes::parse_hex(s)).collect();
-                let cursor = c.cursor.as_deref().and_then(schemes::parse_hex);
-                let palette = schemes::from_colors(schemes::parse_hex(&c.foreground)?, schemes::parse_hex(&c.background)?, cursor, &colors)?;
+                let palette = c.palette()?;
                 Some(Scheme { name: c.name.clone(), palette })
             })
             .collect()
@@ -595,19 +600,29 @@ impl App {
         self.available_schemes().map(|(s, _)| s.name).collect()
     }
 
-    fn scheme(&self, name: &str) -> Option<Palette> {
-        self.available_schemes().find(|(s, _)| s.name.eq_ignore_ascii_case(name)).map(|(s, _)| s.palette)
+    pub(crate) fn scheme(&self, name: &str) -> Option<Palette> {
+        self.config.color_schemes.iter().filter(|s| s.name.eq_ignore_ascii_case(name)).find_map(|s| s.palette())
+            .or_else(|| self.schemes.iter().find(|s| s.name.eq_ignore_ascii_case(name)).map(|s| s.palette))
+    }
+
+    fn extended_palette(&self, palette: Palette) -> Palette {
+        if self.config.colors.generate_256 { palette.with_extended_colors(self.config.colors.harmonious) } else { palette }
     }
 
     pub(crate) fn pane_palette(&self, id: PaneId) -> Palette {
-        let own = self.panes.get(&id).and_then(|p| p.profile.scheme.as_deref()).filter(|n| !n.is_empty()).and_then(|n| self.scheme(n));
-        match own {
-            Some(mut palette) => {
-                palette.bold_is_bright = self.palette.bold_is_bright;
+        let Some(name) = self.panes.get(&id).and_then(|p| p.profile.scheme.as_deref()).filter(|n| !n.is_empty()) else { return self.palette };
+        let cached = self.profile_palettes.borrow().get(name).copied();
+        let mut palette = match cached {
+            Some(palette) => palette,
+            None => {
+                let Some(palette) = self.scheme(name) else { return self.palette };
+                let palette = self.extended_palette(palette);
+                self.profile_palettes.borrow_mut().insert(name.to_owned(), palette);
                 palette
             }
-            None => self.palette,
-        }
+        };
+        palette.bold_is_bright = self.palette.bold_is_bright;
+        palette
     }
 
     fn scheme_is_dark(&self) -> bool {
@@ -618,12 +633,16 @@ impl App {
         }
     }
 
-    pub(crate) fn current_scheme(&self) -> &str {
+    pub(crate) fn active_scheme_tab(&self) -> crate::settings_colors::SchemeTab {
         if self.scheme_is_dark() {
-            &self.config.appearance.color_scheme
+            crate::settings_colors::SchemeTab::Dark
         } else {
-            &self.config.appearance.light_color_scheme
+            crate::settings_colors::SchemeTab::Light
         }
+    }
+
+    pub(crate) fn current_scheme(&self) -> &str {
+        self.active_scheme_tab().name(&self.config.appearance)
     }
 
     fn set_scheme_name(&mut self, name: String) {
@@ -645,6 +664,8 @@ impl App {
     }
 
     pub fn set_config(&mut self, config: Config) {
+        let background_changed = self.config.appearance.background_image != config.appearance.background_image;
+        let schemes_changed = self.config.color_schemes != config.color_schemes;
         let mut profiles = self.detected.clone();
         profiles.extend(config.profiles.iter().cloned());
         let profiles_changed = self.config.groups != config.groups || self.config.profiles != config.profiles || self.config.hidden_profiles != config.hidden_profiles || self.config.terminal.profile != config.terminal.profile;
@@ -658,9 +679,11 @@ impl App {
             self.effects.push(Effect::Surface(config.appearance.backdrop));
         }
         self.config = config;
+        if background_changed { self.request_background_image(); }
         if profiles_changed { self.sync_profile_page(); }
         if sidebar_changed { self.sync_profile_sidebar(); }
         if activity_changed { self.reset_activity_tracking(); }
+        if schemes_changed { self.sync_scheme_rows(); }
         if !self.config.appearance.animations {
             self.bell = None;
             self.tab_toast = None;
@@ -1958,7 +1981,7 @@ impl App {
                 self.swallow_char = true;
                 return self.settings_key(key, mods);
             }
-            if page.vault_dialog.is_some() || page.editor.is_some() || page.group_editor.is_some() {
+            if page.editing_passphrase() || page.editor.is_some() || page.group_editor.is_some() || page.scheme_editor.is_some() || page.deleting_scheme.is_some() {
                 return self.settings_key(key, mods);
             }
             let editing = page.editing();

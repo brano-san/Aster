@@ -127,6 +127,7 @@ pub struct DWriteText {
     icon_family: PCWSTR,
     default_mono: PCWSTR,
     mono_family: Vec<u16>,
+    mono_weights: [u16; 2],
     mono_symbol: Option<IDWriteFont>,
     fallback: Option<Fallback>,
     typography: [IDWriteTypography; 2],
@@ -169,6 +170,7 @@ impl DWriteText {
                 icon_family,
                 default_mono: mono_family,
                 mono_family: mono_family.as_wide().iter().copied().chain([0]).collect(),
+                mono_weights: [400, 700],
                 mono_symbol: None,
                 fallback: None,
                 typography,
@@ -254,10 +256,10 @@ impl DWriteText {
         }
     }
 
-    fn weight(family: FontFamily, bold: bool) -> DWRITE_FONT_WEIGHT {
+    fn weight(&self, family: FontFamily, bold: bool) -> DWRITE_FONT_WEIGHT {
         match (bold, family) {
+            (_, FontFamily::Mono) => DWRITE_FONT_WEIGHT(i32::from(self.mono_weights[usize::from(bold)])),
             (false, _) => DWRITE_FONT_WEIGHT_NORMAL,
-            (true, FontFamily::Mono) => DWRITE_FONT_WEIGHT_BOLD,
             (true, _) => DWRITE_FONT_WEIGHT_SEMI_BOLD,
         }
     }
@@ -277,7 +279,7 @@ impl DWriteText {
         let f = unsafe {
             let f = self
                 .factory
-                .CreateTextFormat(self.family(style.family), &self.collection, Self::weight(style.family, style.bold), Self::slant(style.italic), DWRITE_FONT_STRETCH_NORMAL, style.px().max(1.0), w!("en-us"))
+                .CreateTextFormat(self.family(style.family), &self.collection, self.weight(style.family, style.bold), Self::slant(style.italic), DWRITE_FONT_STRETCH_NORMAL, style.px().max(1.0), w!("en-us"))
                 .ok()?;
             let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             if let Some(fallback) = self.fallback.as_ref().filter(|_| style.family == FontFamily::Mono) {
@@ -307,7 +309,7 @@ impl DWriteText {
             (|| {
                 let (mut i, mut exists) = (0u32, BOOL(0));
                 self.collection.FindFamilyName(self.family(family), &mut i, &mut exists).ok()?;
-                let font = self.collection.GetFontFamily(i).ok()?.GetFirstMatchingFont(Self::weight(family, bold), DWRITE_FONT_STRETCH_NORMAL, Self::slant(italic)).ok()?;
+                let font = self.collection.GetFontFamily(i).ok()?.GetFirstMatchingFont(self.weight(family, bold), DWRITE_FONT_STRETCH_NORMAL, Self::slant(italic)).ok()?;
                 let mut m = DWRITE_FONT_METRICS::default();
                 font.GetMetrics(&mut m);
                 Some(m)
@@ -319,6 +321,11 @@ impl DWriteText {
 }
 
 impl TextBackend for DWriteText {
+    fn set_mono_font(&mut self, name: &str, weights: [u16; 2]) -> bool {
+        self.mono_weights = weights;
+        self.set_mono_family(name)
+    }
+
     fn set_ui_family(&mut self, name: &str) -> bool {
         let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
         let found = !name.is_empty() && !name.contains('\0') && self.has_family(PCWSTR(wide.as_ptr()));

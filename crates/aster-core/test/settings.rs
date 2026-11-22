@@ -279,6 +279,16 @@ fn the_query_filters_by_every_word_across_label_hint_and_section() {
             }
         }
     }
+    let tab_settings: Vec<_> = SETTINGS.iter().enumerate().filter(|(i, _)| !listed.contains(i)).map(|(_, setting)| setting.key).collect();
+    assert_eq!(tab_settings, ["appearance.color-scheme", "appearance.light-color-scheme"]);
+    for key in tab_settings {
+        page.show_page(0);
+        page.query = key.into();
+        page.refilter();
+        let index = SETTINGS.iter().position(|setting| setting.key == key).unwrap();
+        assert!(page.shown.contains(&index), "{key} is reachable via settings search");
+        listed.insert(index);
+    }
     assert_eq!(listed.len(), SETTINGS.len(), "every setting is on some page");
     page.query = "dock top".into();
     page.refilter();
@@ -730,13 +740,13 @@ fn the_profile_editor_validates_and_canonicalizes_the_color_scheme() {
     let mut a = app();
     let scheme = a.scheme_names().into_iter().find(|name| *name != name.to_ascii_lowercase()).unwrap();
     choose_template(&mut a, "Local shell");
-    focus_field(&mut a, "General", "Color scheme");
+    focus_field(&mut a, "Colors", "Color scheme");
     typed(&mut a, &scheme.to_ascii_lowercase());
     a.on_event(ctrl(Key::Enter));
     assert_eq!(saved(&mut a).unwrap().profiles[0].scheme.as_deref(), Some(scheme.as_str()));
 
     key(&mut a, Key::Enter);
-    focus_field(&mut a, "General", "Color scheme");
+    focus_field(&mut a, "Colors", "Color scheme");
     let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
     assert_eq!(editor.tabs[editor.tab].fields[editor.focus].value, scheme);
     a.on_event(ctrl(Key::Backspace));
@@ -766,12 +776,90 @@ fn color_scheme_page_lists_settings_then_custom_and_builtin_palettes() {
     let page = a.settings.as_ref().unwrap();
     assert_eq!(PAGES[page.page], COLORS);
     assert!(page.shown.iter().all(|&i| page.section(i) == COLORS));
-    let controls: Vec<_> = page.shown[..3].iter().map(|&i| SETTINGS[i].key).collect();
-    assert_eq!(controls, ["appearance.color-scheme-mode", "appearance.color-scheme", "appearance.light-color-scheme"]);
-    let rows: Vec<_> = page.shown[3..].iter().map(|&i| page.scheme_at(i).unwrap()).collect();
-    assert_eq!(rows.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), a.scheme_names());
+    let controls: Vec<_> = page.shown.iter().filter_map(|&i| SETTINGS.get(i)).map(|setting| setting.key).collect();
+    assert_eq!(controls, ["appearance.color-scheme-mode", "colors.generate-256", "colors.harmonious"]);
+    let rows: Vec<_> = page.shown.iter().filter_map(|&i| page.scheme_at(i)).collect();
+    assert_eq!(rows.len(), a.scheme_names().len());
     assert_eq!(*rows[0], SchemeRow { name: "Sample".into(), custom: true, foreground: 0x123456, background: 0xabcdef, colors });
     assert!(rows[1..].iter().all(|s| !s.custom));
+    assert!(rows[1..].windows(2).all(|pair| pair[0].name.to_lowercase() <= pair[1].name.to_lowercase()));
+}
+
+#[test]
+fn colors_tab_updates_the_other_mode_without_changing_the_active_palette() {
+    use crate::settings_colors::SchemeTab;
+    let mut a = app();
+    a.run(Action::Settings);
+    a.show_settings_page(PAGES.iter().position(|&p| p == COLORS).unwrap());
+    assert_eq!(a.settings.as_ref().unwrap().scheme_tab, SchemeTab::Dark);
+    let bar = a.settings_geometry().unwrap().scheme_bar.unwrap();
+    a.settings_click(bar.tabs[1].x + 1.0, bar.tabs[1].y + 1.0);
+    assert_eq!(a.settings.as_ref().unwrap().scheme_tab, SchemeTab::Light);
+    typed(&mut a, "Dracula");
+    let page = a.settings.as_ref().unwrap();
+    assert!(page.shown.iter().all(|&i| page.section(i) == COLORS));
+    assert_eq!(page.scheme_at(page.current_item().unwrap()).unwrap().name, "Dracula");
+    key(&mut a, Key::Enter);
+    let config = saved(&mut a).unwrap();
+    assert_eq!(config.appearance.light_color_scheme, "Dracula");
+    assert_eq!(a.current_scheme(), "Aster Dark");
+}
+
+#[test]
+fn deleting_a_custom_scheme_requires_confirmation_and_restores_defaults() {
+    let mut a = app();
+    let mut config = a.config().clone();
+    config.appearance.color_scheme = "Sample".into();
+    config.appearance.light_color_scheme = "sample".into();
+    config.color_schemes.push(crate::config::CustomScheme {
+        name: "Sample".into(), foreground: "#123456".into(), background: "#abcdef".into(),
+        colors: vec!["#204060".into(); 16], ..Default::default()
+    });
+    a.set_config(config);
+    a.run(Action::Settings);
+    a.show_settings_page(PAGES.iter().position(|&p| p == COLORS).unwrap());
+    key(&mut a, Key::Delete);
+    assert_eq!(a.settings.as_ref().unwrap().deleting_scheme.as_deref(), Some("Sample"));
+    assert!(saved(&mut a).is_none());
+    key(&mut a, Key::Escape);
+    assert!(a.settings.as_ref().unwrap().deleting_scheme.is_none());
+    key(&mut a, Key::Delete);
+    key(&mut a, Key::Enter);
+    let config = saved(&mut a).unwrap();
+    assert!(config.color_schemes.is_empty());
+    assert_eq!(config.appearance.color_scheme, "Aster Dark");
+    assert_eq!(config.appearance.light_color_scheme, "Aster Light");
+    assert!(a.settings.as_ref().unwrap().scheme_item("Sample").is_none());
+}
+
+#[test]
+fn copying_a_builtin_scheme_saves_only_after_validation() {
+    let mut a = app();
+    a.run(Action::Settings);
+    a.show_settings_page(PAGES.iter().position(|&p| p == COLORS).unwrap());
+    let bar = a.settings_geometry().unwrap().scheme_bar.unwrap();
+    a.settings_click(bar.delete.x + 1.0, bar.delete.y + 1.0);
+    let editor = a.settings.as_ref().unwrap().scheme_editor.as_ref().unwrap();
+    assert!(editor.original.is_none());
+    assert_eq!(editor.fields[0], "Aster Dark (copy)");
+    typed(&mut a, "aster light");
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(a.settings.as_ref().unwrap().scheme_editor.as_ref().unwrap().error, Some(crate::scheme_editor::SchemeIssue::DuplicateName));
+    assert!(saved(&mut a).is_none());
+    typed(&mut a, "New scheme");
+    key(&mut a, Key::Tab);
+    typed(&mut a, "#123456");
+    a.on_event(ctrl(Key::Enter));
+    let config = saved(&mut a).unwrap();
+    assert_eq!(config.appearance.color_scheme, "New scheme");
+    assert_eq!(config.color_schemes[0].foreground, "#123456");
+    assert!(a.settings.as_ref().unwrap().scheme_editor.is_none());
+    key(&mut a, Key::F(2));
+    assert_eq!(a.settings.as_ref().unwrap().scheme_editor.as_ref().unwrap().original.as_deref(), Some("New scheme"));
+    typed(&mut a, "Discarded");
+    key(&mut a, Key::Escape);
+    assert_eq!(a.config().color_schemes[0].name, "New scheme");
+    assert!(saved(&mut a).is_none());
 }
 
 #[test]
@@ -854,7 +942,7 @@ fn scheme_search_matches_settings_and_only_matching_palette_names() {
     typed(&mut a, "scheme");
     let page = a.settings.as_ref().unwrap();
     let settings: Vec<_> = page.shown.iter().filter_map(|&i| SETTINGS.get(i)).filter(|s| s.section == COLORS).map(|s| s.key).collect();
-    assert_eq!(settings, ["appearance.color-scheme-mode", "appearance.color-scheme", "appearance.light-color-scheme"]);
+    assert_eq!(settings, ["appearance.color-scheme-mode", "appearance.color-scheme", "appearance.light-color-scheme", "colors.generate-256", "colors.harmonious"]);
     let rows: Vec<_> = page.shown.iter().filter_map(|&i| page.scheme_at(i)).collect();
     let expected = a.scheme_names().iter().filter(|name| name.to_lowercase().contains("scheme")).count();
     assert_eq!(rows.len(), expected);
@@ -921,8 +1009,11 @@ fn vault_password_dialog_masks_input_and_retries_after_wrong_password() {
     key(&mut a, Key::Backspace);
     let input = request_vault_paste(&mut a);
     a.on_event(Event::VaultPasted { input, text: " ё ".into() });
+    assert_eq!(a.settings.as_ref().unwrap().vault_dialog.as_ref().unwrap().display(0), "•••••");
     key(&mut a, Key::Enter);
-    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultCreate { passphrase } if passphrase == "Aя ё ")));
+    let effects = a.take_effects();
+    assert!(effects.iter().any(|e| matches!(e, Effect::VaultCreate { passphrase } if passphrase == "Aя ё ")));
+    assert!(!effects.iter().any(|e| matches!(e, Effect::SaveConfig(_) | Effect::Write { .. })));
     a.vault_state(unlocked_vault());
     a.vault_reply(a.vault_input_id, Ok(VaultReply::Applied));
     a.vault_state(VaultView { configured: true, ..Default::default() });
@@ -931,7 +1022,11 @@ fn vault_password_dialog_masks_input_and_retries_after_wrong_password() {
     typed(&mut a, "first");
     key(&mut a, Key::Enter);
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultUnlock { passphrase } if passphrase == "first")));
+    typed(&mut a, "while waiting");
     a.vault_reply(a.vault_input_id, Err(VaultIssue::WrongPassphrase));
+    let page = a.settings.as_ref().unwrap();
+    assert!(page.query.is_empty());
+    assert_eq!(page.vault_dialog.as_ref().unwrap().display(0), "");
     typed(&mut a, "retry");
     key(&mut a, Key::Enter);
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultUnlock { passphrase } if passphrase == "retry")));
@@ -991,6 +1086,13 @@ fn leaving_a_vault_dialog_discards_its_clipboard_request() {
     key(&mut a, Key::Escape);
     a.on_event(Event::VaultPasted { input, text: "clipboard passphrase".into() });
     assert!(a.settings.as_ref().unwrap().query.is_empty());
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::VaultCreate { .. } | Effect::Write { .. } | Effect::SaveConfig(_))));
+
+    key(&mut a, Key::Enter);
+    typed(&mut a, "discarded");
+    let input = request_vault_paste(&mut a);
+    a.close_settings();
+    a.on_event(Event::VaultPasted { input, text: "clipboard passphrase".into() });
     assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::VaultCreate { .. } | Effect::Write { .. } | Effect::SaveConfig(_))));
 }
 
@@ -1169,4 +1271,40 @@ fn encrypted_startup_prompts_before_content_and_retries_without_leaking_input() 
     assert!(a.take_effects().iter().any(|effect| matches!(effect, Effect::CancelConfigUnlock)));
     assert!(a.vault_prompt.is_none());
     assert_eq!(a.setting_text(setting), "Encrypted");
+}
+
+#[test]
+fn vault_change_masks_both_fields_and_discards_interrupted_input() {
+    use crate::vault_settings::DialogKind;
+
+    let mut a = app();
+    select_vault(&mut a);
+    for auto_lock in [false, true] {
+        a.vault_state(unlocked_vault());
+        a.open_vault_dialog(DialogKind::Change);
+        typed(&mut a, "first");
+        key(&mut a, Key::Enter);
+        typed(&mut a, "second");
+        let dialog = a.settings.as_ref().unwrap().vault_dialog.as_ref().unwrap();
+        assert_eq!(dialog.focus, 1);
+        assert_eq!(dialog.display(0), "•••••");
+        assert_eq!(dialog.display(1), "••••••");
+        assert!(!format!("{dialog:?}").contains("first"));
+        assert!(!format!("{dialog:?}").contains("second"));
+        if !auto_lock {
+            key(&mut a, Key::Enter);
+            assert!(a.take_effects().iter().any(|e| matches!(e, Effect::VaultChange { old, new } if old == "first" && new == "second")));
+            continue;
+        }
+
+        let input = request_vault_paste(&mut a);
+        a.vault_state(VaultView { configured: true, ..Default::default() });
+        typed(&mut a, "remainder");
+        a.on_event(Event::VaultPasted { input, text: "clipboard passphrase".into() });
+        let page = a.settings.as_ref().unwrap();
+        assert!(page.query.is_empty() && page.vault_dialog.is_none() && page.editing());
+        key(&mut a, Key::Escape);
+        assert!(!a.settings.as_ref().unwrap().editing());
+        assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::VaultChange { .. } | Effect::Write { .. } | Effect::SaveConfig(_))));
+    }
 }

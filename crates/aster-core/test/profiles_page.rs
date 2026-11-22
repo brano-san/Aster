@@ -207,10 +207,10 @@ fn editor_tabs_follow_the_connection_and_keep_keyboard_focus_inside_the_tab() {
     use crate::input::{Key, Mods};
     let local = Profile::new("id", "Shell", "cmd", &[]);
     for (profile, expected) in [
-        (local.clone(), vec!["General", "Command"]),
-        (Profile { ssh: Some("host".into()), ..local.clone() }, vec!["General", "SSH", "Stream"]),
-        (Profile { serial: Some("COM3".into()), ..local.clone() }, vec!["General", "Serial", "Stream"]),
-        (Profile { socket: Some("tcp://host:3000".into()), ..local }, vec!["General", "Network", "Stream"]),
+        (local.clone(), vec!["General", "Command", "Colors"]),
+        (Profile { ssh: Some("host".into()), ..local.clone() }, vec!["General", "SSH", "Stream", "Colors"]),
+        (Profile { serial: Some("COM3".into()), ..local.clone() }, vec!["General", "Serial", "Stream", "Colors"]),
+        (Profile { socket: Some("tcp://host:3000".into()), ..local }, vec!["General", "Network", "Stream", "Colors"]),
     ] {
         let mut e = model(profile);
         assert_eq!(e.tabs.iter().map(|tab| tab.label.as_str()).collect::<Vec<_>>(), expected);
@@ -220,6 +220,9 @@ fn editor_tabs_follow_the_connection_and_keep_keyboard_focus_inside_the_tab() {
         assert_eq!(e.focus + 1, e.tabs[1].fields.len());
         e.key(Key::Tab, Mods { ctrl: true, shift: true, ..Mods::NONE });
         assert_eq!((e.tab, e.focus), (0, 0));
+        e.key(Key::Tab, Mods { ctrl: true, shift: true, ..Mods::NONE });
+        assert!(e.colors_tab());
+        assert_eq!(e.tabs[e.tab].fields[0].label, "Color scheme");
     }
 }
 

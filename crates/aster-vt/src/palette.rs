@@ -12,6 +12,7 @@ pub struct Palette {
     pub selection_text: Option<Rgb>,
     pub ansi: [Rgb; 16],
     pub bold_is_bright: bool,
+    pub(crate) extended: Option<[Rgb; 240]>,
 }
 
 const fn rgb(hex: u32) -> Rgb {
@@ -45,6 +46,7 @@ impl Palette {
             rgb(0xffffff),
         ],
         bold_is_bright: true,
+        extended: None,
     };
 
     pub const LIGHT: Palette = Palette {
@@ -73,9 +75,20 @@ impl Palette {
             rgb(0xffffff),
         ],
         bold_is_bright: true,
+        extended: None,
     };
 
+    pub fn with_extended_colors(mut self, harmonious: bool) -> Self {
+        self.extended = Some(crate::indexed_colors::generate(&self, harmonious));
+        self
+    }
+
     pub fn indexed(&self, i: u8) -> Rgb {
+        if i >= 16 {
+            if let Some(colors) = &self.extended {
+                return colors[usize::from(i - 16)];
+            }
+        }
         match i {
             0..=15 => self.ansi[i as usize],
             16..=231 => {

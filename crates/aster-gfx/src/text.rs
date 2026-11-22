@@ -83,6 +83,9 @@ pub trait TextBackend {
     fn set_mono_family(&mut self, name: &str) -> bool {
         name.is_empty()
     }
+    fn set_mono_font(&mut self, name: &str, _weights: [u16; 2]) -> bool {
+        self.set_mono_family(name)
+    }
     fn set_fallback_family(&mut self, name: &str) -> bool {
         name.is_empty()
     }
@@ -125,6 +128,7 @@ type Shapes = FxHashMap<u64, (Box<str>, ShapedText)>;
 
 const ELLIPSIS: &str = "…";
 const MAX_SHAPES: usize = 50_000;
+const BACKGROUND_IMAGE: u64 = u64::MAX;
 
 pub struct Gfx<B: TextBackend> {
     pub text: B,
@@ -134,11 +138,13 @@ pub struct Gfx<B: TextBackend> {
     shapes: Shapes,
     glyphs: FxHashMap<GlyphKey, Option<GlyphSlot>>,
     images: FxHashMap<u64, Image>,
+    background_revision: Option<u64>,
     metrics: FxHashMap<FontStyle, FontMetrics>,
     scratch: GlyphBitmap,
     ui_family: String,
     ui_found: bool,
     mono_family: String,
+    mono_weights: Option<[u16; 2]>,
     fallback_family: String,
 }
 
@@ -152,19 +158,27 @@ impl<B: TextBackend> Gfx<B> {
             shapes: Default::default(),
             glyphs: Default::default(),
             images: Default::default(),
+            background_revision: None,
             metrics: Default::default(),
             scratch: GlyphBitmap::default(),
             ui_family: String::new(),
             ui_found: true,
             mono_family: String::new(),
+            mono_weights: None,
             fallback_family: String::new(),
         }
     }
 
     pub fn set_mono_family(&mut self, name: &str) {
-        if self.mono_family != name {
-            self.text.set_mono_family(name);
-            self.mono_family = name.to_owned();
+        self.set_mono_font(name, self.mono_weights.unwrap_or([400, 700]));
+    }
+
+    pub fn set_mono_font(&mut self, name: &str, weights: [u16; 2]) {
+        let weights = weights.map(|weight| (weight.clamp(100, 900) + 50) / 100 * 100);
+        if self.mono_family != name || self.mono_weights != Some(weights) {
+            self.text.set_mono_font(name, weights);
+            name.clone_into(&mut self.mono_family);
+            self.mono_weights = Some(weights);
             self.shapes.clear();
             self.metrics.clear();
         }
@@ -188,6 +202,7 @@ impl<B: TextBackend> Gfx<B> {
         }
         if self.text.poll_font_change() {
             self.shapes.clear();
+            self.metrics.clear();
         }
     }
 
@@ -336,7 +351,34 @@ impl<B: TextBackend> Gfx<B> {
     }
 
     pub fn image_alpha(&mut self, key: u64, r: Rect, alpha: u8) -> bool {
-        let Some(img) = self.images.get(&key) else { return false };
+        let Some(slot) = self.image_slot(key) else { return false };
+        self.dl.image(r, uv(slot, self.atlas.size()), alpha);
+        true
+    }
+
+    pub fn set_background_image(&mut self, image: Option<(u64, [u32; 2], &[u8])>) {
+        let revision = image.map(|(revision, _, _)| revision);
+        if self.background_revision == revision {
+            return;
+        }
+        self.images.remove(&BACKGROUND_IMAGE);
+        if let Some((_, [width, height], rgba)) = image {
+            self.add_image(BACKGROUND_IMAGE, width, height, rgba.to_vec());
+        }
+        self.background_revision = revision;
+    }
+
+    pub fn prepare_background_image(&mut self) {
+        self.image_slot(BACKGROUND_IMAGE);
+    }
+
+    pub fn draw_background_image(&mut self, r: Rect, tile: Option<[f32; 2]>, alpha: u8) {
+        let Some(slot) = self.image_slot(BACKGROUND_IMAGE) else { return };
+        self.dl.tiled_image(r, uv(slot, self.atlas.size()), tile.unwrap_or([r.w, r.h]), alpha);
+    }
+
+    fn image_slot(&mut self, key: u64) -> Option<Slot> {
+        let img = self.images.get(&key)?;
         let slot = match img.slot {
             Some(s) => {
                 self.atlas.touch(s);
@@ -344,7 +386,7 @@ impl<B: TextBackend> Gfx<B> {
             }
             None => {
                 let (w, h) = (img.w, img.h);
-                let Some(s) = self.split().1.allocate(w, h) else { return false };
+                let s = self.split().1.allocate(w, h)?;
                 let img = self.images.get_mut(&key).expect("registered image");
                 self.uploads.rects.push((s, self.uploads.data.len()));
                 self.uploads.data.extend_from_slice(&img.rgba);
@@ -352,9 +394,7 @@ impl<B: TextBackend> Gfx<B> {
                 s
             }
         };
-        let uv = uv(slot, self.atlas.size());
-        self.dl.image(r, uv, alpha);
-        true
+        Some(slot)
     }
 }
 

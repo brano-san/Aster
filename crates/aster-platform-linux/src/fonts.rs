@@ -24,10 +24,18 @@ pub type Pair = [FontFile; 2];
 pub type MappedPair = [(&'static [u8], u32); 2];
 
 pub fn request_fallback(name: String, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Option<mpsc::Receiver<Option<MappedPair>>> {
+    request_pair(wake, move |fc| fc.family(&name))
+}
+
+pub fn request_mono(name: String, weights: [u16; 2], wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Option<mpsc::Receiver<Option<MappedPair>>> {
+    request_pair(wake, move |fc| fc.mono_family(&name, weights))
+}
+
+fn request_pair(wake: Option<Arc<dyn Fn() + Send + Sync>>, pick: impl FnOnce(&Fontconfig) -> Option<Pair> + Send + 'static) -> Option<mpsc::Receiver<Option<MappedPair>>> {
     let (tx, rx) = mpsc::channel();
-    std::thread::Builder::new().name("aster-font-fallback".into()).spawn(move || {
+    std::thread::Builder::new().name("aster-font-selection".into()).spawn(move || {
         let mapped = (|| {
-            let [regular, bold] = fonts().wait().fc.as_ref()?.family(&name)?;
+            let [regular, bold] = pick(fonts().wait().fc.as_ref()?)?;
             Some([(map_file(&regular.path)?, regular.index), (map_file(&bold.path)?, bold.index)])
         })();
         if tx.send(mapped).is_ok() {
@@ -298,6 +306,12 @@ impl Fontconfig {
 
     pub fn family(&self, family: &str) -> Option<Pair> {
         Some([self.matched(family, WEIGHT_REGULAR, true)?, self.matched(family, WEIGHT_SEMIBOLD, true)?])
+    }
+
+    fn mono_family(&self, family: &str, weights: [u16; 2]) -> Option<Pair> {
+        let [regular, bold] = weights.map(|weight| [0, 40, 50, 80, 100, 180, 200, 205, 210][usize::from(weight.clamp(100, 900) / 100 - 1)]);
+        let pair = |name: &str, exact| Some([self.matched(name, regular, exact)?, self.matched(name, bold, exact)?]);
+        (!family.is_empty()).then(|| pair(family, true)).flatten().or_else(|| pair("monospace", false))
     }
 
     fn generic(&self, family: &str) -> Option<Pair> {

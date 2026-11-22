@@ -1,3 +1,4 @@
+mod indexed_colors;
 mod osc;
 mod palette;
 pub mod schemes;

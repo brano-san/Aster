@@ -54,6 +54,7 @@ pub mod kind {
     pub const IMAGE: u32 = 2;
     pub const SHADOW: u32 = 3;
     pub const UNDERCURL: u32 = 4;
+    pub const TILED_IMAGE: u32 = 5;
 }
 
 #[repr(C)]
@@ -222,6 +223,10 @@ impl DrawList {
 
     pub fn image(&mut self, r: Rect, uv: [f32; 4], alpha: u8) {
         self.push(r, uv, Color(0xFFFF_FFFF).alpha(alpha), 0.0, 0.0, kind::IMAGE);
+    }
+
+    pub fn tiled_image(&mut self, r: Rect, uv: [f32; 4], [w, h]: [f32; 2], alpha: u8) {
+        self.push(r, uv, Color(0xFFFF_FFFF).alpha(alpha), w, h, kind::TILED_IMAGE);
     }
 
     pub fn check(&mut self, r: Rect, color: Color) {

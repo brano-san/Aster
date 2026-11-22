@@ -12,6 +12,9 @@ pub struct Scheme {
 
 pub fn parse_hex(s: &str) -> Option<Rgb> {
     let h = s.trim().strip_prefix('#')?;
+    if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let (r, g, b) = match h.len() {
         6 => (u8::from_str_radix(&h[0..2], 16).ok()?, u8::from_str_radix(&h[2..4], 16).ok()?, u8::from_str_radix(&h[4..6], 16).ok()?),
         3 => {

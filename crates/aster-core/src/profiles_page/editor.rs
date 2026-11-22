@@ -182,7 +182,7 @@ impl ProfileEditor {
         fields.push(Field::Color.text(optional(p.color.as_ref())));
         let mut schemes = names(schemes);
         schemes.insert(0, (String::new(), t("Window scheme").into()));
-        fields.push(Field::Scheme.choice(optional(p.scheme.as_ref()), schemes, true));
+        let scheme = Field::Scheme.choice(optional(p.scheme.as_ref()), schemes, true);
         fields.push(Field::Exit.choice(enum_text((p.on_exit != OnExit::Inherit).then_some(p.on_exit)), options(EXITS, true), false));
         if !is_defaults { fields.push(Field::Hidden.toggle(Some(p.hidden), false)); }
         let mut tabs = vec![EditorTab::new("General", fields)];
@@ -194,6 +194,7 @@ impl ProfileEditor {
             _ => {}
         }
         if matches!(kind, "ssh" | "serial" | "socket") { tabs.push(stream_tab(p.stream.as_ref())); }
+        tabs.push(EditorTab::new("Colors", vec![scheme]));
         Self { original, error: None, tab: 0, focus: 0, tabs, source: p, defaults, kind, groups: config.groups.clone(), global: config.profile_defaults.clone() }
     }
 
@@ -206,6 +207,23 @@ impl ProfileEditor {
 
     pub(crate) fn is_global_environment(&self) -> bool {
         self.kind == "environment"
+    }
+
+    pub(crate) fn colors_tab(&self) -> bool {
+        self.tabs[self.tab].fields.first().is_some_and(|field| field.id == Field::Scheme)
+    }
+
+    pub(crate) fn preview_scheme(&self, config: &Config) -> Option<String> {
+        if let Some(name) = self.opt(Field::Scheme) {
+            return Some(name);
+        }
+        if self.defaults.is_some() {
+            return None;
+        }
+        let mut profile = self.source.clone();
+        profile.group = self.opt(Field::Group);
+        profile.scheme = None;
+        crate::profile::effective(&profile, config).scheme
     }
 
     pub fn title(&self) -> String {

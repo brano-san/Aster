@@ -9,6 +9,32 @@ fn term(cols: usize, rows: usize) -> (Terminal, Arc<Mutex<Vec<VtEvent>>>) {
 }
 
 #[test]
+fn generated_cube_uses_scheme_primaries_and_keeps_the_first_sixteen_colors() {
+    let base = Palette::DARK;
+    let generated = base.with_extended_colors(false);
+    for i in 0..16 {
+        assert_eq!(generated.indexed(i), base.indexed(i));
+    }
+    for (index, ansi) in [(21, 4), (46, 2), (51, 6), (196, 1), (201, 5), (226, 3)] {
+        assert_eq!(generated.indexed(index), base.ansi[ansi]);
+    }
+    assert_ne!(generated.indexed(102), base.indexed(102));
+    assert_eq!(base.indexed(16), Rgb { r: 0, g: 0, b: 0 });
+}
+
+#[test]
+fn generated_ramp_runs_between_scheme_colors_and_reverses_for_light_harmony() {
+    let light = Palette::LIGHT;
+    let normal = light.with_extended_colors(false);
+    let inverted = light.with_extended_colors(true);
+    assert!(normal.indexed(232).r > normal.indexed(255).r);
+    assert_eq!(normal.indexed(232), inverted.indexed(255));
+    assert_eq!(normal.indexed(255), inverted.indexed(232));
+    assert_ne!(normal.indexed(196), inverted.indexed(196));
+    assert_eq!(Palette::DARK.with_extended_colors(false), Palette::DARK.with_extended_colors(true));
+}
+
+#[test]
 fn prints_text_and_wraps_lines() {
     let (mut t, _) = term(5, 3);
     t.feed(b"hello world");

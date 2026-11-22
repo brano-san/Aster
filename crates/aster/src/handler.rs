@@ -34,6 +34,7 @@ struct State<P: Platform> {
 
 enum StoreEvent {
     Launcher(Option<WindowId>, std::io::Result<bool>),
+    BackgroundImage { window: WindowId, revision: u64, bitmap: Option<aster_core::background::Bitmap> },
     FontFamilies { monospace: Vec<String>, all: Vec<String> },
     CommandProbe { window: WindowId, request: u64, busy: bool },
     Vault(VaultUpdate),
@@ -821,6 +822,23 @@ impl<P: Platform> Handler<P> {
                     s.app.set_surface(got.translucent, got.backdrop);
                 }
             }
+            Effect::LoadBackgroundImage { revision, path } => {
+                let mut path = PathBuf::from(path);
+                if path.is_relative() {
+                    if let Some(base) = self.config_path.as_deref().and_then(std::path::Path::parent) {
+                        path = base.join(path);
+                    }
+                }
+                let events = self.store_events.clone();
+                if let Err(error) = crate::background::request(path, move |bitmap| {
+                    events.post(StoreEvent::BackgroundImage { window: id, revision, bitmap });
+                }) {
+                    tracing::warn!("background image worker: {error}");
+                    if let Some(state) = self.windows.get_mut(&id) {
+                        state.app.background_image_loaded(revision, None);
+                    }
+                }
+            }
             Effect::Beep => {
                 if !P::beep() {
                     if let Some(s) = self.windows.get_mut(&id) {
@@ -977,6 +995,11 @@ impl<P: Platform> Handler<P> {
                             Ok(config) => self.startup_config = Some((window, config)),
                             Err(issue) => state.app.config_unlock_error(request, issue),
                         }
+                    }
+                }
+                StoreEvent::BackgroundImage { window, revision, bitmap } => {
+                    if let Some(state) = self.windows.get_mut(&window) {
+                        state.app.background_image_loaded(revision, bitmap);
                     }
                 }
                 StoreEvent::CommandProbe { window, request, busy } => {

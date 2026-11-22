@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn terminal_font_weights_invalidate_existing_directwrite_formats() {
+    let mut text = DWriteText::new().unwrap();
+    let regular = FontStyle::new(FontFamily::Mono, 16.0, false);
+    let bold = FontStyle::new(FontFamily::Mono, 16.0, true);
+    let ui = FontStyle::new(FontFamily::Ui, 16.0, true);
+    assert_eq!(unsafe { text.format(regular).unwrap().GetFontWeight() }, DWRITE_FONT_WEIGHT_NORMAL);
+    assert!(text.set_mono_font("Consolas", [300, 800]));
+    assert_eq!(unsafe { text.format(regular).unwrap().GetFontWeight() }, DWRITE_FONT_WEIGHT(300));
+    assert_eq!(unsafe { text.format(bold).unwrap().GetFontWeight() }, DWRITE_FONT_WEIGHT(800));
+    assert_eq!(unsafe { text.format(ui).unwrap().GetFontWeight() }, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+}
+
+#[test]
 fn system_font_families_filter_proportional_faces() {
     let all = font_families(false).unwrap();
     let monospace = font_families(true).unwrap();

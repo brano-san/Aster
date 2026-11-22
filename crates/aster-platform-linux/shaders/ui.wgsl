@@ -27,6 +27,7 @@ struct PsIn {
     @location(4) @interpolate(flat) clip: vec4<f32>,
     @location(5) @interpolate(flat) params: vec2<f32>,
     @location(6) @interpolate(flat) kind: u32,
+    @location(7) @interpolate(flat) uv_rect: vec4<f32>,
 }
 
 @vertex
@@ -42,6 +43,7 @@ fn vs_main(i: VsIn) -> PsIn {
     o.clip = i.clip;
     o.params = i.params;
     o.kind = i.kind;
+    o.uv_rect = i.uv;
     return o;
 }
 
@@ -64,6 +66,11 @@ fn fs_main(i: PsIn) -> @location(0) vec4<f32> {
     }
     if (i.kind == 2u) {
         return textureSampleLevel(atlas, samp, i.uv, 0.0) * i.color.a;
+    }
+    if (i.kind == 5u) {
+        let inset = vec2<f32>(0.5) / vec2<f32>(textureDimensions(atlas));
+        let uv = mix(i.uv_rect.xy, i.uv_rect.zw, fract(i.local / i.params));
+        return textureSampleLevel(atlas, samp, clamp(uv, i.uv_rect.xy + inset, i.uv_rect.zw - inset), 0.0) * i.color.a;
     }
     let r = i.params.x;
     let border = i.params.y;

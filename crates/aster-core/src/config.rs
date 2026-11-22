@@ -160,6 +160,8 @@ pub struct SearchOptions {
 #[serde(default, rename_all = "kebab-case")]
 pub struct Terminal {
     pub font: String,
+    pub font_weight: u16,
+    pub font_weight_bold: u16,
     pub fallback_font: String,
     pub ligatures: bool,
     pub minimum_contrast_ratio: f32,
@@ -203,6 +205,8 @@ impl Default for Terminal {
     fn default() -> Self {
         Self {
             font: "Cascadia Mono".into(),
+            font_weight: 400,
+            font_weight_bold: 700,
             fallback_font: String::new(),
             ligatures: false,
             minimum_contrast_ratio: 1.0,
@@ -313,6 +317,10 @@ pub struct Appearance {
     pub animations: bool,
     pub tray: bool,
     pub ui_font: String,
+    pub ui_from_scheme: bool,
+    pub background_image: String,
+    pub background_image_opacity: f32,
+    pub background_image_fit: crate::background::Fit,
     pub density: f32,
     pub opacity: f32,
     pub backdrop: Backdrop,
@@ -347,6 +355,10 @@ impl Default for Appearance {
             animations: true,
             tray: false,
             ui_font: String::new(),
+            ui_from_scheme: true,
+            background_image: String::new(),
+            background_image_opacity: 0.25,
+            background_image_fit: Default::default(),
             density: 1.0,
             opacity: 1.0,
             backdrop: Backdrop::None,
@@ -374,12 +386,18 @@ impl Default for Appearance {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct CustomScheme {
     pub name: String,
     pub foreground: String,
     pub background: String,
     pub cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection_text: Option<String>,
     pub colors: Vec<String>,
 }
 
@@ -429,6 +447,13 @@ pub struct Palette {
     pub hidden_commands: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Colors {
+    pub generate_256: bool,
+    pub harmonious: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
@@ -436,6 +461,7 @@ pub struct Config {
     pub palette: Palette,
     pub terminal: Terminal,
     pub appearance: Appearance,
+    pub colors: Colors,
     pub panes: Panes,
     pub notifications: Notifications,
     pub dock: DockSettings,

@@ -6,6 +6,7 @@ use crate::input::{Key, Mods};
 use crate::keymap::{format_binding, Action, Chord};
 use crate::profiles_page::{self, GroupEditor, Header, TreeKind, TreeRow};
 use crate::profiles_page::editor::ProfileEditor;
+use crate::settings_colors::{SchemeBar, SchemeTab};
 use std::collections::BTreeSet;
 use aster_gfx::render::Rect;
 use toml::Value;
@@ -59,7 +60,8 @@ const CONFIG_FILE: &str = "Config file";
 const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("underline", "Underline")];
 const LINK_MODIFIERS: &[(&str, &str)] = &[("none", "None"), ("ctrl", "Ctrl"), ("shift", "Shift")];
 const RIGHT_CLICK: &[(&str, &str)] = &[("off", "Nothing"), ("menu", "Context menu"), ("paste", "Paste"), ("clipboard", "Copy or paste")];
-const SCHEME_MODES: &[(&str, &str)] = &[("dark", "Dark"), ("light", "Light"), ("auto", "Follow the system")];
+const SCHEME_MODES: &[(&str, &str)] = &[("auto", "Follow the system"), ("dark", "Always dark"), ("light", "Always light")];
+const BACKGROUND_FITS: &[(&str, &str)] = &[("cover", "Cover pane"), ("contain", "Fit inside pane"), ("stretch", "Stretch to pane"), ("tile", "Tile image")];
 const BELLS: &[(&str, &str)] = &[("off", "Off"), ("visual", "Flash the pane"), ("audible", "System sound")];
 const IDENTIFICATION: &[(&str, &str)] = &[("aster", "Aster"), ("xterm", "Compatibility")];
 const TAB_BARS: &[(&str, &str)] = &[("always", "Always"), ("auto", "With two or more tabs"), ("never", "Never")];
@@ -107,14 +109,20 @@ pub const SETTINGS: &[Setting] = &[
     item(SEARCH, "terminal.search-options.whole-word", "Whole words", "Search matches whole words only", Control::Toggle),
     item(APPEARANCE, "terminal.font", "Font", "Monospace font family for the terminal", Control::Font { monospace: true }),
     item(APPEARANCE, "terminal.font-size", "Font size", "Size in points before zoom", Control::Number { min: 6.0, max: 48.0, step: 1.0 }),
+    item(APPEARANCE, "terminal.font-weight", "Font weight", "Weight of regular terminal text", Control::Number { min: 100.0, max: 900.0, step: 100.0 }),
+    item(APPEARANCE, "terminal.font-weight-bold", "Bold font weight", "Weight of bold terminal text", Control::Number { min: 100.0, max: 900.0, step: 100.0 }),
     item(APPEARANCE, "terminal.line-padding", "Line padding", "Extra pixels between lines", Control::Number { min: 0.0, max: 20.0, step: 1.0 }),
     item(APPEARANCE, "terminal.padding", "Text padding", "Space between the text and the edges of a pane", Control::Number { min: 0.0, max: 64.0, step: 1.0 }),
     item(APPEARANCE, "terminal.cursor", "Cursor shape", "Shape of the text cursor", Control::Segments(CURSORS)),
     item(APPEARANCE, "terminal.cursor-blink", "Blinking cursor", "The cursor blinks while the window has focus", Control::Toggle),
     item(APPEARANCE, "terminal.minimum-contrast-ratio", "Minimum contrast ratio", "Adjust text color for readability; 1 disables the adjustment", Control::Number { min: 1.0, max: 21.0, step: 0.5 }),
     item(APPEARANCE, "appearance.ui-font", "Interface font", "Font of tabs and menus; empty uses the system font", Control::Font { monospace: false }),
+    item(APPEARANCE, "appearance.ui-from-scheme", "Interface colors from the scheme", "Use the terminal scheme for tabs, settings, menus and dialogs", Control::Toggle),
     item(APPEARANCE, "terminal.fallback-font", "Fallback font", "Font to try for missing terminal characters before system fallback", Control::Font { monospace: true }),
     item(APPEARANCE, "terminal.ligatures", "Font ligatures", "Allow the terminal font to join adjacent characters", Control::Toggle),
+    item(APPEARANCE, "appearance.background-image", "Background image", "Path to a PNG or JPEG image", Control::Text),
+    item(APPEARANCE, "appearance.background-image-opacity", "Background image opacity", "Blend the image with the terminal background", Control::Number { min: 0.0, max: 1.0, step: 0.01 }),
+    item(APPEARANCE, "appearance.background-image-fit", "Background image fit", "Choose how the image fills each pane", Control::Choice(BACKGROUND_FITS)),
     item(WINDOW, "appearance.opacity", "Opacity", "Background opacity of the terminal", Control::Number { min: 0.2, max: 1.0, step: 0.05 }),
     item(WINDOW, "appearance.backdrop", "Backdrop", "System material behind the window on Windows 11", Control::Choice(BACKDROPS)),
     item(WINDOW, "appearance.density", "Interface density", "Scale tabs, menus, settings and padding", Control::Number { min: 0.6, max: 1.4, step: 0.1 }),
@@ -142,6 +150,8 @@ pub const SETTINGS: &[Setting] = &[
     item(COLORS, "appearance.color-scheme-mode", "Theme", "Dark, light or the system setting", Control::Segments(SCHEME_MODES)),
     item(COLORS, "appearance.color-scheme", "Dark color scheme", "Colors of the dark theme", Control::Schemes),
     item(COLORS, "appearance.light-color-scheme", "Light color scheme", "Colors of the light theme", Control::Schemes),
+    item(COLORS, "colors.generate-256", "Generate a 256-color palette", "Interpolate the extended palette from the 16 base colors", Control::Toggle),
+    item(COLORS, "colors.harmonious", "Harmonious palette", "Reverse the generated palette lightness on light schemes", Control::Toggle),
     item(DOCK, "appearance.dock", "Dock to edge", "Pin the window to a screen edge", Control::Choice(EDGES)),
     item(DOCK, "dock.screen", "Dock screen", "Enter current, primary, or a monitor number starting at 1", Control::Text),
     item(DOCK, "appearance.dock-fill", "Size", "Share of the screen across the edge", SHARE),
@@ -443,7 +453,11 @@ pub struct SettingsPage {
     pub(crate) vault: VaultView,
     launcher_installed: Option<bool>,
     pub(crate) vault_dialog: Option<VaultDialog>,
+    vault_input_interrupted: bool,
     pub schemes: Vec<SchemeRow>,
+    pub(crate) scheme_tab: SchemeTab,
+    pub(crate) deleting_scheme: Option<String>,
+    pub(crate) scheme_editor: Option<crate::scheme_editor::SchemeEditor>,
     pub(crate) editor: Option<ProfileEditor>,
     pub(crate) group_editor: Option<GroupEditor>,
     pub(crate) defaults_kind: Option<&'static str>,
@@ -455,6 +469,10 @@ pub struct SettingsPage {
 }
 
 impl SettingsPage {
+    pub(crate) fn colors_page(&self) -> bool {
+        PAGES[self.page.min(PAGES.len() - 1)] == COLORS
+    }
+
     pub fn new() -> Self {
         let mut page = Self::default();
         page.refilter();
@@ -462,19 +480,21 @@ impl SettingsPage {
     }
 
     pub(crate) fn refilter(&mut self) {
-        self.tree = profiles_page::tree(&self.groups, &self.profiles, &self.collapsed, &self.query);
+        let colors_page = self.colors_page();
+        let query = if colors_page { "" } else { &self.query };
+        self.tree = profiles_page::tree(&self.groups, &self.profiles, &self.collapsed, query);
         let base = self.profile_base();
         let mut shown: Vec<_> = (0..SETTINGS.len()).filter(|&i| {
             let available = match SETTINGS[i].control {
                 Control::Run(Action::ApplicationsMenu(install)) => self.launcher_installed == Some(!install),
                 _ => true,
             };
-            available && (self.vault.configured || SETTINGS[i].key != "vault.encrypt-config") && item_matches(i, &self.query)
+            available && (self.vault.configured || SETTINGS[i].key != "vault.encrypt-config") && (!colors_page || self.query.trim().is_empty() && !SchemeTab::matches_setting(SETTINGS[i].key)) && item_matches(i, query)
         }).collect();
         let vault_rows = (0..).map_while(|k| self.vault.row(k).map(|row| (k, row))).filter_map(|(k, row)| {
             let (source, hint) = row.text();
             let (label, detail) = row.labels(&self.vault);
-            found(&format!("{VAULT} {} {source} {hint} {label} {detail}", t(VAULT)), &self.query).then_some(self.vault_base() + k)
+            found(&format!("{VAULT} {} {source} {hint} {label} {detail}", t(VAULT)), query).then_some(self.vault_base() + k)
         });
         let before_vault = shown.iter().position(|&i| SETTINGS[i].section == VAULT).unwrap_or(shown.len());
         shown.splice(before_vault..before_vault, vault_rows);
@@ -482,9 +502,9 @@ impl SettingsPage {
             if let Some(entry) = self.profile_action(i) {
                 let action = &entry.action;
                 let name = entry.name.as_deref();
-                found(&format!("{SHORTCUTS} {} {PROFILES} {} {} {} {}", t(SHORTCUTS), t(PROFILES), action.source_label_for(name), action.label_for(name), action.id()), &self.query)
+                found(&format!("{SHORTCUTS} {} {PROFILES} {} {} {} {}", t(SHORTCUTS), t(PROFILES), action.source_label_for(name), action.label_for(name), action.id()), query)
             } else {
-                item_matches(i, &self.query)
+                item_matches(i, query)
             }
         });
         let scheme_base = self.scheme_base();
@@ -497,12 +517,13 @@ impl SettingsPage {
         self.deleting = None;
         self.shown = if self.searching_vault() && !self.query.trim().is_empty() {
             shown.into_iter().filter(|i| matches!(self.vault_at(*i), Some(VaultRow::Entry(_)))).collect()
-        } else if self.query.trim().is_empty() {
+        } else if colors_page || self.query.trim().is_empty() {
             let page = PAGES[self.page.min(PAGES.len() - 1)];
             shown.into_iter().filter(|&i| if self.profile_action(i).is_some() { page == SHORTCUTS } else { self.section(i) == page }).collect()
         } else {
             shown
         };
+        self.deleting_scheme = None;
         self.selected = 0;
         self.scroll = 0.0;
     }
@@ -523,7 +544,7 @@ impl SettingsPage {
     }
 
     pub fn searching(&self) -> bool {
-        !self.query.trim().is_empty()
+        !self.colors_page() && !self.query.trim().is_empty()
     }
 
     pub(crate) fn show_page(&mut self, page: usize) {
@@ -598,11 +619,11 @@ impl SettingsPage {
     }
 
     pub(crate) fn editing(&self) -> bool {
-        self.editing.is_some() || self.vault_dialog.is_some()
+        self.editing.is_some() || self.editing_passphrase()
     }
 
     pub(crate) fn editing_passphrase(&self) -> bool {
-        self.vault_dialog.is_some()
+        self.vault_dialog.is_some() || self.vault_input_interrupted
     }
 
     pub(crate) fn edit_text(&self) -> String {
@@ -611,6 +632,7 @@ impl SettingsPage {
 
     pub(crate) fn cancel_vault_input(&mut self) {
         self.vault_dialog = None;
+        self.vault_input_interrupted = false;
     }
 
     pub(crate) fn searching_vault(&self) -> bool {
@@ -618,6 +640,9 @@ impl SettingsPage {
     }
 
     pub(crate) fn vault_notice(&self) -> Option<&str> {
+        if self.vault_input_interrupted {
+            return Some(t("Vault state changed. Press Esc to leave this field."));
+        }
         self.notice.as_deref().or_else(|| self.vault.error.map(VaultIssue::message))
     }
 
@@ -673,6 +698,8 @@ pub struct SettingsGeometry {
     pub pages: Vec<Rect>,
     pub suggestions: Vec<(usize, Rect)>,
     pub height: f32,
+    pub(crate) scheme_bar: Option<SchemeBar>,
+    pub(crate) font_sample: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -770,8 +797,13 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
     let field = Rect::new(close.x - field_w - (8.0 * s).round(), top, field_w, header_h);
     let title = Rect::new(x0, top, (field.x - x0 - 8.0 * s).max(0.0), header_h);
     let list_top = top + header_h + (14.0 * s).round();
-    let list = Rect::new(x, list_top, width, (content.bottom() - list_top - 12.0 * s).max(0.0));
-    let page_h = (34.0 * s).min(list.h / PAGES.len() as f32).floor().max(1.0);
+    let scheme_bar = page.colors_page().then(|| SchemeBar::new(Rect::new(x, list_top, width, 0.0), s));
+    let sample_height = (84.0 * s).min((content.bottom() - list_top).max(0.0) * 0.35).round();
+    let font_sample = (!page.searching() && PAGES[page.page.min(PAGES.len() - 1)] == APPEARANCE)
+        .then(|| Rect::new(x, list_top, width, sample_height));
+    let rows_top = scheme_bar.map_or_else(|| font_sample.map_or(list_top, |sample| sample.bottom() + 6.0 * s), |bar| bar.current.bottom() + (6.0 * s).round());
+    let list = Rect::new(x, rows_top, width, (content.bottom() - rows_top - 12.0 * s).max(0.0));
+    let page_h = (34.0 * s).min((content.bottom() - list_top - 12.0 * s).max(0.0) / PAGES.len() as f32).floor().max(1.0);
     let pages = if side_w > 0.0 { (0..PAGES.len()).map(|k| Rect::new(x0, list_top + k as f32 * page_h, side_w, page_h - (2.0 * s).round())).collect() } else { Vec::new() };
     let section_h = (38.0 * s).round();
     let item_h = (58.0 * s).round();
@@ -824,7 +856,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
             }
         }
     }
-    SettingsGeometry { page: content, title, field, close, list, rows, pages, suggestions, height }
+    SettingsGeometry { page: content, title, field, close, list, rows, pages, suggestions, height, scheme_bar, font_sample }
 }
 
 pub fn part_at(control: Control, r: Rect, s: f32, x: f32) -> Part {
@@ -851,7 +883,9 @@ impl App {
             };
             let scroll = page.scroll;
             if page.vault.unlocked && !view.unlocked {
+                let interrupted = page.vault_dialog.as_ref().is_some_and(|dialog| dialog.kind.sensitive() && !dialog.waiting);
                 page.cancel_vault_input();
+                page.vault_input_interrupted = interrupted;
                 if PAGES[page.page] == VAULT {
                     page.query.clear();
                 }
@@ -915,27 +949,17 @@ impl App {
     }
 
     pub(crate) fn fresh_settings_page(&self) -> SettingsPage {
-        let rgb = |c: aster_vt::Rgb| u32::from_be_bytes([0, c.r, c.g, c.b]);
-        let schemes = self.available_schemes().map(|(scheme, custom)| SchemeRow {
-            name: scheme.name,
-            custom,
-            foreground: rgb(scheme.palette.foreground),
-            background: rgb(scheme.palette.background),
-            colors: scheme.palette.ansi.map(rgb),
-        }).collect();
-        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.profile_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes, vault: self.vault.clone(), launcher_installed: self.launcher_installed, ..SettingsPage::default() };
+        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.profile_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes: self.scheme_rows(), vault: self.vault.clone(), launcher_installed: self.launcher_installed, ..SettingsPage::default() };
         page.refilter();
         page
     }
 
     fn show_settings_page(&mut self, k: usize) {
-        let current = self.current_scheme().to_owned();
+        let tab = self.active_scheme_tab();
         let Some(page) = self.settings.as_mut() else { return };
         page.show_page(k);
-        if PAGES[page.page] == COLORS {
-            if let Some(at) = page.scheme_item(&current).and_then(|item| page.shown.iter().position(|&i| i == item)) {
-                page.selected = at;
-            }
+        if page.colors_page() {
+            self.select_scheme_tab(tab);
         }
         self.reveal_selected();
     }
@@ -1298,10 +1322,17 @@ impl App {
         let Some(row) = geo.rows.iter().find(|r| r.kind == RowKind::Item(page.selected)) else { return };
         let header = geo.rows.iter().position(|r| r.kind == RowKind::Item(page.selected)).filter(|&i| i > 0 && matches!(geo.rows[i - 1].kind, RowKind::Section(_))).map(|i| geo.rows[i - 1].rect.h).unwrap_or(0.0);
         let top = row.rect.y - header;
+        let old_scroll = page.scroll;
         if top < geo.list.y {
             page.scroll -= geo.list.y - top;
         } else if row.rect.bottom() > geo.list.bottom() {
             page.scroll += row.rect.bottom() - geo.list.bottom();
+        }
+        if page.colors_page() && page.scroll > old_scroll {
+            let list_top = geo.list.y + page.scroll - old_scroll;
+            if let Some(partial) = geo.rows.iter().find(|r| r.rect.y < list_top && list_top < r.rect.bottom() && r.rect.bottom() <= row.rect.y) {
+                page.scroll += partial.rect.bottom() - list_top;
+            }
         }
         page.scroll = page.scroll.clamp(0.0, (geo.height - geo.list.h).max(0.0));
     }
@@ -1312,12 +1343,28 @@ impl App {
         if page.capture.is_some() {
             return self.capture_key(key, mods);
         }
-        if page.editor.is_some() || page.group_editor.is_some() {
-            return self.profile_modal_key(key, mods);
+        if page.vault_input_interrupted {
+            if mods == Mods::NONE && matches!(key, Key::Escape | Key::Tab | Key::Enter) {
+                page.cancel_vault_input();
+            }
+            return;
         }
         if page.vault_dialog.is_some() {
             return self.vault_dialog_key(key, mods);
         }
+        if page.editor.is_some() || page.group_editor.is_some() {
+            return self.profile_modal_key(key, mods);
+        }
+        if page.scheme_editor.is_some() {
+            return self.scheme_editor_key(key, mods);
+        }
+        if self.scheme_bar_key(key, mods) {
+            return;
+        }
+        if key == Key::F(2) && mods == Mods::NONE && self.open_scheme_editor() {
+            return;
+        }
+        let Some(page) = self.settings.as_mut() else { return };
         match (key, page.current_item().filter(|_| !page.editing()).and_then(|item| page.vault_at(item))) {
             (Key::Delete, Some(VaultRow::Entry(i))) => {
                 let entry = page.vault.entries[i].clone();
@@ -1409,7 +1456,7 @@ impl App {
                     self.adjust_setting(s, 0);
                 } else if let Some(scheme) = page.current_item().and_then(|i| page.scheme_at(i)) {
                     let name = scheme.name.clone();
-                    self.apply_scheme(name);
+                    self.apply_settings_scheme(name);
                 }
             }
             Key::Left | Key::Right => {
@@ -1426,8 +1473,14 @@ impl App {
     pub(crate) fn settings_text(&mut self, text: &str) {
         if self.vault_dialog_text(text) { return; }
         let Some(page) = self.settings.as_mut() else { return };
+        if page.vault_input_interrupted || page.deleting_scheme.is_some() { return; }
         let clean: String = text.chars().filter(|c| !c.is_control()).collect();
         if clean.is_empty() {
+            return;
+        }
+        if let Some(editor) = page.scheme_editor.as_mut() {
+            editor.insert(&clean);
+            self.dirty = true;
             return;
         }
         if let Some(editor) = page.editor.as_mut() {
@@ -1460,9 +1513,12 @@ impl App {
     pub(crate) fn settings_click(&mut self, x: f32, y: f32) {
         let Some(geo) = self.settings_geometry() else { return };
         self.dirty = true;
-        if self.vault_dialog_click(geo.page, x, y) || self.profile_modal_click(geo.page, x, y) { return; }
+        if self.vault_dialog_click(geo.page, x, y) || self.profile_modal_click(geo.page, x, y) || self.scheme_editor_click(geo.page, x, y) { return; }
+        if geo.scheme_bar.is_some_and(|bar| self.scheme_edit_click(bar, x, y)) { return; }
+        if geo.scheme_bar.is_some_and(|bar| self.scheme_bar_click(bar, x, y)) { return; }
         if let Some(page) = self.settings.as_mut() {
             page.capture = None;
+            page.vault_input_interrupted = false;
         }
         if let Some(&(index, _)) = geo.suggestions.iter().find(|(_, r)| r.contains(x, y)) {
             return self.accept_font(index);
@@ -1498,7 +1554,7 @@ impl App {
         }
         if let Some(scheme) = page.scheme_at(item) {
             let name = scheme.name.clone();
-            return self.apply_scheme(name);
+            return self.apply_settings_scheme(name);
         }
         if page.tree_at(item).is_some() {
             page.deleting = None;
@@ -1530,6 +1586,7 @@ impl App {
     pub(crate) fn settings_wheel(&mut self, dy: f32) {
         if self.vault_dialog_wheel(dy) || self.profile_modal_wheel(dy) { return; }
         let Some(geo) = self.settings_geometry() else { return };
+        if self.scheme_editor_wheel(geo.page, dy) { return; }
         let step = 60.0 * self.ui();
         let Some(page) = self.settings.as_mut() else { return };
         page.scroll = (page.scroll - dy * step).clamp(0.0, (geo.height - geo.list.h).max(0.0));

@@ -133,6 +133,27 @@ fn images_and_procedural_glyphs_share_the_frame_pin_and_reupload_after_eviction(
     assert_eq!(&g.uploads.data[bitmaps[0].1..bitmaps[0].1 + 6 * 8 * 4], &[9; 6 * 8 * 4]);
 }
 
+#[test]
+fn a_replaced_background_reserves_atlas_space_before_glyphs_and_uses_full_texels() {
+    let mut g = Gfx::new(Mono, 20);
+    g.begin(Color::default());
+    g.set_background_image(Some((1, [10, 10], &[255; 400])));
+    g.prepare_background_image();
+    assert!(g.atlas.alloc(19, 8).is_some());
+    let shared = g.atlas.alloc(3, 3).unwrap();
+    assert_eq!(shared.y, 0);
+    g.begin(Color::default());
+    g.uploads.clear();
+    g.set_background_image(Some((2, [10, 10], &[200; 400])));
+    g.prepare_background_image();
+    let (slot, offset) = g.uploads.rects.last().unwrap();
+    assert_eq!((slot.w, slot.h), (10, 10));
+    assert_eq!(&g.uploads.data[*offset..], &[200; 400]);
+    g.draw_background_image(Rect::new(0.0, 0.0, 20.0, 20.0), Some([10.0, 10.0]), 128);
+    assert_eq!(g.dl.instances[0].uv, [0.0, 0.0, 0.5, 0.5]);
+    assert_eq!((g.dl.instances[0].radius, g.dl.instances[0].border), (10.0, 10.0));
+}
+
 struct Emoji;
 
 impl TextBackend for Emoji {

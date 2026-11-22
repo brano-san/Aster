@@ -1,4 +1,5 @@
 use aster_gfx::render::Rect;
+use super::editor::ProfileEditor;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EditorHit {
@@ -14,6 +15,7 @@ pub(crate) struct EditorLayout {
     pub tabs: Vec<Rect>,
     pub fields: Vec<(usize, Rect)>,
     pub group_defaults: Option<Rect>,
+    pub scheme_preview: Option<Rect>,
     pub message: Rect,
     pub save: Rect,
     pub cancel: Rect,
@@ -96,5 +98,15 @@ pub(crate) fn editor_layout(area: Rect, s: f32, tabs: usize, fields: usize, focu
         let h = (body * body / end).max(12.0 * s).min(body);
         Rect::new(frame.right() - 8.0 * s, top + (body - h) * scroll / (end - body), 3.0 * s, h).snap()
     });
-    EditorLayout { frame, title, tabs: tab_rects, fields: slots, group_defaults, message, save, cancel, thumb }
+    EditorLayout { frame, title, tabs: tab_rects, fields: slots, group_defaults, scheme_preview: None, message, save, cancel, thumb }
+}
+
+pub(crate) fn profile_editor_layout(area: Rect, s: f32, editor: &ProfileEditor) -> EditorLayout {
+    let fields = editor.tabs[editor.tab].fields.len();
+    let colors = editor.colors_tab();
+    let mut layout = editor_layout(area, s, editor.tabs.len(), fields + usize::from(colors), editor.focus);
+    if colors && layout.fields.last().is_some_and(|(i, _)| *i == fields) {
+        layout.scheme_preview = layout.fields.pop().map(|(_, rect)| rect);
+    }
+    layout
 }

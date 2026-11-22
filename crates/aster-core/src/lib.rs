@@ -1,4 +1,5 @@
 pub mod app;
+pub mod background;
 mod clipboard;
 pub mod close;
 pub mod config;
@@ -24,9 +25,11 @@ mod profile_sidebar;
 mod profiles_page;
 pub mod quick_connect;
 mod rearrange;
+mod scheme_editor;
 pub mod search;
 pub mod session;
 pub mod settings;
+mod settings_colors;
 pub mod vault_settings;
 pub mod ssh;
 mod start;

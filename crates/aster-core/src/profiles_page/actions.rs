@@ -372,7 +372,7 @@ impl App {
         let s = self.ui();
         let Some(page) = &mut self.settings else { return false };
         let layout = if let Some(e) = &page.editor {
-            editor_layout(area, s, e.tabs.len(), e.tabs[e.tab].fields.len(), e.focus)
+            super::layout::profile_editor_layout(area, s, e)
         } else if let Some(g) = &page.group_editor {
             editor_layout(area, s, 0, 8, g.focus)
         } else { return false };

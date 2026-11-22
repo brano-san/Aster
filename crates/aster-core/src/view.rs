@@ -197,7 +197,8 @@ impl App {
 
     pub fn frame<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool) {
         self.prompt_pending_serial();
-        g.set_mono_family(&self.config.terminal.font);
+        let terminal = &self.config.terminal;
+        g.set_mono_font(&terminal.font, [terminal.font_weight, terminal.font_weight_bold]);
         g.set_fallback_family(&self.config.terminal.fallback_font);
         g.set_ui_family(&self.config.appearance.ui_font);
         let m = self.metrics_for(g);
@@ -213,6 +214,10 @@ impl App {
         }
         let theme = self.theme;
         g.begin(Color::rgba(0));
+        g.set_background_image(self.background.bitmap.as_ref().map(|bitmap| (self.background.revision, bitmap.size, bitmap.rgba.as_slice())));
+        if self.config.appearance.background_image_opacity > 0.0 && self.focused_pane().is_some_and(|pane| self.panes.contains_key(&pane)) {
+            g.prepare_background_image();
+        }
         if !self.tab_bar_hidden() {
             g.dl.rect(self.chrome.tab_bar, theme.chrome);
             if self.chrome.caption != self.chrome.tab_bar {
@@ -460,7 +465,7 @@ impl App {
                 g.dl.set_clip(Some(rect));
                 g.dl.round_rect(badge, if selected { theme.accent } else { theme.overlay }, (5.0 * s).round());
                 g.dl.outline(badge, theme.accent, (5.0 * s).round(), line);
-                centered(g, badge, &label, ui, if selected { Color::rgb(0xFFFFFF) } else { theme.text });
+                centered(g, badge, &label, ui, if selected { theme.on_accent } else { theme.text });
             }
             g.dl.set_clip(None);
         }
@@ -718,6 +723,17 @@ impl App {
         }
     }
 
+    fn draw_terminal_background<B: TextBackend>(&self, g: &mut Gfx<B>, rect: Rect) {
+        let Some(bitmap) = &self.background.bitmap else { return };
+        let appearance = &self.config.appearance;
+        let alpha = (appearance.background_image_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if alpha > 0 {
+            if let Some(placement) = crate::background::placement(rect, bitmap.source_size, appearance.background_image_fit) {
+                g.draw_background_image(placement.rect, placement.tile, alpha);
+            }
+        }
+    }
+
     fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, m: Metrics) {
         let s = self.ui();
         let rect = self.pane_terminal_rect(id, rect);
@@ -746,6 +762,7 @@ impl App {
             g.dl.rect(rect, rgb(default_bg));
         }
         g.dl.set_clip(Some(rect));
+        self.draw_terminal_background(g, rect);
         let (ox, oy) = (inner.x, inner.y);
         let cell_rect = |line: usize, col: usize, cols: usize| Rect::new(ox + col as f32 * m.w, oy + line as f32 * m.h, m.w * cols as f32, m.h);
         let selection_bg = palette.selection;
@@ -1091,7 +1108,7 @@ impl App {
                 g.dl.round_rect(*r, if r.contains(mx, my) { theme.button_hover } else { theme.tab_active }, (5.0 * s).round());
                 g.dl.outline(*r, theme.overlay_border, (5.0 * s).round(), line);
             }
-            centered(g, *r, t(BUTTONS[i]), ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
+            centered(g, *r, t(BUTTONS[i]), ui, if chosen { theme.on_accent } else { theme.text });
         }
     }
 
@@ -1140,7 +1157,7 @@ impl App {
                 g.dl.outline(*r, theme.overlay_border, (5.0 * s).round(), line);
             }
             let label = if i == 0 && matches!(confirm.target, CloseTarget::PaneProfile(..)) { t("Change profile") } else { t(BUTTONS[i]) };
-            centered(g, *r, label, ui, if chosen { Color::rgb(0xFFFFFF) } else { theme.text });
+            centered(g, *r, label, ui, if chosen { theme.on_accent } else { theme.text });
         }
     }
 
@@ -1236,7 +1253,7 @@ impl App {
                 g.dl.round_rect(*r, if r.contains(mx, my) { theme.button_hover } else { theme.tab_active }, (5.0 * s).round());
                 g.dl.outline(*r, theme.overlay_border, (5.0 * s).round(), line);
             }
-            centered(g, *r, button.label(notice.notes_open), ui, if primary { Color::rgb(0xFFFFFF) } else { theme.text });
+            centered(g, *r, button.label(notice.notes_open), ui, if primary { theme.on_accent } else { theme.text });
         }
     }
 
@@ -1575,7 +1592,7 @@ impl App {
             g.dl.round_rect(switch, if on { theme.accent } else { theme.overlay_border }, h * 0.5);
             let knob = switch.h - 4.0 * s;
             let kx = if on { switch.right() - knob - 2.0 * s } else { switch.x + 2.0 * s };
-            g.dl.circle(Rect::new(kx, switch.y + (switch.h - knob) * 0.5, knob, knob), if on { Color::rgb(0xFFFFFF) } else { theme.text_dim });
+            g.dl.circle(Rect::new(kx, switch.y + (switch.h - knob) * 0.5, knob, knob), if on { theme.on_accent } else { theme.text_dim });
             inner.w = (switch.x - 8.0 * s - inner.x).max(0.0);
         } else if matches!(control, ProfileFieldControl::Choice { .. }) {
             let (mx, my) = self.mouse;
@@ -1613,7 +1630,7 @@ impl App {
         let line = s.round().max(1.0);
         let (mx, my) = self.mouse;
         let (layout, heading, error) = if let Some(editor) = &page.editor {
-            (editor_layout(area, s, editor.tabs.len(), editor.tabs[editor.tab].fields.len(), editor.focus), editor.title(), editor.error.as_deref())
+            (crate::profiles_page::layout::profile_editor_layout(area, s, editor), editor.title(), editor.error.as_deref())
         } else if let Some(group) = &page.group_editor {
             (editor_layout(area, s, 0, 8, group.focus), if group.original.is_some() { t("Edit group") } else { t("New group") }.to_owned(), (!group.error.is_empty()).then_some(group.error.as_str()))
         } else {
@@ -1644,6 +1661,11 @@ impl App {
                     None => ProfileFieldControl::Text,
                 };
                 self.draw_editor_field(g, slot, (&field.label, field.display()), control, i == editor.focus);
+            }
+            if let Some(preview) = layout.scheme_preview {
+                let palette = editor.preview_scheme(&self.config).and_then(|name| self.scheme(&name)).unwrap_or(self.palette);
+                let rect = Rect::new(preview.x, preview.y + 5.0 * s, preview.w.min(360.0 * s), 36.0 * s).snap();
+                self.draw_scheme_swatches(g, rect, small, (color(palette.background), color(palette.foreground), palette.ansi.map(color)));
             }
         } else if let Some(group) = &page.group_editor {
             if let Some(r) = layout.group_defaults {
@@ -1775,6 +1797,101 @@ impl App {
             g.dl.outline(r, if primary && enabled { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
             centered(g, r, label, ui, if enabled { theme.text } else { theme.text_dim });
         }
+    }
+
+    fn draw_scheme_editor<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, editor: &crate::scheme_editor::SchemeEditor) {
+        use crate::scheme_editor::{geometry, SchemeEditor};
+        let s = self.ui();
+        let theme = self.theme;
+        let geo = geometry(area, s, editor.scroll);
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let title = FontStyle::new(FontFamily::Ui, (17.0 * s).round(), true);
+        let mono = FontStyle::new(FontFamily::Mono, (13.0 * s).round(), false);
+        let radius = (8.0 * s).round();
+        let line = s.round().max(1.0);
+        let (mx, my) = self.mouse;
+        g.dl.rect(area, theme.dim);
+        g.dl.shadow(geo.frame, theme.shadow, radius, (18.0 * s).round());
+        g.dl.round_rect(geo.frame, theme.overlay, radius);
+        g.dl.outline(geo.frame, theme.overlay_border, radius, line);
+        let text_y = baseline(g, geo.title, title);
+        g.text(geo.title.x, text_y, t("Edit color scheme"), title, theme.text, geo.title.w);
+        g.dl.set_clip(Some(geo.body));
+        for (i, rect) in geo.fields.into_iter().enumerate() {
+            if rect.bottom() <= geo.body.y || rect.y >= geo.body.bottom() {
+                continue;
+            }
+            let labeled = Rect::new(rect.x, rect.y, rect.w, (18.0 * s).round());
+            let y = baseline(g, labeled, small);
+            g.text(labeled.x, y, &SchemeEditor::label(i), small, theme.text_dim, labeled.w);
+            let input = Rect::new(rect.x, labeled.bottom(), rect.w, (27.0 * s).round());
+            let focused = editor.focus == i;
+            g.dl.round_rect(input, theme.surface, 4.0 * s);
+            g.dl.outline(input, if focused { theme.accent } else { theme.overlay_border }, 4.0 * s, line);
+            let swatch = Rect::new(input.right() - 25.0 * s, input.y + 5.0 * s, 20.0 * s, input.h - 10.0 * s).snap();
+            if let Some(c) = (i > 0).then(|| editor.color(i)).flatten() {
+                g.dl.round_rect(swatch, color(c), 3.0 * s);
+                g.dl.outline(swatch, theme.overlay_border, 3.0 * s, line);
+            }
+            let style = if i == 0 { ui } else { mono };
+            let x = input.x + 8.0 * s;
+            let width = (if i == 0 { input.right() - 6.0 * s } else { swatch.x - 4.0 * s }) - x;
+            let y = baseline(g, input, style);
+            let value = &editor.fields[i];
+            if focused && editor.replace {
+                let w = g.measure(value, style).min(width).max(0.0);
+                g.dl.rect(Rect::new(x, input.y + 3.0 * s, w, input.h - 6.0 * s), theme.selection);
+            }
+            let text_w = g.text(x, y, value, style, theme.text, width.max(0.0));
+            if focused && !editor.replace {
+                g.dl.rect(Rect::new(x + text_w.min(width.max(0.0)), input.y + 5.0 * s, line, input.h - 10.0 * s), theme.accent);
+            }
+        }
+        g.dl.set_clip(None);
+        if geo.max_scroll > 0.0 && geo.body.h > 0.0 {
+            let h = (geo.body.h * geo.body.h / (geo.body.h + geo.max_scroll)).clamp(0.0, geo.body.h);
+            let y = geo.body.y + (geo.body.h - h) * (editor.scroll / geo.max_scroll).clamp(0.0, 1.0);
+            let thumb = Rect::new(geo.body.right() + 6.0 * s, y, 3.0 * s, h).snap();
+            g.dl.round_rect(thumb, theme.overlay_border, 2.0 * s);
+        }
+        self.draw_palette_sample(g, geo.preview, editor.preview(), mono);
+        let y = baseline(g, geo.message, small);
+        let message = editor.error.map_or_else(|| t("Tab next field  ·  Ctrl+Enter save").to_owned(), |issue| issue.message());
+        g.text(geo.message.x, y, &message, small, if editor.error.is_some() { theme.accent } else { theme.text_dim }, geo.message.w);
+        for (rect, label, primary) in [(geo.cancel, t("Cancel"), false), (geo.save, t("Save"), true)] {
+            g.dl.round_rect(rect, if rect.contains(mx, my) { theme.button_hover } else if primary { theme.accent.alpha(0x38) } else { theme.surface }, 5.0 * s);
+            g.dl.outline(rect, if primary { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
+            centered(g, rect, label, ui, theme.text);
+        }
+    }
+
+    fn draw_palette_sample<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, palette: aster_vt::Palette, font: FontStyle) {
+        let s = self.ui();
+        let inner = area.inset(10.0 * s, 5.0 * s);
+        let sample = t("Selected text");
+        let step = g.measure("0", font).ceil().max(1.0);
+        let line_h = (font.px() + 4.0 * s).ceil();
+        let first = Rect::new(inner.x, inner.y, inner.w, line_h);
+        let second = Rect::new(inner.x, first.bottom(), inner.w, line_h);
+        let third = Rect::new(inner.x, second.bottom(), inner.w, line_h);
+        g.dl.round_rect(area, color(palette.background), 5.0 * s);
+        g.dl.outline(area, self.theme.overlay_border, 5.0 * s, s.round().max(1.0));
+        g.dl.set_clip(Some(inner));
+        let y = baseline(g, first, font);
+        g.text(first.x, y, t("Terminal color preview"), font, color(palette.foreground), first.w);
+        let y = baseline(g, second, font);
+        let selected_w = g.measure(sample, font).min(second.w);
+        g.dl.rect(Rect::new(second.x, second.y, selected_w, second.h), color(palette.selection));
+        g.text(second.x, y, sample, font, color(palette.selection_text.unwrap_or(palette.foreground)), selected_w);
+        let cursor = Rect::new(second.x + selected_w + step, second.y + 1.0, step, second.h - 2.0);
+        g.dl.rect(cursor, color(palette.cursor));
+        g.text(cursor.x, y, "_", font, color(palette.cursor_text.unwrap_or(palette.background)), cursor.w);
+        let y = baseline(g, third, font);
+        for (i, &c) in palette.ansi.iter().enumerate() {
+            let x = third.x + step * (i * 2) as f32;
+            g.text(x, y, &format!("{i:X}"), font, color(c), step * 2.0);
+        }
         g.dl.set_clip(None);
     }
 
@@ -1804,6 +1921,89 @@ impl App {
         }
     }
 
+    fn draw_font_sample<B: TextBackend>(&self, g: &mut Gfx<B>, rect: Rect, ui: FontStyle) {
+        let s = self.ui();
+        let pad = (12.0 * s).round();
+        let inner = rect.inset(pad, (6.0 * s).round());
+        let label = Rect::new(inner.x, inner.y, inner.w, (17.0 * s).round());
+        let line = Rect::new(inner.x, label.bottom(), inner.w, (inner.bottom() - label.bottom()).max(0.0));
+        let radius = (6.0 * s).round();
+        g.dl.round_rect(rect, color(self.palette.background), radius);
+        g.dl.outline(rect, self.theme.overlay_border, radius, s.round().max(1.0));
+        let y = baseline(g, label, ui);
+        g.text(label.x, y, t("Font preview"), ui, color(self.palette.foreground), label.w);
+        let size = self.metrics.map_or(self.config.terminal.font_size * self.scale, |m| m.px);
+        let style = FontStyle { ligatures: self.config.terminal.ligatures, ..FontStyle::new(FontFamily::Mono, size.min(line.h).max(1.0), false) };
+        let y = baseline(g, line, style);
+        g.dl.set_clip(Some(line));
+        let regular = format!("{}  -> == !=", t("Aa"));
+        let advance = g.text(line.x, y, &regular, style, color(self.palette.foreground), line.w);
+        let x = line.x + advance + pad;
+        g.text(x, y, t("Aa"), FontStyle { bold: true, ..style }, color(self.palette.ansi[4]), (line.right() - x).max(0.0));
+        g.dl.set_clip(None);
+    }
+
+    fn draw_scheme_swatches<B: TextBackend>(&self, g: &mut Gfx<B>, rect: Rect, font: FontStyle, (bg, fg, colors): (Color, Color, [Color; 16])) {
+        let s = self.ui();
+        let radius = (6.0 * s).round();
+        let pad = (6.0 * s).round();
+        g.dl.round_rect(rect, bg, radius);
+        g.dl.outline(rect, self.theme.overlay_border, radius, s.round().max(1.0));
+        let inner = rect.inset(pad, pad);
+        let y = baseline(g, inner, font);
+        let sample_w = g.text(inner.x, y, t("Aa"), font, fg, inner.w * 0.25);
+        let grid_x = inner.x + sample_w.ceil() + pad;
+        let gap = (3.0 * s).min((inner.right() - grid_x).max(0.0) / 16.0);
+        let cell_w = ((inner.right() - grid_x - 7.0 * gap) / 8.0).max(0.0);
+        let cell_h = (inner.h - gap) / 2.0;
+        for (i, color) in colors.into_iter().enumerate() {
+            let x = grid_x + (i % 8) as f32 * (cell_w + gap);
+            let y = inner.y + (i / 8) as f32 * (cell_h + gap);
+            g.dl.round_rect(Rect::new(x, y, cell_w, cell_h).snap(), color, 2.0 * s);
+        }
+    }
+
+    fn draw_scheme_bar<B: TextBackend>(&self, g: &mut Gfx<B>, page: &crate::settings::SettingsPage, bar: crate::settings_colors::SchemeBar, ui: FontStyle) {
+        let s = self.ui();
+        let theme = self.theme;
+        let radius = (6.0 * s).round();
+        let line = (1.0 * s).round().max(1.0);
+        let (mx, my) = self.mouse;
+        let name = page.scheme_tab.name(&self.config.appearance);
+        let scheme = page.scheme_item(name).and_then(|item| page.scheme_at(item));
+        let pending = page.deleting_scheme.as_deref();
+        for (tab, rect) in crate::settings_colors::SchemeTab::ALL.into_iter().zip(bar.tabs) {
+            let active = tab == page.scheme_tab;
+            let fill = if active { theme.accent.alpha(0x30) } else if rect.contains(mx, my) { theme.button_hover } else { theme.overlay };
+            g.dl.round_rect(rect, fill, radius);
+            g.dl.outline(rect, if active { theme.accent } else { theme.overlay_border }, radius, line);
+            centered(g, rect, tab.label(), ui, theme.text);
+        }
+        let mut current = bar.current;
+        let caption = if let Some(name) = pending {
+            tf("Delete the color scheme {name}?", &[("name", name)])
+        } else {
+            let right = if scheme.is_some_and(|row| row.custom) { bar.cancel.x } else if scheme.is_some() { bar.delete.x } else { bar.delete.right() };
+            current.w = (right - current.x).max(0.0);
+            tf("Current color scheme: {name}", &[("name", scheme.map_or(name, |row| &row.name))])
+        };
+        let y = baseline(g, current, ui);
+        g.text(current.x, y, &caption, ui, theme.text, current.w);
+        let custom = scheme.is_some_and(|row| row.custom);
+        let edit = if custom { bar.cancel } else { bar.delete };
+        for (visible, rect, label) in [
+            (scheme.is_some() && pending.is_none(), edit, t("Edit")),
+            (pending.is_some(), bar.cancel, t("Cancel")),
+            (custom || pending.is_some(), bar.delete, t("Delete scheme")),
+        ] {
+            if visible {
+                g.dl.round_rect(rect, if rect.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
+                g.dl.outline(rect, theme.overlay_border, radius, line);
+                centered(g, rect, label, ui, theme.text);
+            }
+        }
+    }
+
     fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
         let s = self.ui();
@@ -1821,12 +2021,15 @@ impl App {
         for (n, &index) in page.shown.iter().enumerate() {
             if let Some(action) = page.shortcut(index) {
                 let mut bindings: Vec<_> = self.keymap.bindings_of(&action).map(crate::keymap::format_binding).collect();
-                if page.capture.as_ref().is_some_and(|(a, _)| *a == action) {
+                let capturing = page.capture.as_ref().is_some_and(|(a, _)| *a == action);
+                if capturing {
                     bindings = vec![t("Press a key, click, scroll or release modifiers").to_owned()];
                 } else if bindings.is_empty() {
                     bindings.push(t("None").to_owned());
                 }
-                let hint = if n == page.selected {
+                let hint = if capturing {
+                    t("Press the new shortcut").to_owned()
+                } else if n == page.selected {
                     page.notice.clone().unwrap_or_else(|| t("Enter replace  ·  Insert add  ·  Del clear  ·  Shift+Del restore defaults").to_owned())
                 } else {
                     action.id()
@@ -1856,7 +2059,8 @@ impl App {
         let field_text = geo.field.inset((10.0 * s).round(), 0.0);
         let fy = baseline(g, field_text, ui);
         if page.query.is_empty() {
-            g.text(field_text.x, fy, if page.searching_vault() { t("Search secrets") } else { t("Search settings") }, ui, theme.text_dim, field_text.w);
+            let prompt = if page.colors_page() { t("Search color schemes") } else if page.searching_vault() { t("Search secrets") } else { t("Search settings") };
+            g.text(field_text.x, fy, prompt, ui, theme.text_dim, field_text.w);
         }
         let qw = g.text(field_text.x, fy, &page.query, ui, theme.text, field_text.w);
         let caret_h = (16.0 * s).round();
@@ -1879,15 +2083,18 @@ impl App {
             let y = baseline(g, inner, ui);
             g.text(inner.x, y, t(crate::settings::PAGES[k]), ui, if current { theme.text } else { theme.text_dim }, inner.w);
         }
+        if let Some(bar) = geo.scheme_bar {
+            self.draw_scheme_bar(g, page, bar, ui);
+        }
+        if let Some(sample) = geo.font_sample {
+            self.draw_font_sample(g, sample, small);
+        }
         if page.shown.is_empty() {
-            centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), if page.searching_vault() { t("No secrets match") } else { t("No settings match") }, ui, theme.text_dim);
-            if let Some(dialog) = &page.vault_dialog {
-                self.draw_vault_dialog(g, geo.page, dialog, page.vault.unlocked);
-            }
-            return;
+            let message = if page.colors_page() { t("No color schemes match") } else if page.searching_vault() { t("No secrets match") } else { t("No settings match") };
+            centered(g, Rect::new(geo.list.x, geo.list.y, geo.list.w, (80.0 * s).round()), message, ui, theme.text_dim);
         }
         g.dl.set_clip(Some(geo.list));
-        let current_scheme = page.scheme_item(self.current_scheme());
+        let current_scheme = page.scheme_item(if page.colors_page() { page.scheme_tab.name(&self.config.appearance) } else { self.current_scheme() });
         for row in &geo.rows {
             if row.rect.bottom() < geo.list.y || row.rect.y > geo.list.bottom() {
                 continue;
@@ -1964,28 +2171,26 @@ impl App {
                         let c = row.control;
                         let tx = row.rect.x + (14.0 * s).round();
                         let tw = (c.x - tx - 16.0 * s).max(0.0);
-                        let mut detail = if scheme.custom { t("Custom") } else { t("Built-in") }.to_owned();
-                        if current_scheme == Some(item) {
-                            detail.push_str(" · ");
-                            detail.push_str(t("Current"));
-                        }
                         g.text(tx, row.rect.y + (25.0 * s).round(), &scheme.name, ui, theme.text, tw);
-                        g.text(tx, row.rect.y + (43.0 * s).round(), &detail, small, theme.text_dim, tw);
-                        g.dl.round_rect(c, Color::rgb(scheme.background), radius);
-                        g.dl.outline(c, theme.overlay_border, radius, line);
-                        let pad = (6.0 * s).round();
-                        let inner = c.inset(pad, pad);
-                        let sample_y = baseline(g, inner, small);
-                        let sample_w = g.text(inner.x, sample_y, t("Aa"), small, Color::rgb(scheme.foreground), inner.w * 0.25);
-                        let grid_x = inner.x + sample_w.ceil() + pad;
-                        let gap = 3.0 * s;
-                        let cell_w = (inner.right() - grid_x - 7.0 * gap) / 8.0;
-                        let cell_h = (inner.h - gap) / 2.0;
-                        for (i, &color) in scheme.colors.iter().enumerate() {
-                            let x = grid_x + (i % 8) as f32 * (cell_w + gap);
-                            let y = inner.y + (i / 8) as f32 * (cell_h + gap);
-                            g.dl.round_rect(Rect::new(x, y, cell_w, cell_h).snap(), Color::rgb(color), 2.0 * s);
+                        let marked = current_scheme == Some(item);
+                        let detail_y = row.rect.y + (43.0 * s).round();
+                        if page.colors_page() {
+                            if marked {
+                                g.dl.check(Rect::new(tx, row.rect.y + (32.0 * s).round(), 14.0 * s, 14.0 * s), theme.accent);
+                            }
+                            if scheme.custom {
+                                let offset = if marked { 20.0 * s } else { 0.0 };
+                                g.text(tx + offset, detail_y, t("Custom scheme"), small, theme.text_dim, (tw - offset).max(0.0));
+                            }
+                        } else {
+                            let mut detail = if scheme.custom { t("Custom") } else { t("Built-in") }.to_owned();
+                            if marked {
+                                detail.push_str(" · ");
+                                detail.push_str(t("Current"));
+                            }
+                            g.text(tx, detail_y, &detail, small, theme.text_dim, tw);
                         }
+                        self.draw_scheme_swatches(g, c, small, (Color::rgb(scheme.background), Color::rgb(scheme.foreground), scheme.colors.map(Color::rgb)));
                         continue;
                     }
                     if let Some(tree) = page.tree_at(item) {
@@ -2004,7 +2209,15 @@ impl App {
                     }
                     let tw = (row.control.x - tx - 16.0 * s).max(0.0);
                     g.text(tx, row.rect.y + (25.0 * s).round(), t(setting.label), ui, theme.text, tw);
-                    let notice = if selected && setting.key == "vault.remember-minutes" { page.vault_notice() } else if selected { page.notice.as_deref() } else { None };
+                    let notice = if setting.key == "appearance.background-image" && self.background.failed {
+                        Some(t("Could not load the background image"))
+                    } else if selected && setting.key == "vault.remember-minutes" {
+                        page.vault_notice()
+                    } else if selected {
+                        page.notice.as_deref()
+                    } else {
+                        None
+                    };
                     let hint = notice.unwrap_or_else(|| t(setting.hint));
                     g.text(tx, row.rect.y + (43.0 * s).round(), hint, small, if notice.is_some() { theme.accent } else { theme.text_dim }, tw);
                     let c = row.control;
@@ -2023,7 +2236,7 @@ impl App {
                                 let text = t(label);
                                 let width = g.measure(text, ui).min(inner.w);
                                 let y = baseline(g, inner, ui);
-                                g.text(inner.x + ((inner.w - width) / 2.0).round(), y, text, ui, if chosen { theme.surface } else { theme.text }, inner.w);
+                                g.text(inner.x + ((inner.w - width) / 2.0).round(), y, text, ui, if chosen { theme.on_accent } else { theme.text }, inner.w);
                             }
                             g.dl.outline(c, theme.overlay_border, radius, line);
                         }
@@ -2032,7 +2245,7 @@ impl App {
                             g.dl.round_rect(c, if on { theme.accent } else { theme.overlay_border }, c.h / 2.0);
                             let knob = (c.h - 6.0 * s).round();
                             let kx = if on { c.right() - knob - 3.0 * s } else { c.x + 3.0 * s };
-                            g.dl.circle(Rect::new(kx.round(), c.y + ((c.h - knob) / 2.0).round(), knob, knob), if on { Color::rgb(0xFFFFFF) } else { theme.text_dim });
+                            g.dl.circle(Rect::new(kx.round(), c.y + ((c.h - knob) / 2.0).round(), knob, knob), if on { theme.on_accent } else { theme.text_dim });
                         }
                         Control::Run(action) => {
                             g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
@@ -2109,6 +2322,10 @@ impl App {
         g.dl.set_clip(None);
         if let Some(dialog) = &page.vault_dialog {
             self.draw_vault_dialog(g, geo.page, dialog, page.vault.unlocked);
+            return;
+        }
+        if let Some(editor) = &page.scheme_editor {
+            self.draw_scheme_editor(g, geo.page, editor);
             return;
         }
         if page.editor.is_some() || page.group_editor.is_some() {

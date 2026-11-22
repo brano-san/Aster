@@ -23,6 +23,7 @@ struct PSIn {
     nointerpolation float4 clip : CLIP;
     nointerpolation float2 params : PARAMS;
     nointerpolation uint kind : KIND;
+    nointerpolation float4 uv_rect : UV_RECT;
 };
 
 PSIn vs_main(VSIn i) {
@@ -37,6 +38,7 @@ PSIn vs_main(VSIn i) {
     o.clip = i.clip;
     o.params = i.params;
     o.kind = i.kind;
+    o.uv_rect = i.uv;
     return o;
 }
 
@@ -59,6 +61,13 @@ float4 ps_main(PSIn i) : SV_Target {
     }
     if (i.kind == 2) {
         return atlas.Sample(samp, i.uv) * i.color.a;
+    }
+    if (i.kind == 5) {
+        uint width, height;
+        atlas.GetDimensions(width, height);
+        float2 inset = 0.5 / float2(width, height);
+        float2 uv = lerp(i.uv_rect.xy, i.uv_rect.zw, frac(i.local / i.params));
+        return atlas.SampleLevel(samp, clamp(uv, i.uv_rect.xy + inset, i.uv_rect.zw - inset), 0) * i.color.a;
     }
     float r = i.params.x;
     float border = i.params.y;

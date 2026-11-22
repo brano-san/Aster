@@ -26,6 +26,7 @@ struct Face {
     data: &'static [u8],
     index: u32,
     bold: bool,
+    weight: Option<u16>,
     oblique: bool,
     sw: swash::FontRef<'static>,
     charmap: swash::Charmap<'static>,
@@ -41,7 +42,7 @@ struct Face {
 }
 
 impl Face {
-    fn open(data: &'static [u8], index: u32, bold: bool, oblique: bool) -> Option<Self> {
+    fn open(data: &'static [u8], index: u32, bold: bool, oblique: bool, weight: Option<u16>) -> Option<Self> {
         let (face_index, instance) = (index & 0xFFFF, index >> 16);
         let sw = swash::FontRef::from_index(data, face_index as usize)?;
         let base = harfrust::Font::new(data, face_index)?;
@@ -51,11 +52,12 @@ impl Face {
         };
         let wght = u32::from_be_bytes(WGHT);
         let mut embolden = false;
-        if bold {
+        let desired = weight.map(f32::from).or(bold.then_some(SEMIBOLD));
+        if let Some(weight) = desired {
             if base.axes().get_by_tag(Tag::new(&WGHT)).is_some() {
                 vars.retain(|v| v.0 != wght);
-                vars.push((wght, SEMIBOLD));
-            } else {
+                vars.push((wght, weight));
+            } else if bold {
                 embolden = true;
             }
         }
@@ -64,7 +66,7 @@ impl Face {
         let charmap = sw.charmap();
         let ascii = (0x20u32..0x7F).filter(|&c| charmap.map(c) != 0).fold(0u128, |a, c| a | 1 << c);
         let color = COLOR_TABLES.iter().any(|t| swash::TableProvider::table_by_tag(&sw, swash::tag_from_bytes(t)).is_some());
-        Some(Self { data, index, bold, oblique, sw, charmap, hr, upem: m.units_per_em.max(1) as f32, ascent: m.ascent, descent: m.descent, vars, embolden, color, ascii, plans: Vec::new() })
+        Some(Self { data, index, bold, weight, oblique, sw, charmap, hr, upem: m.units_per_em.max(1) as f32, ascent: m.ascent, descent: m.descent, vars, embolden, color, ascii, plans: Vec::new() })
     }
 
     fn covers(&self, c: char) -> bool {
@@ -106,15 +108,30 @@ struct Placed {
     dy: f32,
 }
 
+type FaceKey = (usize, u32, bool, bool, Option<u16>);
+type PendingPair = mpsc::Receiver<Option<fonts::MappedPair>>;
+
+fn take_mapped_pair(pending: &mut Option<PendingPair>) -> Option<Option<fonts::MappedPair>> {
+    let result = match pending.as_ref()?.try_recv() {
+        Err(mpsc::TryRecvError::Empty) => return None,
+        Err(mpsc::TryRecvError::Disconnected) => None,
+        Ok(mapped) => mapped,
+    };
+    *pending = None;
+    Some(result)
+}
+
 pub struct LinuxText {
     faces: Vec<Face>,
-    loaded: FxHashMap<(usize, u32, bool, bool), u16>,
+    loaded: FxHashMap<FaceKey, u16>,
     default_ui: [u16; 2],
     default_mono: [u16; 2],
     ui: [u16; 2],
     mono: [u16; 2],
     preferred: Option<[u16; 2]>,
-    pending_fallback: Option<mpsc::Receiver<Option<fonts::MappedPair>>>,
+    pending_fallback: Option<PendingPair>,
+    pending_mono: Option<PendingPair>,
+    mono_weights: [u16; 2],
     font_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     icons: u16,
     fallback: Vec<FontFile>,
@@ -146,6 +163,8 @@ impl LinuxText {
             mono: [0, 0],
             preferred: None,
             pending_fallback: None,
+            pending_mono: None,
+            mono_weights: [400, 700],
             font_waker: None,
             icons: 0,
             fallback: Vec::new(),
@@ -185,8 +204,8 @@ impl LinuxText {
         if f.oblique {
             return face;
         }
-        let (data, index, bold) = (f.data, f.index, f.bold);
-        self.load_styled(data, index, bold, true).unwrap_or(face)
+        let (data, index, bold, weight) = (f.data, f.index, f.bold, f.weight);
+        self.load_styled(data, index, bold, true, weight).unwrap_or(face)
     }
 
     pub fn fonts_ready(&self) -> bool {
@@ -194,15 +213,15 @@ impl LinuxText {
     }
 
     fn load(&mut self, data: &'static [u8], index: u32, bold: bool) -> Option<u16> {
-        self.load_styled(data, index, bold, false)
+        self.load_styled(data, index, bold, false, None)
     }
 
-    fn load_styled(&mut self, data: &'static [u8], index: u32, bold: bool, oblique: bool) -> Option<u16> {
-        let key = (data.as_ptr() as usize, index, bold, oblique);
+    fn load_styled(&mut self, data: &'static [u8], index: u32, bold: bool, oblique: bool, weight: Option<u16>) -> Option<u16> {
+        let key = (data.as_ptr() as usize, index, bold, oblique, weight);
         if let Some(&f) = self.loaded.get(&key) {
             return (f != NONE).then_some(f);
         }
-        let face = Face::open(data, index, bold, oblique).filter(|_| self.faces.len() < NONE as usize);
+        let face = Face::open(data, index, bold, oblique, weight).filter(|_| self.faces.len() < NONE as usize);
         let id = match face {
             Some(face) => {
                 self.faces.push(face);
@@ -468,6 +487,7 @@ impl TextBackend for LinuxText {
     }
 
     fn set_mono_family(&mut self, name: &str) -> bool {
+        self.pending_mono = None;
         self.mono = self.default_mono;
         if name.is_empty() {
             return true;
@@ -483,6 +503,13 @@ impl TextBackend for LinuxText {
         fonts::fonts().wait().fc.as_ref().map(|fc| fc.families(false)).unwrap_or_default()
     }
 
+    fn set_mono_font(&mut self, name: &str, weights: [u16; 2]) -> bool {
+        self.mono = self.default_mono;
+        self.mono_weights = weights;
+        self.pending_mono = fonts::request_mono(name.to_owned(), weights, self.font_waker.clone());
+        self.pending_mono.is_some()
+    }
+
     fn set_font_waker(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
         self.font_waker = Some(wake);
     }
@@ -494,18 +521,26 @@ impl TextBackend for LinuxText {
     }
 
     fn poll_font_change(&mut self) -> bool {
-        let Some(pending) = &self.pending_fallback else { return false };
-        let result = match pending.try_recv() {
-            Err(mpsc::TryRecvError::Empty) => return false,
-            Err(mpsc::TryRecvError::Disconnected) => None,
-            Ok(mapped) => mapped,
-        };
-        self.pending_fallback = None;
-        self.preferred = result.and_then(|[(normal, i), (bold, j)]| {
-            let synthetic = i == j && std::ptr::eq(normal, bold);
-            Some([self.load(normal, i, false)?, self.load(bold, j, synthetic)?])
-        });
-        self.preferred.is_some()
+        let mut changed = false;
+        if let Some(result) = take_mapped_pair(&mut self.pending_fallback) {
+            self.preferred = result.and_then(|[(normal, i), (bold, j)]| {
+                let synthetic = i == j && std::ptr::eq(normal, bold);
+                Some([self.load(normal, i, false)?, self.load(bold, j, synthetic)?])
+            });
+            changed = self.preferred.is_some();
+        }
+        if let Some([(normal, i), (bold, j)]) = take_mapped_pair(&mut self.pending_mono).flatten() {
+            let [regular, heavy] = self.mono_weights;
+            let synthetic = i == j && std::ptr::eq(normal, bold) && heavy > regular;
+            if let (Some(normal), Some(bold)) = (
+                self.load_styled(normal, i, false, false, Some(regular)),
+                self.load_styled(bold, j, synthetic, false, Some(heavy)),
+            ) {
+                self.mono = [normal, bold];
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
