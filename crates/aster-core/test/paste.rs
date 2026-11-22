@@ -148,7 +148,7 @@ fn audible_bell_with_animations_off_requests_attention_if_sound_is_unavailable()
         let effects = a.take_effects();
         assert!(effects.iter().any(|e| matches!(e, Effect::Beep)));
         assert_eq!(effects.iter().filter(|e| matches!(e, Effect::Attention)).count(), 1);
-        assert!(!a.bell_flash(pane, a.clock()));
+        assert_eq!(a.bell_alpha(pane, a.clock()), 0.0);
     }
 }
 
@@ -173,7 +173,7 @@ fn the_bell_flashes_the_pane_once_per_burst_or_asks_for_a_sound() {
     let pane = a.focused_pane().unwrap();
     a.panes[&pane].terminal.lock().feed(b"\x07\x07\x07");
     a.woken();
-    assert!(a.bell_flash(pane, a.clock()));
+    assert!(a.bell_alpha(pane, a.clock()) > 0.0);
     assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Beep)));
     let mut config = Config::default();
     config.terminal.bell = Bell::Audible;

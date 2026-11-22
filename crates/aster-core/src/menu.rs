@@ -1,8 +1,10 @@
 use crate::app::App;
 use crate::input::{CursorIcon, Key};
 use crate::keymap::Action;
+use crate::motion::{eased, UNFOLD_ITEM, UNFOLD_STEP, UNFOLD_STEP_MAX};
 use aster_gfx::render::Rect;
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
@@ -16,6 +18,7 @@ pub struct Menu {
     pub at: (f32, f32),
     pub selected: Option<usize>,
     pub(crate) profile: Option<String>,
+    pub(crate) opened_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +26,23 @@ pub struct MenuGeometry {
     pub frame: Rect,
     pub rows: Vec<(usize, Rect)>,
     pub separators: Vec<Rect>,
+    pub(crate) opens_up: bool,
+}
+
+impl MenuGeometry {
+    pub(crate) fn unfolded(&self, t: f32) -> Rect {
+        let h = self.frame.h * t;
+        let y = if self.opens_up { self.frame.bottom() - h } else { self.frame.y };
+        Rect::new(self.frame.x, y, self.frame.w, h)
+    }
+}
+
+fn item_delay(item: usize) -> Duration {
+    UNFOLD_STEP.saturating_mul(u32::try_from(item).unwrap_or(u32::MAX)).min(UNFOLD_STEP_MAX)
+}
+
+pub(crate) fn item_progress(opened: Instant, now: Instant, item: usize) -> f32 {
+    eased(opened + item_delay(item), now, UNFOLD_ITEM)
 }
 
 const WIDTH: f32 = 260.0;
@@ -77,7 +97,8 @@ pub fn geometry(menu: &Menu, s: f32, bounds: (f32, f32)) -> MenuGeometry {
     let sep_h = (SEPARATOR_H * row_scale).floor();
     let h = 2.0 * pad + menu.entries.iter().map(|e| if matches!(e, Entry::Separator) { sep_h } else { item_h }).sum::<f32>();
     let x = menu.at.0.min(bounds.0 - w - 4.0 * s).max(0.0).round();
-    let y = if menu.at.1 + h > bounds.1 { (menu.at.1 - h).max(0.0) } else { menu.at.1 }.round();
+    let opens_up = menu.at.1 + h > bounds.1;
+    let y = if opens_up { (menu.at.1 - h).max(0.0) } else { menu.at.1 }.round();
     let frame = Rect::new(x, y, w, h);
     let mut rows = Vec::new();
     let mut separators = Vec::new();
@@ -94,7 +115,7 @@ pub fn geometry(menu: &Menu, s: f32, bounds: (f32, f32)) -> MenuGeometry {
             }
         }
     }
-    MenuGeometry { frame, rows, separators }
+    MenuGeometry { frame, rows, separators, opens_up }
 }
 
 impl App {
@@ -109,7 +130,7 @@ impl App {
     fn open_menu(&mut self, entries: Vec<Entry>, x: f32, y: f32) {
         self.overlay = None;
         self.commit_rename();
-        self.menu = Some(Menu { entries, at: (x, y), selected: None, profile: None });
+        self.menu = Some(Menu { entries, at: (x, y), selected: None, profile: None, opened_at: self.clock() });
         self.set_cursor(CursorIcon::Default);
         self.dirty = true;
     }

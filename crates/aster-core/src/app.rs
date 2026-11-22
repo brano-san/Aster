@@ -156,6 +156,7 @@ pub(crate) struct Pane {
     pub exited: Option<Option<u32>>,
     pub pending: Option<Launch>,
     pub retry_launch: Option<Box<Launch>>,
+    pub ssh_connecting: bool,
     reconnect_at: Option<Instant>,
     generation: u64,
     pub queued: Vec<u8>,
@@ -239,6 +240,8 @@ pub struct App {
     pub(crate) extensions: std::sync::Arc<crate::extensions::Snapshot>,
     pub(crate) dirty: bool,
     pub(crate) motion: bool,
+    pub(crate) layers: crate::layers::Layers,
+    pub(crate) busy: crate::busy::Busy,
     last_frame: Option<Instant>,
     events: Receiver<(PaneId, u64, VtEvent)>,
     sender: Sender<(PaneId, u64, VtEvent)>,
@@ -304,7 +307,7 @@ pub struct App {
     pub(crate) start_selected: usize,
     pub(crate) tab_bar_override: Option<bool>,
     fullscreen: bool,
-    pub(crate) tab_toast: Option<(String, Instant)>,
+    pub(crate) tab_toast: Option<crate::notices::Toast>,
     pub(crate) update_notice: Option<crate::update::UpdateNotice>,
     pub(crate) monospace_fonts: Vec<String>,
     pub(crate) all_fonts: Vec<String>,
@@ -367,6 +370,8 @@ impl App {
             extensions: Default::default(),
             dirty: true,
             motion: false,
+            layers: crate::layers::Layers::default(),
+            busy: crate::busy::Busy::default(),
             last_frame: None,
             events,
             sender,
@@ -557,7 +562,12 @@ impl App {
     pub fn set_pane_pid(&mut self, pane: PaneId, pid: u32) {
         if let Some(p) = self.panes.get_mut(&pane) {
             p.pid = Some(pid);
+            self.dirty |= std::mem::take(&mut p.ssh_connecting);
         }
+    }
+
+    pub(crate) fn pane_connecting(&self, id: PaneId) -> bool {
+        self.panes.get(&id).is_some_and(|pane| pane.ssh_connecting || (pane.profile.ssh.is_some() && pane.reconnect_at.is_some()))
     }
 
     pub(crate) fn pane_cwd(&self, id: PaneId) -> Option<String> {
@@ -870,7 +880,7 @@ impl App {
             global: self.config.terminal.environment.clone(), profile: profile.env.clone(), refresh: self.config.terminal.refresh_environment, set_comspec: self.config.terminal.set_comspec,
         }));
         let launch = Launch { local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), clear_after_connect: profile.clear_after_connect, command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
-        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, host_id: None, restore_buffer: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
+        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, ssh_connecting: false, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, host_id: None, restore_buffer: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
         id
     }
 
@@ -1353,8 +1363,9 @@ impl App {
         }
     }
 
-    pub(crate) fn bell_flash(&self, pane: PaneId, now: Instant) -> bool {
-        self.bell.is_some_and(|(p, t)| p == pane && now.saturating_duration_since(t) < BELL_FLASH)
+    pub(crate) fn bell_alpha(&self, pane: PaneId, now: Instant) -> f32 {
+        self.bell.filter(|(p, _)| *p == pane && self.animations())
+            .map_or(0.0, |(_, at)| 1.0 - crate::motion::eased(at, now, BELL_FLASH))
     }
 
     fn copy(&mut self) -> bool {
@@ -1609,7 +1620,7 @@ impl App {
     }
 
     fn open_filtered_profiles(&mut self, filter: crate::picker::ProfileFilter<'_>) {
-        self.overlay = Some(Overlay::new(OverlayKind::Profiles, self.filtered_profile_picks(filter)).with_quick_connect(None, self.ssh.is_some()));
+        self.overlay = Some(Overlay::new(OverlayKind::Profiles, self.filtered_profile_picks(filter)).with_quick_connect(None, self.ssh.is_some()).opened(self.clock()));
         self.dirty = true;
     }
 
@@ -1626,7 +1637,7 @@ impl App {
             }).collect(),
             OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string(), ..Pick::default() }).collect(),
             OverlayKind::SerialSpeed(pane) => {
-                self.overlay = Some(Overlay::serial_speed(pane));
+                self.overlay = Some(Overlay::serial_speed(pane).opened(self.clock()));
                 self.dirty = true;
                 return;
             }
@@ -1644,7 +1655,7 @@ impl App {
             }
             self.scheme_before = Some(current.to_owned());
         }
-        self.overlay = Some(overlay);
+        self.overlay = Some(overlay.opened(self.clock()));
         self.dirty = true;
     }
 
@@ -1762,7 +1773,8 @@ impl App {
     fn reset_animations(&mut self) {
         self.motion = false;
         self.bell = None;
-        self.tab_toast = None;
+        let now = self.clock();
+        self.tab_toast.take_if(|toast| toast.tab_name || now >= toast.fade_at);
         self.reset_blink();
     }
 
@@ -1785,12 +1797,19 @@ impl App {
     }
 
     pub fn on_timer(&mut self) {
+        self.on_timer_at(self.clock());
+    }
+
+    fn on_timer_at(&mut self, now: Instant) {
         self.timer_due = None;
-        let now = self.clock();
         self.poll_commands(now);
         self.resume_connections(now);
-        if self.tab_toast.as_ref().is_some_and(|(_, until)| now >= *until) {
-            self.tab_toast = None;
+        let animate = self.animations();
+        if let Some(toast) = self.tab_toast.as_ref().filter(|toast| now >= toast.fade_at) {
+            if now >= toast.expires(animate) {
+                self.layers.forget_snapshot(crate::layers::Layer::Toast);
+                self.tab_toast = None;
+            }
             self.dirty = true;
         }
         if self.bell.is_some_and(|(_, t)| now.saturating_duration_since(t) >= BELL_FLASH) {
@@ -1802,7 +1821,7 @@ impl App {
             self.blink_since = now;
             self.dirty = true;
         }
-        self.schedule_timer();
+        self.schedule_timer_at(now);
     }
 
     fn resume_connections(&mut self, now: Instant) {
@@ -1812,6 +1831,7 @@ impl App {
                 launch.cols = pane.size.cols as u16;
                 launch.rows = pane.size.rows as u16;
                 pane.exited = None;
+                pane.ssh_connecting = launch.ssh.is_some();
                 self.effects.push(Effect::Spawn { pane: id, launch: launch.clone(), terminal: pane.terminal.clone(), reconnecting: true });
                 self.dirty = true;
             }
@@ -1877,7 +1897,8 @@ impl App {
             (now, before) => now == before,
         };
         if !same && self.animations() && self.tab_bar_hidden() && self.tabs.len() > 1 && self.current_tab.is_some() {
-            self.tab_toast = Some((format!("{} / {}  {}", self.active + 1, self.tabs.len(), self.tab_title(self.active)), self.clock() + TOAST));
+            let title = format!("{} / {}  {}", self.active + 1, self.tabs.len(), self.tab_title(self.active));
+            self.tab_toast = Some(crate::notices::Toast::new(title, self.clock(), TOAST, true));
             self.dirty = true;
         }
         if !same {
@@ -2883,6 +2904,7 @@ impl App {
             return;
         }
         p.exited = Some(code);
+        p.ssh_connecting = false;
         self.ssh_auth.remove(&pane);
         self.ssh_forwards.remove(&pane);
         if self.overlay.as_ref().is_some_and(|overlay| overlay.kind == OverlayKind::SshPorts(pane)) { self.overlay = None; }
@@ -2950,6 +2972,7 @@ impl App {
 
     pub fn spawn_failed(&mut self, pane: PaneId, message: &str) {
         if let Some(p) = self.panes.get_mut(&pane) {
+            p.ssh_connecting = false;
             p.terminal.lock().feed(format!("\x1b[31m{message}\x1b[0m\r\n").as_bytes());
             if matches!(p.profile.on_exit, OnExit::Auto | OnExit::Inherit) {
                 p.exited = Some(None);
@@ -2973,19 +2996,23 @@ impl App {
             self.title = title.clone();
             self.effects.push(Effect::Title(title));
         }
-        self.schedule_timer();
+        self.schedule_timer_at(now);
     }
 
     pub(crate) fn schedule_timer(&mut self) {
+        self.schedule_timer_at(self.clock());
+    }
+
+    fn schedule_timer_at(&mut self, now: Instant) {
         let next = [
             self.blinking().then_some(self.blink_since + BLINK),
             self.bell.map(|(_, start)| start + BELL_FLASH),
-            self.tab_toast.as_ref().map(|(_, until)| *until),
+            self.tab_toast.as_ref().map(|toast| toast.deadline(now, self.animations())),
             self.tabs.iter().filter_map(|t| t.command_watch.deadline()).min(),
             self.panes.values().filter_map(|p| p.reconnect_at).min(),
         ].into_iter().flatten().min();
         if let Some(due) = next.filter(|&due| self.timer_due.is_none_or(|armed| due < armed)) {
-            let left = due.saturating_duration_since(self.clock()).as_millis().max(1) as u32;
+            let left = due.saturating_duration_since(now).as_millis().max(1) as u32;
             self.effects.push(Effect::Timer(left));
             self.timer_due = Some(due);
         }

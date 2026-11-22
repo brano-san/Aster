@@ -171,11 +171,15 @@ impl DrawList {
     }
 
     pub fn fade(&mut self, from: usize, k: f32) {
+        self.fade_range(from.min(self.instances.len())..self.instances.len(), k);
+    }
+
+    pub fn fade_range(&mut self, range: std::ops::Range<usize>, k: f32) {
         let k = k.clamp(0.0, 1.0);
         if k >= 1.0 {
             return;
         }
-        for i in self.instances.iter_mut().skip(from) {
+        for i in &mut self.instances[range] {
             i.color = times_alpha(i.color, k);
         }
     }

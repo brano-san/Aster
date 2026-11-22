@@ -47,6 +47,7 @@ pub(crate) enum DialogKind {
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct VaultDialog {
+    pub opened_at: std::time::Instant,
     pub kind: DialogKind,
     fields: Vec<String>,
     ask: bool,
@@ -125,14 +126,14 @@ impl DialogKind {
 }
 
 impl VaultDialog {
-    fn new(kind: DialogKind, ask: bool) -> Self {
+    fn new(kind: DialogKind, ask: bool, opened_at: std::time::Instant) -> Self {
         let ask = ask && matches!(kind, DialogKind::Show(_) | DialogKind::Rename(_) | DialogKind::Replace(_)
             | DialogKind::Export(_) | DialogKind::Delete(_) | DialogKind::Import | DialogKind::Erase { .. });
         let mut fields = vec![String::new(); kind.fields().len() + usize::from(ask)];
         if let DialogKind::Rename(entry) = &kind {
             fields[0].clone_from(&entry.label);
         }
-        Self { kind, fields, ask, focus: 0, revealed: false, waiting: false, request: 0, issue: None, value: None, scroll: 0, max_scroll: std::cell::Cell::new(0) }
+        Self { kind, opened_at, fields, ask, focus: 0, revealed: false, waiting: false, request: 0, issue: None, value: None, scroll: 0, max_scroll: std::cell::Cell::new(0) }
     }
 
     pub fn menu(&self, unlocked: bool) -> &[&'static str] {
@@ -243,10 +244,11 @@ impl App {
     }
 
     pub(crate) fn open_vault_dialog(&mut self, kind: DialogKind) {
+        let now = self.clock();
         let Some(page) = self.settings.as_mut() else { return };
         self.vault_input_id = self.vault_input_id.wrapping_add(1);
         let show = match &kind { DialogKind::Show(entry) => Some(entry.clone()), _ => None };
-        let dialog = VaultDialog::new(kind, self.config.vault.remember_minutes == 0);
+        let dialog = VaultDialog::new(kind, self.config.vault.remember_minutes == 0, now);
         let ask = dialog.ask;
         page.vault_dialog = Some(dialog);
         self.preedit = Default::default();
@@ -435,13 +437,13 @@ impl App {
 impl App {
     pub fn prompt_config_unlock(&mut self) {
         self.vault_input_id = self.vault_input_id.wrapping_add(1);
-        self.vault_prompt = Some(VaultDialog::new(DialogKind::Startup, false));
+        self.vault_prompt = Some(VaultDialog::new(DialogKind::Startup, false, self.clock()));
         self.set_config_encrypted(true);
     }
 
     pub fn prompt_vault_access(&mut self, issue: Option<VaultIssue>) {
         self.vault_input_id = self.vault_input_id.wrapping_add(1);
-        let mut dialog = VaultDialog::new(DialogKind::Authorize, false);
+        let mut dialog = VaultDialog::new(DialogKind::Authorize, false, self.clock());
         dialog.issue = issue;
         self.vault_prompt = Some(dialog);
         self.preedit = Default::default();

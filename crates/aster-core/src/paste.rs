@@ -2,12 +2,14 @@ use crate::app::App;
 use crate::input::Key;
 use aster_gfx::render::Rect;
 use aster_vt::TermMode;
+use std::time::Instant;
 
 pub const PREVIEW_LINES: usize = 8;
 pub const BUTTONS: [&str; 3] = ["Paste", "Paste as one line", "Cancel"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PasteConfirm {
+    pub(crate) opened_at: Instant,
     pub text: String,
     pub button: usize,
 }
@@ -81,7 +83,7 @@ impl App {
     }
 
     pub(crate) fn ask_paste(&mut self, text: String) {
-        self.paste_confirm = Some(PasteConfirm { text, button: 0 });
+        self.paste_confirm = Some(PasteConfirm { text, button: 0, opened_at: self.clock() });
         self.dirty = true;
     }
 

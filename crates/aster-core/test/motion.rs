@@ -119,7 +119,9 @@ fn arrivals_reset_on_owner_change_or_when_disabled() {
 fn spin_uses_shared_phase_and_stops_when_disabled() {
     let now = Instant::now();
     assert_eq!(spin_phase(now, false), 0.0);
-    assert_eq!(spin_phase(now, true), 0.0);
-    assert_eq!(spin_phase(now + SPIN / 2, true), 0.5);
-    assert_eq!(spin_phase(now + SPIN, true), 0.0);
+    let phase = spin_phase(now, true);
+    let half_turn = spin_phase(now + SPIN / 2, true);
+    let full_turn = spin_phase(now + SPIN, true);
+    assert!(((half_turn - phase).rem_euclid(1.0) - 0.5).abs() <= f32::EPSILON);
+    assert!((full_turn - phase).abs() <= f32::EPSILON);
 }

@@ -29,6 +29,34 @@ fn labels(a: &App) -> Vec<(&str, bool)> {
 }
 
 #[test]
+fn menu_item_delay_is_staggered_and_capped() {
+    let now = std::time::Instant::now();
+    assert_eq!(item_delay(0), std::time::Duration::ZERO);
+    assert_eq!(item_delay(3), 3 * crate::motion::UNFOLD_STEP);
+    assert_eq!(item_delay(7), crate::motion::UNFOLD_STEP_MAX);
+    assert_eq!(item_delay(100), crate::motion::UNFOLD_STEP_MAX);
+    let start = now + item_delay(3);
+    assert_eq!(item_progress(now, start, 3), 0.0);
+    assert!(item_progress(now, start + crate::motion::UNFOLD_ITEM / 2, 3) > 0.0);
+    assert_eq!(item_progress(now, start + crate::motion::UNFOLD_ITEM, 3), 1.0);
+}
+
+#[test]
+fn menu_unfolds_from_the_edge_at_the_pointer() {
+    let mut a = app(1);
+    a.open_terminal_menu(400.0, 100.0);
+    let down = a.menu_geometry().unwrap();
+    assert_eq!(down.unfolded(0.5).y, down.frame.y);
+    assert_eq!(down.unfolded(0.5).h, down.frame.h / 2.0);
+
+    a.open_terminal_menu(400.0, 650.0);
+    let up = a.menu_geometry().unwrap();
+    assert_eq!(up.unfolded(0.5).bottom(), up.frame.bottom());
+    assert_eq!(up.unfolded(0.5).h, up.frame.h / 2.0);
+    assert_eq!(up.unfolded(1.0), up.frame);
+}
+
+#[test]
 fn right_clicking_a_tab_activates_it_and_offers_only_possible_actions() {
     let mut a = app(3);
     let r = a.chrome.tabs[0].rect;
@@ -95,7 +123,7 @@ fn the_pin_menu_reflects_state_and_skips_protected_close_targets() {
 
 #[test]
 fn the_menu_stays_inside_the_window() {
-    let menu = Menu { entries: vec![Entry::Separator; 3], at: (990.0, 690.0), selected: None, profile: None };
+    let menu = Menu { entries: vec![Entry::Separator; 3], at: (990.0, 690.0), selected: None, profile: None, opened_at: std::time::Instant::now() };
     let geo = geometry(&menu, 1.0, (1000.0, 700.0));
     assert!(geo.frame.right() <= 1000.0 && geo.frame.bottom() <= 700.0);
 }

@@ -142,7 +142,7 @@ fn loading_a_newer_config_warns_and_settings_cannot_edit_it() {
     let mut a = app();
     let newer = Config::parse("version = 42\n[terminal]\nopen-on-start = false").unwrap();
     a.set_config(newer.clone());
-    assert!(a.tab_toast.as_ref().unwrap().0.contains("42"));
+    assert!(a.tab_toast.as_ref().unwrap().text.contains("42"));
     a.run(Action::Settings);
     typed(&mut a, "terminal.open-on-start");
     key(&mut a, Key::Enter);

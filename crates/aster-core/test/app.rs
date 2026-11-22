@@ -72,6 +72,115 @@ fn app() -> (App, Gfx<Mono>) {
     (a, Gfx::new(Mono, 1024))
 }
 
+#[test]
+fn menu_motion_ends_after_unfold_and_ghost_fade() {
+    use crate::motion::{POP, UNFOLD};
+    let (mut a, mut gfx) = app();
+    a.open_terminal_menu(100.0, 100.0);
+    let opened = a.menu.as_ref().unwrap().opened_at;
+    let geo = a.menu_geometry().unwrap();
+    a.frame_at(&mut gfx, false, opened + UNFOLD / 2);
+    assert!(a.motion);
+    assert_eq!(a.menu_geometry(), Some(geo));
+    a.frame_at(&mut gfx, false, opened + UNFOLD);
+    assert!(!a.motion);
+
+    a.close_menu();
+    let closed = opened + UNFOLD;
+    a.frame_at(&mut gfx, false, closed);
+    assert!(a.motion);
+    assert!(!a.menu_open());
+    a.frame_at(&mut gfx, false, closed + POP);
+    assert!(!a.motion);
+    let plain = gfx.dl.instances.len();
+
+    a.set_system_animations(false);
+    a.open_terminal_menu(100.0, 100.0);
+    a.frame_at(&mut gfx, false, closed + POP);
+    assert!(!a.motion);
+    assert!(gfx.dl.instances.len() > plain);
+    a.close_menu();
+    a.frame_at(&mut gfx, false, closed + POP);
+    assert!(!a.motion);
+    assert_eq!(gfx.dl.instances.len(), plain);
+}
+
+#[test]
+fn toast_animates_at_both_deadlines_and_stays_opaque_when_disabled() {
+    use crate::motion::{TOAST_IN, TOAST_OUT};
+    let (mut a, mut gfx) = app();
+    a.toast("Error".into(), Duration::from_secs(1));
+    let toast = a.tab_toast.as_ref().unwrap();
+    let (opened, fade) = (toast.opened_at, toast.fade_at);
+    assert_eq!(a.timer_due, Some(fade));
+    a.frame_at(&mut gfx, false, opened + TOAST_IN / 2);
+    assert!(a.motion);
+    a.frame_at(&mut gfx, false, opened + TOAST_IN);
+    assert!(!a.motion);
+
+    a.on_timer_at(fade);
+    assert!(a.needs_redraw());
+    assert!(a.tab_toast.is_some());
+    assert_eq!(a.timer_due, Some(fade + TOAST_OUT));
+    a.frame_at(&mut gfx, false, fade + TOAST_OUT / 2);
+    assert!(a.motion);
+    a.on_timer_at(fade + TOAST_OUT);
+    a.frame_at(&mut gfx, false, fade + TOAST_OUT);
+    assert!(a.tab_toast.is_none());
+    assert!(!a.motion);
+
+    a.set_system_animations(false);
+    a.toast("Error".into(), Duration::from_secs(1));
+    let toast = a.tab_toast.as_ref().unwrap();
+    let fade = toast.fade_at;
+    a.frame_at(&mut gfx, false, toast.opened_at);
+    assert!(!a.motion);
+    assert_eq!(gfx.dl.instances.last().unwrap().color >> 24, 255);
+    a.on_timer_at(fade);
+    assert!(a.tab_toast.is_none());
+}
+
+#[test]
+fn visual_bell_decays_and_stops_requesting_frames() {
+    let (mut a, mut gfx) = app();
+    a.open_default_tab();
+    let pane = a.focused_pane().unwrap();
+    let now = a.clock();
+    a.bell = Some((pane, now));
+    let halfway = a.bell_alpha(pane, now + BELL_FLASH / 2);
+    assert_eq!(a.bell_alpha(pane, now), 1.0);
+    assert!(halfway > 0.0 && halfway < 1.0);
+    a.frame_at(&mut gfx, false, now + BELL_FLASH / 2);
+    assert!(a.motion);
+    a.frame_at(&mut gfx, false, now + BELL_FLASH);
+    assert!(!a.motion);
+    a.set_system_animations(false);
+    assert_eq!(a.bell_alpha(pane, now), 0.0);
+}
+
+#[test]
+fn busy_ssh_spinner_moves_until_the_session_opens() {
+    let (mut a, mut gfx) = app();
+    a.open_tab(Profile { name: "Remote".into(), ssh: Some("ann@host".into()), ..Default::default() });
+    let pane = a.focused_pane().unwrap();
+    let now = a.clock();
+    a.frame_at(&mut gfx, false, now);
+    assert!(a.motion && a.needs_redraw());
+
+    a.set_system_animations(false);
+    a.frame_at(&mut gfx, false, now);
+    let static_geometry: Vec<_> = gfx.dl.instances.iter().map(|i| i.rect).collect();
+    a.frame_at(&mut gfx, false, now + Duration::from_millis(100));
+    assert!(!a.motion);
+    assert_eq!(gfx.dl.instances.iter().map(|i| i.rect).collect::<Vec<_>>(), static_geometry);
+
+    a.set_system_animations(true);
+    a.ssh_event(pane, aster_proto::ssh::SshEvent::Forwards(Vec::new()));
+    a.frame_at(&mut gfx, false, now + Duration::from_millis(150));
+    assert!(!a.motion);
+    assert!(gfx.dl.instances.len() < static_geometry.len());
+}
+
 fn spawns(effects: &[Effect]) -> Vec<(PaneId, Launch)> {
     effects.iter().filter_map(|e| if let Effect::Spawn { pane, launch, .. } = e { Some((*pane, launch.clone())) } else { None }).collect()
 }
@@ -191,7 +300,7 @@ fn turning_animations_off_clears_transients_and_stops_the_cursor_timer() {
     let pane = a.focused_pane().unwrap();
     a.blink_on = false;
     a.bell = Some((pane, Instant::now()));
-    a.tab_toast = Some((String::new(), Instant::now()));
+    a.tab_toast = Some(crate::notices::Toast::new(String::new(), Instant::now(), TOAST, true));
     a.set_config(Config::parse("[appearance]\nanimations = false").unwrap());
     a.frame(&mut gfx, false);
     assert!(a.blink_on);
@@ -199,7 +308,7 @@ fn turning_animations_off_clears_transients_and_stops_the_cursor_timer() {
     assert!(!a.take_effects().iter().any(|effect| matches!(effect, Effect::Timer(_))));
     a.terminal(pane).unwrap().lock().feed(b"\x07");
     a.woken();
-    assert!(!a.bell_flash(pane, a.clock()));
+    assert_eq!(a.bell_alpha(pane, a.clock()), 0.0);
     assert_eq!(a.take_effects().iter().filter(|effect| matches!(effect, Effect::Attention)).count(), 1);
 }
 

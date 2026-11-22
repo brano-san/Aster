@@ -76,8 +76,15 @@ impl App {
 
     pub(crate) fn set_ssh_forwards(&mut self, pane: PaneId, statuses: Vec<ForwardStatus>) {
         self.ssh_forwards.insert(pane, statuses);
+        if let Some(p) = self.panes.get_mut(&pane) {
+            p.ssh_connecting = false;
+        }
         if self.overlay.as_ref().is_some_and(|overlay| overlay.kind == OverlayKind::SshPorts(pane)) {
+            let opened = self.overlay.as_ref().map(|overlay| overlay.opened_at);
             self.open_overlay(OverlayKind::SshPorts(pane));
+            if let (Some(overlay), Some(opened)) = (self.overlay.as_mut(), opened) {
+                overlay.opened_at = opened;
+            }
         }
         self.dirty = true;
     }

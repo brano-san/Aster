@@ -227,11 +227,11 @@ mod notice {
         let (mut a, _) = app();
         a.run(crate::keymap::Action::CheckForUpdates);
         assert_eq!(requests(&mut a), [UpdateRequest::Check { manual: true }]);
-        assert_eq!(a.tab_toast.as_ref().map(|t| t.0.as_str()), Some("Checking for updates…"));
+        assert_eq!(a.tab_toast.as_ref().map(|t| t.text.as_str()), Some("Checking for updates…"));
         a.on_update(UpdateEvent::Checked { manual: true, found: Ok(None) });
-        assert_eq!(a.tab_toast.as_ref().map(|t| t.0.clone()), Some(format!("Aster {CURRENT} is up to date")));
+        assert_eq!(a.tab_toast.as_ref().map(|t| t.text.clone()), Some(format!("Aster {CURRENT} is up to date")));
         a.on_update(UpdateEvent::Checked { manual: true, found: Err("offline".into()) });
-        assert_eq!(a.tab_toast.as_ref().map(|t| t.0.as_str()), Some("Could not check for updates: offline"));
+        assert_eq!(a.tab_toast.as_ref().map(|t| t.text.as_str()), Some("Could not check for updates: offline"));
         a.tab_toast = None;
         a.on_update(UpdateEvent::Checked { manual: false, found: Ok(None) });
         a.on_update(UpdateEvent::Checked { manual: false, found: Err("offline".into()) });

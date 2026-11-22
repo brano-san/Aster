@@ -86,6 +86,7 @@ impl App {
             let request = command_probe_id();
             self.pane_profile_probe = Some(ProfileProbe { request, pane, profile });
             self.push(Effect::ProbeCommand { request, pids: vec![pid] });
+            self.dirty = true;
         } else {
             self.replace_pane_profile(pane, &profile);
         }
@@ -93,6 +94,7 @@ impl App {
 
     pub(crate) fn finish_pane_profile_probe(&mut self, request: u64, busy: Option<bool>) -> bool {
         let Some(probe) = self.pane_profile_probe.take_if(|probe| probe.request == request) else { return false };
+        self.dirty = true;
         if self.focused_pane() != Some(probe.pane) || self.close_confirm.is_some() || self.overlay.is_some() {
             return true;
         }
@@ -101,7 +103,7 @@ impl App {
         } else {
             self.menu = None;
             self.commit_pane_rename();
-            self.close_confirm = Some(CloseConfirm { target: CloseTarget::PaneProfile(probe.pane, probe.profile), programs: Vec::new(), ssh: false, button: 0 });
+            self.close_confirm = Some(CloseConfirm { target: CloseTarget::PaneProfile(probe.pane, probe.profile), programs: Vec::new(), ssh: false, button: 0, opened_at: self.clock() });
             self.dirty = true;
         }
         true

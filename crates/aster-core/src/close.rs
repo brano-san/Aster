@@ -44,6 +44,7 @@ pub enum CloseTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloseConfirm {
+    pub(crate) opened_at: Instant,
     pub target: CloseTarget,
     pub programs: Vec<String>,
     pub ssh: bool,
@@ -152,6 +153,7 @@ impl App {
                 let request = command_probe_id();
                 self.tabs[i].command_watch = CommandWatch::Polling { busy, request };
                 self.push(Effect::ProbeCommand { request, pids });
+                self.dirty = true;
             }
         }
     }
@@ -166,11 +168,11 @@ impl App {
         if busy && result == Some(false) {
             tab.command_watch = CommandWatch::Finished;
             self.notify_command_finished(index);
-            self.dirty = true;
         } else {
             tab.command_watch = CommandWatch::Waiting { busy: result.unwrap_or(busy), next: Instant::now() + COMMAND_INTERVAL };
             self.schedule_timer();
         }
+        self.dirty = true;
     }
 
     pub(crate) fn request_close(&mut self, target: CloseTarget) {
@@ -190,7 +192,7 @@ impl App {
         }
         self.overlay = None;
         self.menu = None;
-        self.close_confirm = Some(CloseConfirm { target, programs, ssh, button: 0 });
+        self.close_confirm = Some(CloseConfirm { target, programs, ssh, button: 0, opened_at: self.clock() });
         self.dirty = true;
     }
 

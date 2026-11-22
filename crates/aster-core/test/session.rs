@@ -174,7 +174,7 @@ fn layouts_with_a_missing_leaf_leave_the_existing_tab_intact() {
     let layout = ProfileLayout::Split { vertical: false, ratio: 0.5, a: leaf("local:a"), b: leaf("missing") };
     a.open_tab(Profile { layout: Some(layout), ..Default::default() });
     assert_eq!((a.tab_count(), a.panes.len(), a.focused_pane()), (1, 1, old));
-    assert!(a.tab_toast.as_ref().unwrap().0.contains("missing"));
+    assert!(a.tab_toast.as_ref().unwrap().text.contains("missing"));
 }
 
 #[test]

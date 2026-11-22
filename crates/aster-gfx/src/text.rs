@@ -1,6 +1,6 @@
 use crate::atlas::{Atlas, Slot};
 use crate::hash::{self, FxHashMap};
-use crate::render::{Color, DrawList, Rect};
+use crate::render::{kind, Color, DrawList, Instance, Rect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum FontFamily {
@@ -211,6 +211,19 @@ impl<B: TextBackend> Gfx<B> {
         self.atlas.begin_frame();
         if self.shapes.len() > MAX_SHAPES {
             self.shapes.clear();
+        }
+    }
+
+    pub fn atlas_generation(&self) -> u64 {
+        self.atlas.generation()
+    }
+
+    pub fn retain_instances<'a>(&mut self, instances: impl Iterator<Item = &'a Instance>) {
+        let size = self.atlas.size() as f32;
+        for i in instances {
+            if matches!(i.kind, kind::GLYPH | kind::IMAGE | kind::TILED_IMAGE) {
+                self.atlas.retain_row((i.uv[1] * size).round() as u32);
+            }
         }
     }
 

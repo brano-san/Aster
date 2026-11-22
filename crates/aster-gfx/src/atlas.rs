@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
     pub x: u32,
@@ -17,13 +19,15 @@ pub struct Atlas {
     size: u32,
     shelves: Vec<Shelf>,
     frame: u64,
+    generation: u64,
 }
 
 const PAD: u32 = 1;
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 impl Atlas {
     pub fn new(size: u32) -> Self {
-        Self { size, shelves: Vec::new(), frame: 0 }
+        Self { size, shelves: Vec::new(), frame: 0, generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed) }
     }
 
     pub fn size(&self) -> u32 {
@@ -32,6 +36,11 @@ impl Atlas {
 
     pub fn clear(&mut self) {
         self.shelves.clear();
+        self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub(crate) fn begin_frame(&mut self) {
@@ -45,6 +54,12 @@ impl Atlas {
     pub(crate) fn touch(&mut self, slot: Slot) {
         let i = self.shelves.binary_search_by_key(&slot.y, |s| s.y).expect("resident atlas shelf");
         self.shelves[i].last_used = self.frame;
+    }
+
+    pub(crate) fn retain_row(&mut self, y: u32) {
+        if let Ok(i) = self.shelves.binary_search_by_key(&y, |s| s.y) {
+            self.shelves[i].last_used = self.frame;
+        }
     }
 
     pub fn alloc(&mut self, w: u32, h: u32) -> Option<Slot> {

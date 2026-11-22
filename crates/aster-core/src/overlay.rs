@@ -3,6 +3,7 @@ use crate::i18n::{t, tf};
 use crate::panes::PaneId;
 use crate::quick_connect::{Provider, QuickTarget};
 use std::ops::Range;
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayKind {
@@ -40,6 +41,7 @@ pub struct Pick {
 #[derive(Clone, Debug)]
 pub struct Overlay {
     pub kind: OverlayKind,
+    pub(crate) opened_at: Instant,
     pub items: Vec<Pick>,
     pub query: String,
     pub shown: Vec<(usize, Vec<Range<usize>>)>,
@@ -70,9 +72,14 @@ fn quick_pick(label: String, kind: &str, value: String) -> Pick {
 impl Overlay {
     pub fn new(kind: OverlayKind, items: Vec<Pick>) -> Self {
         let base = items.len();
-        let mut o = Self { kind, items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0, quick_provider: None, quick_ssh: false, base };
+        let mut o = Self { kind, opened_at: Instant::now(), items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0, quick_provider: None, quick_ssh: false, base };
         o.refilter();
         o
+    }
+
+    pub(crate) fn opened(mut self, now: Instant) -> Self {
+        self.opened_at = now;
+        self
     }
 
     pub fn with_quick_connect(mut self, provider: Option<Provider>, ssh_available: bool) -> Self {

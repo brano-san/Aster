@@ -2,6 +2,9 @@ use crate::app::{App, Drag, Effect, Metrics};
 use crate::i18n::{t, tf, tn};
 use crate::input::HitArea;
 use crate::overlay::{Overlay, OverlayKind, VISIBLE};
+use crate::busy::{Busy, ProgressBar};
+use crate::layers::Layer;
+use crate::motion::{POP, TOAST_IN, TOAST_OUT, UNFOLD};
 use crate::panes::PaneId;
 use crate::theme::color;
 use aster_gfx::render::{Color, Rect};
@@ -87,6 +90,23 @@ pub fn pane_inner(r: Rect, s: f32) -> Rect {
 
 fn rgb(c: Rgb) -> Color {
     color(c)
+}
+
+fn spinner(dl: &mut aster_gfx::render::DrawList, area: Rect, phase: f32, scale: f32, ink: Color) {
+    let (x, y) = ((area.x + area.w / 2.0).round(), (area.y + area.h / 2.0).round());
+    let radius = area.w.min(area.h).min(14.0 * scale) * 0.35;
+    let start = std::f32::consts::TAU * (phase - 0.25);
+    let points: [(f32, f32); 17] = std::array::from_fn(|i| {
+        let (sin, cos) = (start + i as f32 / 16.0 * 1.5 * std::f32::consts::PI).sin_cos();
+        (x + radius * cos, y + radius * sin)
+    });
+    dl.polyline(&points, (1.6 * scale).max(1.0), ink);
+}
+
+fn draw_busy_spinner(dl: &mut aster_gfx::render::DrawList, busy: &mut Busy, area: Rect, scale: f32, ink: Color) {
+    if area.w.min(area.h) >= 8.0 * scale {
+        spinner(dl, area, busy.phase(), scale, ink);
+    }
 }
 
 fn baseline<B: TextBackend>(g: &mut Gfx<B>, r: Rect, style: FontStyle) -> f32 {
@@ -209,8 +229,11 @@ impl App {
     }
 
     pub fn frame<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool) {
+        self.frame_at(g, maximized, self.clock());
+    }
+
+    pub(crate) fn frame_at<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool, now: std::time::Instant) {
         self.motion = false;
-        let now = self.clock();
         self.prompt_pending_serial();
         let terminal = &self.config.terminal;
         g.set_mono_font(&terminal.font, [terminal.font_weight, terminal.font_weight_bold]);
@@ -229,6 +252,9 @@ impl App {
         }
         let theme = self.theme;
         g.begin(Color::rgba(0));
+        self.layers.begin(g.atlas_generation(), now, self.animations());
+        self.busy.begin(now, self.animations());
+        g.retain_instances(self.layers.retained());
         g.set_background_image(self.background.bitmap.as_ref().map(|bitmap| (self.background.revision, bitmap.size, bitmap.rgba.as_slice())));
         if self.config.appearance.background_image_opacity > 0.0 && self.focused_pane().is_some_and(|pane| self.panes.contains_key(&pane)) {
             g.prepare_background_image();
@@ -255,43 +281,65 @@ impl App {
         let focus = self.focused_pane();
         let split = layout.panes.len() > 1;
         let broadcast = self.broadcast_targets();
+        let show_pane_busy = self.settings.is_none() && self.files.is_none()
+            && self.vault_prompt.as_ref().is_none_or(|dialog| dialog.kind != crate::vault_settings::DialogKind::Startup);
         for (id, rect) in &layout.panes {
             self.draw_pane(g, *id, *rect, focus == Some(*id), m);
             if split && focus != Some(*id) {
                 g.dl.rect(*rect, theme.dim);
             }
-            if let Some(prompt) = self.password_prompt(*id).cloned() {
-                let text = if prompt.offer {
+            let password = self.password_prompt(*id).and_then(|prompt| {
+                if prompt.offer {
                     Some(t("Save this password for the next prompt here? Ctrl+Shift+Enter saves it; any other key dismisses"))
                 } else if prompt.can_fill() {
                     Some(t("A saved password matches this prompt. Ctrl+Shift+Enter types it"))
                 } else {
                     None
-                };
-                if let Some(text) = text {
-                    self.draw_hint(g, *rect, text);
                 }
+            });
+            self.draw_popup_hint(g, *rect, Layer::Password(*id), password);
+            let broadcast_hint = broadcast.contains(id).then(|| {
+                if self.broadcast == Some(crate::app::Broadcast::AllTabs) { t("Typing goes to every tab. Click here to stop.") } else { t("Typing goes to every pane of this tab. Click here to stop.") }
+            });
+            self.draw_popup_hint(g, *rect, Layer::Broadcast(*id), broadcast_hint);
+            let layer = Layer::Transfer(*id);
+            let transfer = self.offers.get(id);
+            let from = self.layers.start(&mut g.dl, layer, self.layers.opened(layer, transfer.is_some()), POP);
+            if let Some((state, typed)) = transfer {
+                let running = *state == crate::app::PaneTransfer::Running && show_pane_busy;
+                let frame = self.draw_offer(g, *rect, *state, typed, running);
+                if running {
+                    let area = Rect::new(frame.x + (12.0 * s).round(), frame.y, (16.0 * s).round(), frame.h);
+                    draw_busy_spinner(&mut g.dl, &mut self.busy, area, s, theme.accent);
+                }
+                self.layers.pop(&mut g.dl, layer, from, frame, 0, POP);
             }
-            if broadcast.contains(id) {
-                let text = if self.broadcast == Some(crate::app::Broadcast::AllTabs) { t("Typing goes to every tab. Click here to stop.") } else { t("Typing goes to every pane of this tab. Click here to stop.") };
-                self.draw_hint(g, *rect, text);
+            let flash = self.bell_alpha(*id, now);
+            if flash > 0.0 {
+                self.motion = true;
+                g.dl.rect(*rect, theme.foreground.alpha((44.0 * flash).round() as u8));
             }
-            if let Some((state, typed)) = self.offers.get(id).cloned() {
-                self.draw_offer(g, *rect, state, &typed);
+            self.draw_pane_header(g, *id, *rect, focus == Some(*id), show_pane_busy);
+            let layer = Layer::SshAuth(*id);
+            let panel = self.ssh_auth.get(id);
+            let from = self.layers.start(&mut g.dl, layer, panel.map(|panel| panel.opened_at), POP);
+            if let Some(panel) = panel {
+                let pane = self.pane_terminal_rect(*id, *rect);
+                let geo = panel.geometry(pane, s);
+                let phase = (panel.pending && show_pane_busy && geo.entries.first().is_some_and(|(_, row)| row.w >= 24.0 * s))
+                    .then(|| self.busy.phase());
+                let frame = self.draw_ssh_auth(g, pane, panel, geo, focus == Some(*id), phase);
+                self.layers.pop(&mut g.dl, layer, from, frame, 1, POP);
             }
-            if self.bell_flash(*id, now) {
-                g.dl.rect(*rect, theme.foreground.alpha(0x2C));
-            }
-            self.draw_pane_header(g, *id, *rect, focus == Some(*id));
-            if let Some(panel) = self.ssh_auth.get(id) { self.draw_ssh_auth(g, self.pane_terminal_rect(*id, *rect), panel, focus == Some(*id)); }
         }
         for sp in &layout.splitters {
             g.dl.rect(sp.rect, theme.divider);
         }
         self.draw_pane_rearrangement(g);
-        if let Some(dialog) = self.vault_prompt.as_ref().filter(|dialog| dialog.kind == crate::vault_settings::DialogKind::Startup) {
+        if self.vault_prompt.as_ref().is_some_and(|dialog| dialog.kind == crate::vault_settings::DialogKind::Startup) {
             g.dl.rect(content, theme.surface);
-            self.draw_vault_dialog(g, content, dialog, false);
+            self.draw_window_vault(g, content);
+            self.motion |= self.layers.finish() | self.busy.finish();
             self.mark_drawn(now);
             return;
         }
@@ -302,19 +350,16 @@ impl App {
         self.draw_search(g);
         self.draw_settings(g);
         self.draw_files(g);
-        if let Some(o) = self.overlay.clone() {
-            self.draw_overlay(g, &o);
-        }
+        self.draw_overlay(g);
         self.draw_update_notice(g);
         self.draw_paste(g, m);
         self.draw_close(g);
-        self.draw_tab_toast(g);
-        if let Some(dialog) = &self.vault_prompt {
-            self.draw_vault_dialog(g, content, dialog, false);
-        }
+        self.draw_tab_toast(g, now);
+        self.draw_window_vault(g, content);
         g.dl.confine(content_layers, content);
-        self.draw_menu(g);
+        self.draw_menu(g, now);
         self.draw_mru(g);
+        self.motion |= self.layers.finish() | self.busy.finish();
         self.mark_drawn(now);
     }
 
@@ -561,6 +606,7 @@ impl App {
             let text_x = r.x + (12.0 * s).round();
             let text_end = if show_close { slot.close.x - 4.0 * s } else { r.right() - 12.0 * s };
             let y = baseline(g, r, ui);
+            let checking = matches!(self.tabs[i].command_watch, crate::close::CommandWatch::Polling { .. });
             match self.rename.as_ref().filter(|n| n.tab == i) {
                 Some(edit) => {
                     let field = Rect::new(text_x - (5.0 * s).round(), r.y + (5.0 * s).round(), (text_end - text_x + 8.0 * s).max(0.0).round(), r.h - (10.0 * s).round());
@@ -570,10 +616,16 @@ impl App {
                     let caret_h = (14.0 * s).round();
                     g.dl.rect(Rect::new(text_x + w + 1.0, field.y + ((field.h - caret_h) / 2.0).round(), (1.0 * s).round().max(1.0), caret_h), theme.accent);
                 }
+                None if self.tabs[i].pinned && checking => draw_busy_spinner(&mut g.dl, &mut self.busy, r, s, theme.accent),
                 None if self.tabs[i].pinned => self.draw_pinned_tab(g, i, r, ui),
                 None => {
                     let title = self.tab_label(i);
                     let mut x = text_x;
+                    if checking && text_end - x >= 16.0 * s {
+                        let area = Rect::new(x, r.y, 14.0 * s, r.h);
+                        draw_busy_spinner(&mut g.dl, &mut self.busy, area, s, theme.accent);
+                        x += (20.0 * s).round();
+                    }
                     if self.tab_activity(i) {
                         let d = (6.0 * s).round();
                         g.dl.circle(Rect::new(x, r.y + ((r.h - d) / 2.0).round(), d, d), theme.accent);
@@ -600,6 +652,7 @@ impl App {
                     ProgressState::Paused => (f32::from(progress.percent) / 100.0, theme.text_dim),
                     ProgressState::Indeterminate => (1.0, theme.accent.alpha(0x80)),
                 };
+                let fraction = self.busy.progress(ProgressBar::Tab(self.tabs[i].key), fraction);
                 g.dl.rect(track, theme.divider);
                 g.dl.rect(Rect::new(track.x, track.y, (track.w * fraction).round(), track.h), ink);
             }
@@ -700,6 +753,7 @@ impl App {
                 t.set_cell_pixels(m.w as u16, m.h as u16);
             }
             pane.size = size;
+            pane.ssh_connecting = launch.ssh.is_some();
             if pane.profile.ssh.is_some() || pane.profile.exit_decision(None) == crate::profile::ExitDecision::Reconnect {
                 pane.retry_launch = Some(Box::new(launch.clone()));
             }
@@ -945,14 +999,21 @@ impl App {
         }
     }
 
-    fn draw_pane_header<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool) {
+    fn draw_pane_header<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, rect: Rect, focused: bool, show_busy: bool) {
         let header = self.pane_header(id, rect);
+        let s = self.ui();
+        let theme = self.theme;
+        let checking = self.pane_profile_probe.as_ref().is_some_and(|probe| probe.pane == id);
+        let busy = show_busy && (self.pane_connecting(id) || checking);
         if header.h <= 0.0 || header.w <= 0.0 {
+            if busy && rect.w >= 28.0 * s && rect.h >= 24.0 * s {
+                let area = Rect::new(rect.right() - 25.0 * s, rect.y + 3.0 * s, 22.0 * s, 20.0 * s);
+                g.dl.round_rect(area, theme.overlay, 4.0 * s);
+                draw_busy_spinner(&mut g.dl, &mut self.busy, area, s, theme.accent);
+            }
             return;
         }
         let Some(pane) = self.panes.get(&id) else { return };
-        let s = self.ui();
-        let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
         let line = (1.0 * s).round().max(1.0);
         let toolbar = self.ssh_toolbar(id, rect);
@@ -984,6 +1045,12 @@ impl App {
             self.set_ime_area(caret);
         } else {
             let title = pane.name.as_deref().or(pane.title.as_deref()).unwrap_or(&pane.profile.name);
+            let mut x = x;
+            if busy && right - x >= 15.0 * s {
+                let area = Rect::new(x, header.y, 12.0 * s, header.h);
+                draw_busy_spinner(&mut g.dl, &mut self.busy, area, s, theme.accent);
+                x += (17.0 * s).round();
+            }
             g.text(x, y, title, ui, if focused { theme.text } else { theme.text_dim }, (right - x - 8.0 * s).max(0.0));
         }
         if let Some(toolbar) = toolbar {
@@ -1049,7 +1116,15 @@ impl App {
         }
     }
 
-    fn draw_hint<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, text: &str) {
+    fn draw_popup_hint<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, layer: Layer, text: Option<&str>) {
+        let from = self.layers.start(&mut g.dl, layer, self.layers.opened(layer, text.is_some()), POP);
+        if let Some(text) = text {
+            let frame = self.draw_hint(g, pane, text, false);
+            self.layers.pop(&mut g.dl, layer, from, frame, 0, POP);
+        }
+    }
+
+    fn draw_hint<B: TextBackend>(&self, g: &mut Gfx<B>, pane: Rect, text: &str, busy: bool) -> Rect {
         let s = self.ui();
         let theme = self.theme;
         let h = hint_height(s);
@@ -1057,16 +1132,22 @@ impl App {
         g.dl.rect(r, theme.overlay);
         g.dl.rect(Rect::new(r.x, r.y, r.w, (1.0 * s).round().max(1.0)), theme.accent);
         let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
-        let inner = r.inset((14.0 * s).round(), 0.0);
+        let mut inner = r.inset((14.0 * s).round(), 0.0);
+        if busy {
+            let pad = (20.0 * s).round();
+            inner.x += pad;
+            inner.w = (inner.w - pad).max(0.0);
+        }
         let y = baseline(g, inner, ui);
         g.text(inner.x, y, text, ui, theme.text, inner.w);
+        r
     }
 
-    fn draw_offer<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: Rect, state: crate::app::PaneTransfer, typed: &str) {
+    fn draw_offer<B: TextBackend>(&self, g: &mut Gfx<B>, pane: Rect, state: crate::app::PaneTransfer, typed: &str, busy: bool) -> Rect {
         use crate::app::PaneTransfer;
         match state {
-            PaneTransfer::Incoming => return self.draw_hint(g, pane, t("The remote side wants to send files. Enter receives them into Downloads, Esc refuses.")),
-            PaneTransfer::Running => return self.draw_hint(g, pane, t("Transfer in progress. Esc cancels.")),
+            PaneTransfer::Incoming => return self.draw_hint(g, pane, t("The remote side wants to send files. Enter receives them into Downloads, Esc refuses."), false),
+            PaneTransfer::Running => return self.draw_hint(g, pane, t("Transfer in progress. Esc cancels."), busy),
             PaneTransfer::AwaitingFiles | PaneTransfer::None => {}
         }
         let s = self.ui();
@@ -1088,10 +1169,13 @@ impl App {
         let w = g.text(inner.x, fy, typed, ui, theme.text, inner.w);
         let caret_h = (14.0 * s).round();
         g.dl.rect(Rect::new(inner.x + w + 1.0, field.y + ((field.h - caret_h) / 2.0).round(), (1.0 * s).round().max(1.0), caret_h), theme.accent);
+        r
     }
 
     fn draw_paste<B: TextBackend>(&mut self, g: &mut Gfx<B>, m: Metrics) {
         use crate::paste::{BUTTONS, PREVIEW_LINES};
+        let layer = Layer::Paste;
+        let from = self.layers.start(&mut g.dl, layer, self.paste_confirm.as_ref().map(|confirm| confirm.opened_at), POP);
         let Some(geo) = self.paste_geometry() else { return };
         let Some(confirm) = self.paste_confirm.clone() else { return };
         let s = self.ui();
@@ -1131,6 +1215,7 @@ impl App {
             }
             centered(g, *r, t(BUTTONS[i]), ui, if chosen { theme.on_accent } else { theme.text });
         }
+        self.layers.pop(&mut g.dl, layer, from, geo.frame, 1, POP);
     }
 
     fn draw_ssh_toolbar<B: TextBackend>(&self, g: &mut Gfx<B>, pane: PaneId, toolbar: &crate::ssh_toolbar::Toolbar) {
@@ -1148,11 +1233,10 @@ impl App {
         }
     }
 
-    fn draw_ssh_auth<B: TextBackend>(&self, g: &mut Gfx<B>, pane: Rect, panel: &crate::ssh_auth::Panel, focused: bool) {
+    fn draw_ssh_auth<B: TextBackend>(&self, g: &mut Gfx<B>, pane: Rect, panel: &crate::ssh_auth::Panel, geo: crate::ssh_auth::Geometry, focused: bool, phase: Option<f32>) -> Rect {
         use crate::ssh_auth::Row;
         let s = self.ui();
         let theme = self.theme;
-        let geo = panel.geometry(pane, s);
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
         let heading = FontStyle::new(FontFamily::Ui, (15.0 * s).round(), true);
         let line = s.round().max(1.0);
@@ -1167,7 +1251,12 @@ impl App {
         for &(index, row) in &geo.entries {
             let y = baseline(g, row, ui);
             if panel.pending {
-                g.text(row.x, y, t("Waiting for the SSH server…"), ui, theme.text_dim, row.w);
+                let mut x = row.x;
+                if let Some(phase) = phase {
+                    spinner(&mut g.dl, Rect::new(x, row.y, 14.0 * s, row.h), phase, s, theme.accent);
+                    x += (20.0 * s).round();
+                }
+                g.text(x, y, t("Waiting for the SSH server…"), ui, theme.text_dim, (row.right() - x).max(0.0));
                 continue;
             }
             match &panel.rows[index] {
@@ -1213,10 +1302,13 @@ impl App {
             centered(g, button, label, ui, theme.text);
         }
         g.dl.confine(first, pane);
+        geo.frame
     }
 
     fn draw_close<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         use crate::close::{CloseTarget, BUTTONS, LISTED};
+        let layer = Layer::Close;
+        let from = self.layers.start(&mut g.dl, layer, self.close_confirm.as_ref().map(|confirm| confirm.opened_at), POP);
         let Some(geo) = self.close_geometry() else { return };
         let Some(confirm) = self.close_confirm.clone() else { return };
         let s = self.ui();
@@ -1263,24 +1355,48 @@ impl App {
             let label = if i == 0 && matches!(confirm.target, CloseTarget::PaneProfile(..)) { t("Change profile") } else { t(BUTTONS[i]) };
             centered(g, *r, label, ui, if chosen { theme.on_accent } else { theme.text });
         }
+        self.layers.pop(&mut g.dl, layer, from, geo.frame, 1, POP);
     }
 
-    fn draw_tab_toast<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
-        let Some((text, _)) = self.tab_toast.clone() else { return };
+    fn draw_tab_toast<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: std::time::Instant) {
+        let layer = Layer::Toast;
+        let toast = self.tab_toast.as_ref();
+        let from = self.layers.start(&mut g.dl, layer, toast.map(|toast| toast.opened_at), TOAST_OUT);
+        let Some(toast) = toast else { return };
+        let Some((opening, alpha, moving)) = toast.appearance(now, self.animations()) else {
+            self.layers.forget_snapshot(layer);
+            return;
+        };
+        self.motion |= moving;
+        let text = &toast.text;
         let s = self.ui();
         let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
         let content = self.chrome.content;
-        let w = (g.measure(&text, ui) + 28.0 * s).min((content.w - 24.0 * s).max(0.0)).round();
+        let spinner_space = if toast.checking { (20.0 * s).round() } else { 0.0 };
+        let w = (g.measure(text, ui) + 28.0 * s + spinner_space).min((content.w - 24.0 * s).max(0.0)).round();
         let h = (32.0 * s).round();
         let r = Rect::new((content.x + (content.w - w) / 2.0).round(), content.y + (14.0 * s).round(), w, h);
         g.dl.shadow(Rect::new(r.x, r.y + 3.0 * s, r.w, r.h), theme.shadow, (8.0 * s).round(), (12.0 * s).round());
         g.dl.round_rect(r, theme.overlay, (8.0 * s).round());
         g.dl.outline(r, theme.overlay_border, (8.0 * s).round(), (1.0 * s).round().max(1.0));
-        centered(g, r, &text, ui, theme.text);
+        let mut label = r;
+        if toast.checking && r.w > 44.0 * s {
+            let area = Rect::new(r.x + (12.0 * s).round(), r.y, 14.0 * s, r.h);
+            let phase = if now < toast.fade_at { self.busy.phase() } else { crate::motion::spin_phase(toast.fade_at, self.animations()) };
+            spinner(&mut g.dl, area, phase, s, theme.accent);
+            label.x += spinner_space;
+            label.w -= spinner_space;
+        }
+        centered(g, label, text, ui, theme.text);
+        g.dl.pop_in(from, opening, (r.x + r.w / 2.0, r.y + r.h / 2.0));
+        g.dl.fade(from, alpha);
+        self.layers.save(&g.dl, layer, from);
     }
 
     fn draw_update_notice<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        let layer = Layer::UpdateNotice;
+        let from = self.layers.start(&mut g.dl, layer, self.update_notice.as_ref().map(|notice| notice.opened_at), TOAST_OUT);
         let s = self.ui();
         let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
         let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
@@ -1288,7 +1404,8 @@ impl App {
         let Some(notice) = self.update_notice.as_mut() else { return };
         notice.button_widths = notice.buttons().iter().map(|b| (g.measure(b.label(notice.notes_open), ui) + 28.0 * s).ceil()).collect();
         let inner = (crate::update::notice_geometry(content, s, notice).frame.w - 28.0 * s).max(1.0);
-        notice.status_lines = wrapped_info(g, &notice.status(), ui, inner);
+        let spinner_space = if notice.busy() { (20.0 * s).round() } else { 0.0 };
+        notice.status_lines = wrapped_info(g, &notice.status(), ui, (inner - spinner_space).max(1.0));
         if notice.notes_shown() {
             let width = (inner - 20.0 * s).max(1.0);
             let mut wrapped = Vec::new();
@@ -1317,12 +1434,17 @@ impl App {
         g.text(geo.title.x, ty, &notice.title(), title, theme.text, geo.title.w);
         let failed = matches!(notice.stage, crate::update::Stage::Failed | crate::update::Stage::ReadOnly);
         let status_ink = if failed { Color::rgb(if theme.dark { 0xFF9490 } else { 0xA52320 }) } else { theme.text_dim };
+        if notice.busy() {
+            let area = Rect::new(geo.status.x, geo.status.y, 14.0 * s, geo.line_h);
+            draw_busy_spinner(&mut g.dl, &mut self.busy, area, s, theme.accent);
+        }
         for (k, text) in notice.status_lines.iter().take(((geo.status.h / geo.line_h) as usize).max(1)).enumerate() {
-            let r = Rect::new(geo.status.x, geo.status.y + k as f32 * geo.line_h, geo.status.w, geo.line_h);
+            let r = Rect::new(geo.status.x + spinner_space, geo.status.y + k as f32 * geo.line_h, (geo.status.w - spinner_space).max(0.0), geo.line_h);
             let y = baseline(g, r, ui);
             g.text(r.x, y, text, ui, status_ink, r.w);
         }
         if let (Some(bar), Some(fraction)) = (geo.bar, notice.fraction()) {
+            let fraction = self.busy.progress(ProgressBar::Update(notice.opened_at), fraction);
             g.dl.round_rect(bar, theme.surface, bar.h / 2.0);
             if fraction > 0.0 {
                 g.dl.round_rect(Rect::new(bar.x, bar.y, (bar.w * fraction).max(bar.h).round(), bar.h), theme.accent, bar.h / 2.0);
@@ -1359,6 +1481,7 @@ impl App {
             }
             centered(g, *r, button.label(notice.notes_open), ui, if primary { theme.on_accent } else { theme.text });
         }
+        self.layers.pop(&mut g.dl, layer, from, geo.frame, 0, TOAST_IN);
     }
 
     fn draw_mru<B: TextBackend>(&self, g: &mut Gfx<B>) {
@@ -1392,23 +1515,36 @@ impl App {
         }
     }
 
-    fn draw_menu<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
-        use crate::menu::Entry;
+    fn draw_menu<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: std::time::Instant) {
+        use crate::menu::{item_progress, Entry};
+        let layer = Layer::Menu;
+        let menu = self.menu.as_ref();
+        let from = self.layers.start(&mut g.dl, layer, menu.map(|menu| menu.opened_at), POP);
+        let Some(menu) = menu else { return };
         let Some(geo) = self.menu_geometry() else { return };
-        let Some(menu) = self.menu.clone() else { return };
+        let phase = self.layers.progress(layer, UNFOLD);
+        let unfolded = geo.unfolded(phase);
         let s = self.ui();
         let theme = self.theme;
         let radius = (7.0 * s).round();
         g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 4.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (14.0 * s).round());
         g.dl.round_rect(geo.frame, theme.overlay, radius);
         g.dl.outline(geo.frame, theme.overlay_border, radius, (1.0 * s).round().max(1.0));
+        if phase < 1.0 {
+            g.dl.refit(from, geo.frame, unfolded);
+        }
+        let separators = g.dl.instances.len();
         for r in &geo.separators {
             g.dl.rect(*r, theme.overlay_border);
         }
+        if phase < 1.0 {
+            g.dl.confine(separators, unfolded);
+        }
         let ui = FontStyle::new(FontFamily::Ui, (12.5 * s).round(), false);
         let small = FontStyle::new(FontFamily::Ui, (11.0 * s).round(), false);
-        for (i, r) in &geo.rows {
+        for (k, (i, r)) in geo.rows.iter().enumerate() {
             let Some(Entry::Item { label, action, enabled }) = menu.entries.get(*i) else { continue };
+            let row = g.dl.instances.len();
             if menu.selected == Some(*i) {
                 g.dl.round_rect(*r, theme.accent.alpha(0x38), (4.0 * s).round());
             }
@@ -1426,7 +1562,15 @@ impl App {
                 let hy = baseline(g, *r, small);
                 g.text(r.right() - pad - hint_w, hy, &hint, small, theme.text_dim, hint_w + 1.0);
             }
+            if phase < 1.0 {
+                let t = item_progress(menu.opened_at, now, k);
+                let offset = if geo.opens_up { 4.0 * s } else { -4.0 * s };
+                g.dl.nudge(row, 0.0, offset * (1.0 - t));
+                g.dl.fade(row, t);
+                g.dl.confine(row, unfolded);
+            }
         }
+        self.layers.save(&g.dl, layer, from);
     }
 
     fn draw_files<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
@@ -1554,7 +1698,8 @@ impl App {
             }
             let pad = (12.0 * s).round();
             let bar = Rect::new(r.x + pad, r.bottom() - (6.0 * s).round(), r.w - 2.0 * pad, (3.0 * s).round().max(2.0));
-            let fraction = if t.total > 0 { (t.done as f32 / t.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+            let target = if t.total > 0 { (t.done as f32 / t.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+            let fraction = self.busy.progress(ProgressBar::Transfer(*id), target);
             let (state, color) = match &t.state {
                 TransferState::Running => (tf("{done} of {total}  ·  click to cancel", &[("done", &human_size(t.done)), ("total", &human_size(t.total))]), theme.text_dim),
                 TransferState::Editing { saves } => (tf("editing locally  ·  saved {saves} times  ·  click to stop", &[("saves", &saves.to_string())]), theme.accent),
@@ -1570,7 +1715,16 @@ impl App {
             let arrow = if t.edit { "\u{270E}" } else if t.upload { "\u{2191}" } else { "\u{2193}" };
             let label = format!("{arrow} {}", t.name);
             let lw = g.text(r.x + pad, y, &label, ui, theme.text, r.w * 0.45);
-            g.text(r.x + pad + lw + (14.0 * s).round(), y, &state, small, color, (r.w - lw - 3.0 * pad).max(0.0));
+            let mut x = r.x + pad + lw + (14.0 * s).round();
+            let mut width = r.w - lw - 3.0 * pad;
+            if matches!(t.state, TransferState::Running) && width >= 24.0 * s {
+                let area = Rect::new(x, r.y, 14.0 * s, (bar.y - r.y).max(0.0));
+                draw_busy_spinner(&mut g.dl, &mut self.busy, area, s, theme.accent);
+                let reserve = (20.0 * s).round();
+                x += reserve;
+                width -= reserve;
+            }
+            g.text(x, y, &state, small, color, width.max(0.0));
         }
         let hint = t("Enter open  ·  Ctrl+D download  ·  F4 edit  ·  F2 rename  ·  F7 new folder  ·  F9 permissions  ·  Del delete  ·  Ctrl+U or drop to upload");
         let hy = baseline(g, geo.hint, small);
@@ -1828,19 +1982,35 @@ impl App {
         }
     }
 
-    fn draw_vault_dialog<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, dialog: &crate::vault_settings::VaultDialog, unlocked: bool) {
-        if dialog.revealed || dialog.value.is_some() {
-            g.with_transient_text(|g| self.draw_vault_dialog_content(g, area, dialog, unlocked));
-        } else {
-            self.draw_vault_dialog_content(g, area, dialog, unlocked);
+    fn draw_window_vault<B: TextBackend>(&mut self, g: &mut Gfx<B>, area: Rect) {
+        let layer = Layer::Vault;
+        let dialog = self.vault_prompt.as_ref();
+        let from = self.layers.start(&mut g.dl, layer, dialog.map(|dialog| dialog.opened_at), POP);
+        if let Some(dialog) = dialog {
+            let (rect, sensitive) = self.draw_vault_dialog(g, area, dialog, false);
+            self.layers.pop(&mut g.dl, layer, from, rect, 1, POP);
+            if sensitive {
+                self.layers.forget_snapshot(layer);
+            }
         }
     }
 
-    fn draw_vault_dialog_content<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, dialog: &crate::vault_settings::VaultDialog, unlocked: bool) {
+    fn draw_vault_dialog<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, dialog: &crate::vault_settings::VaultDialog, unlocked: bool) -> (Rect, bool) {
+        let layout = crate::vault_settings::vault_layout(area, self.ui(), dialog, unlocked);
+        let frame = layout.frame;
+        if dialog.revealed || dialog.value.is_some() {
+            g.with_transient_text(|g| self.draw_vault_dialog_content(g, area, dialog, unlocked, layout));
+            (frame, true)
+        } else {
+            self.draw_vault_dialog_content(g, area, dialog, unlocked, layout);
+            (frame, false)
+        }
+    }
+
+    fn draw_vault_dialog_content<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, dialog: &crate::vault_settings::VaultDialog, unlocked: bool, layout: crate::vault_settings::VaultLayout) {
         let s = self.ui();
         let theme = self.theme;
         let (mx, my) = self.mouse;
-        let layout = crate::vault_settings::vault_layout(area, s, dialog, unlocked);
         let frame = layout.frame;
         let radius = (8.0 * s).round();
         let line = s.round().max(1.0);
@@ -2240,7 +2410,10 @@ impl App {
         let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
         let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
         let (_, _, width) = crate::settings::column_widths(self.chrome.content, s);
-        let Some(page) = self.settings.as_ref() else { return };
+        let Some(page) = self.settings.as_ref() else {
+            self.layers.start(&mut g.dl, Layer::RestartNotice, None, TOAST_OUT);
+            return;
+        };
         let info_rows = page.shown.iter().filter_map(|&index| {
             let setting = SETTINGS.get(index).filter(|setting| matches!(setting.control, Control::ReadOnly(_)))?;
             let inset = if setting.key == "info.sync-status" { 43.0 } else { 28.0 };
@@ -2324,10 +2497,13 @@ impl App {
         if let Some(sample) = geo.font_sample {
             self.draw_font_sample(g, sample, small);
         }
+        let layer = Layer::RestartNotice;
+        let from = self.layers.start(&mut g.dl, layer, self.layers.opened(layer, geo.restart.is_some()), TOAST_OUT);
         if let Some(button) = geo.restart {
             g.dl.round_rect(button, if button.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
             g.dl.outline(button, theme.accent, radius, if page.selected == page.shown.len() { 2.0 * line } else { line });
             centered(g, button, t("Restart to apply"), ui, theme.text);
+            self.layers.pop(&mut g.dl, layer, from, button, 0, TOAST_IN);
         }
         if page.extensions_page() {
             self.draw_extensions_page(g, geo.list, page, ui, small);
@@ -2605,8 +2781,15 @@ impl App {
             g.dl.outline(Rect::new(first.x, first.y, first.w, last.bottom() - first.y), theme.overlay_border, 0.0, line);
         }
         g.dl.set_clip(None);
-        if let Some(dialog) = &page.vault_dialog {
-            self.draw_vault_dialog(g, geo.page, dialog, page.vault.unlocked);
+        let layer = Layer::SettingsVault;
+        let dialog = page.vault_dialog.as_ref();
+        let from = self.layers.start(&mut g.dl, layer, dialog.map(|dialog| dialog.opened_at), POP);
+        if let Some(dialog) = dialog {
+            let (rect, sensitive) = self.draw_vault_dialog(g, geo.page, dialog, page.vault.unlocked);
+            self.layers.pop(&mut g.dl, layer, from, rect, 1, POP);
+            if sensitive {
+                self.layers.forget_snapshot(layer);
+            }
             return;
         }
         if let Some(editor) = &page.scheme_editor {
@@ -2725,10 +2908,19 @@ impl App {
         }
     }
 
-    fn draw_overlay<B: TextBackend>(&mut self, g: &mut Gfx<B>, o: &Overlay) {
+    fn draw_overlay<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
+        let layer = Layer::Overlay;
+        let overlay = self.overlay.as_ref();
+        let from = self.layers.start(&mut g.dl, layer, overlay.map(|overlay| overlay.opened_at), POP);
+        let Some(overlay) = overlay else { return };
+        let geo = overlay_geometry(self, overlay);
+        self.draw_overlay_content(g, overlay, &geo);
+        self.layers.pop(&mut g.dl, layer, from, geo.frame, 0, POP);
+    }
+
+    fn draw_overlay_content<B: TextBackend>(&self, g: &mut Gfx<B>, o: &Overlay, geo: &OverlayGeometry) {
         let s = self.ui();
         let theme = self.theme;
-        let geo = overlay_geometry(self, o);
         let radius = (8.0 * s).round();
         g.dl.shadow(Rect::new(geo.frame.x, geo.frame.y + 6.0 * s, geo.frame.w, geo.frame.h), theme.shadow, radius, (18.0 * s).round());
         g.dl.round_rect(geo.frame, theme.overlay, radius);

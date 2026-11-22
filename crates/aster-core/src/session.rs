@@ -105,7 +105,7 @@ impl App {
         match layout.resolve(&self.profiles) {
             Ok(state) => Some(self.build(&state)),
             Err(id) => {
-                self.tab_toast = Some((crate::i18n::tf("Layout profile unavailable: {id}", &[("id", &id)]), std::time::Instant::now() + crate::app::TOAST));
+                self.toast(crate::i18n::tf("Layout profile unavailable: {id}", &[("id", &id)]), crate::app::TOAST);
                 self.dirty = true;
                 None
             }

@@ -64,21 +64,21 @@ impl App {
             let id = entry.key.strip_prefix("key-file:").unwrap_or(&entry.key);
             Pick { label: entry.label.clone(), value: format!("{VAULT_IDENTITY_PREFIX}{id}"), ..Default::default() }
         }).collect();
-        self.overlay = Some(Overlay::new(OverlayKind::SshKeys(self.ssh_editor_request), picks));
+        self.overlay = Some(Overlay::new(OverlayKind::SshKeys(self.ssh_editor_request), picks).opened(self.clock()));
         self.dirty = true;
     }
 
     fn browse_ssh_keys(&mut self, directory: Option<PathBuf>, import: bool) {
         self.ssh_editor_request = self.ssh_editor_request.wrapping_add(1);
         let request = self.ssh_editor_request;
-        self.overlay = Some(Overlay::new(OverlayKind::SshKeys(request), Vec::new()));
+        self.overlay = Some(Overlay::new(OverlayKind::SshKeys(request), Vec::new()).opened(self.clock()));
         self.push(Effect::BrowseSshKeys { request, directory, import });
         self.dirty = true;
     }
 
     pub fn ssh_key_files(&mut self, request: u64, import: bool, result: Option<(PathBuf, Vec<(String, bool)>)>) {
         let kind = OverlayKind::SshKeys(request);
-        if !self.overlay.as_ref().is_some_and(|overlay| overlay.kind == kind) { return; }
+        let Some(opened) = self.overlay.as_ref().filter(|overlay| overlay.kind == kind).map(|overlay| overlay.opened_at) else { return };
         if let Some((dir, files)) = result {
             let (directory_action, file_action) = if import { ("import-dir", "import-file") } else { ("dir", "file") };
             let mut picks = Vec::new();
@@ -90,7 +90,7 @@ impl App {
                 let (action, label) = if is_dir { (directory_action, format!("{name}/")) } else { (file_action, name) };
                 Some(Pick { label, hint: path.clone(), value: format!("{action}:{path}"), ..Default::default() })
             }));
-            self.overlay = Some(Overlay::new(kind, picks));
+            self.overlay = Some(Overlay::new(kind, picks).opened(opened));
         } else {
             self.overlay = None;
             self.ssh_editor_error(t("Could not read the key folder"));

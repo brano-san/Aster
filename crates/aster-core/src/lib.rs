@@ -1,5 +1,6 @@
 pub mod app;
 pub mod background;
+mod busy;
 mod clipboard;
 pub mod close;
 pub mod config;
@@ -17,6 +18,8 @@ pub mod input;
 pub mod jump_list;
 pub mod keymap;
 pub mod keys;
+mod layers;
+mod notices;
 pub mod links;
 pub mod menu;
 pub mod motion;

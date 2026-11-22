@@ -670,7 +670,7 @@ fn the_tab_bar_hides_by_setting_or_shortcut_and_tab_switches_show_their_name() {
     assert!(a.tab_bar_hidden());
     key(&mut a, Key::Char('1'), Mods { alt: true, ..Mods::NONE });
     key(&mut a, Key::Char('2'), Mods { alt: true, ..Mods::NONE });
-    assert!(a.tab_toast.as_ref().is_some_and(|(text, _)| text.starts_with("2 / 2")));
+    assert!(a.tab_toast.as_ref().is_some_and(|toast| toast.text.starts_with("2 / 2")));
     assert_eq!(a.hit_test(400.0, 2.0), crate::input::HitArea::Client);
     key(&mut a, Key::Char('B'), Mods { ctrl: true, shift: true, ..Mods::NONE });
     assert!(!a.tab_bar_hidden(), "the shortcut overrides the setting");

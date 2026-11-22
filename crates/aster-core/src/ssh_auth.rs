@@ -2,6 +2,7 @@ use crate::app::{App, Effect};
 use crate::input::{Key, Mods, MouseButton};
 use crate::panes::PaneId;
 use aster_gfx::render::Rect;
+use std::time::Instant;
 use aster_proto::ssh::{InteractiveAnswer, InteractiveChallenge, SshEvent};
 
 pub(crate) enum Row {
@@ -12,6 +13,7 @@ pub(crate) enum Row {
 
 pub(crate) struct Panel {
     pub challenge: InteractiveChallenge,
+    pub opened_at: Instant,
     pub rows: Vec<Row>,
     pub focus: usize,
     pub remember: bool,
@@ -31,7 +33,7 @@ pub(crate) struct Geometry {
 }
 
 impl Panel {
-    fn new(challenge: InteractiveChallenge) -> Self {
+    fn new(challenge: InteractiveChallenge, opened_at: Instant) -> Self {
         let mut rows = Vec::new();
         for line in challenge.name.lines().chain(challenge.instructions.lines()) {
             let clean: String = line.chars().filter(|c| !c.is_control()).collect();
@@ -49,7 +51,7 @@ impl Panel {
         }
         rows.extend((0..challenge.prompts.len()).map(Row::Prompt));
         let values = vec![String::new(); challenge.prompts.len()];
-        Self { challenge, rows, values, focus: 0, remember: false, pending: false, scroll: 0 }
+        Self { challenge, opened_at, rows, values, focus: 0, remember: false, pending: false, scroll: 0 }
     }
 
     pub(crate) fn display(&self, index: usize) -> String {
@@ -114,8 +116,9 @@ impl App {
     pub fn ssh_event(&mut self, pane: PaneId, event: SshEvent) {
         if !self.panes.get(&pane).is_some_and(|pane| pane.exited.is_none()) { return; }
         self.ssh_auth_paste = None;
+        let now = self.clock();
         match event {
-            SshEvent::Challenge(challenge) => { self.ssh_auth.insert(pane, Panel::new(challenge)); }
+            SshEvent::Challenge(challenge) => { self.ssh_auth.insert(pane, Panel::new(challenge, now)); }
             SshEvent::Finished => { self.ssh_auth.remove(&pane); }
             SshEvent::Forwards(statuses) => self.set_ssh_forwards(pane, statuses),
         }

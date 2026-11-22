@@ -234,6 +234,7 @@ impl NoticeButton {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UpdateNotice {
+    pub(crate) opened_at: Instant,
     pub release: Release,
     pub stage: Stage,
     pub progress: Option<(u64, Option<u64>)>,
@@ -248,7 +249,7 @@ pub struct UpdateNotice {
 
 impl UpdateNotice {
     pub fn new(release: Release) -> Self {
-        Self { release, stage: Stage::Offer, progress: None, message: None, cancelling: false, notes_open: false, notes_scroll: 0, wrapped: Vec::new(), status_lines: Vec::new(), button_widths: Vec::new() }
+        Self { release, opened_at: Instant::now(), stage: Stage::Offer, progress: None, message: None, cancelling: false, notes_open: false, notes_scroll: 0, wrapped: Vec::new(), status_lines: Vec::new(), button_widths: Vec::new() }
     }
 
     pub fn buttons(&self) -> Vec<NoticeButton> {
@@ -415,12 +416,18 @@ impl App {
             self.dirty = true;
             return;
         }
-        self.toast(t("Checking for updates…").to_owned(), CHECKING_TOAST);
+        self.show_toast(t("Checking for updates…").to_owned(), CHECKING_TOAST, true);
         self.effects.push(Effect::Update(UpdateRequest::Check { manual: true }));
     }
 
     pub(crate) fn toast(&mut self, text: String, lasting: Duration) {
-        self.tab_toast = Some((text, Instant::now() + lasting));
+        self.show_toast(text, lasting, false);
+    }
+
+    fn show_toast(&mut self, text: String, lasting: Duration, checking: bool) {
+        let mut toast = crate::notices::Toast::new(text, self.clock(), lasting, false);
+        toast.checking = checking;
+        self.tab_toast = Some(toast);
         self.dirty = true;
         self.schedule_timer();
     }
@@ -430,12 +437,15 @@ impl App {
         match event {
             UpdateEvent::Checked { manual, found } => {
                 if manual {
-                    self.tab_toast = None;
+                    let now = self.clock();
+                    if let Some(toast) = self.tab_toast.as_mut().filter(|toast| toast.checking) {
+                        toast.fade_at = toast.fade_at.min(now);
+                    }
                 }
                 match found {
                     Ok(Some(release)) => {
                         if !self.update_notice.as_ref().is_some_and(UpdateNotice::busy) {
-                            self.update_notice = Some(UpdateNotice::new(release));
+                            self.update_notice = Some(UpdateNotice { opened_at: self.clock(), ..UpdateNotice::new(release) });
                         }
                     }
                     Ok(None) if manual => self.toast(tf("Aster {version} is up to date", &[("version", CURRENT)]), RESULT_TOAST),
