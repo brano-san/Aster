@@ -15,12 +15,15 @@ fn saves_refreshes_and_removes_a_shortcut_with_the_app_id() {
     assert!(!update(&shortcut, &first, None).unwrap());
     assert!(update(&shortcut, &first, Some(true)).unwrap());
     let link = load(&shortcut).unwrap();
-    assert_eq!(target(&link).unwrap(), first);
+    assert!(same_path(&target(&link).unwrap(), &first));
     let store: IPropertyStore = link.cast().unwrap();
     let app_id = unsafe { store.GetValue(&PKEY_AppUserModel_ID).unwrap() };
     assert_eq!(app_id.to_string(), unsafe { APP_ID.to_string().unwrap() });
     assert!(update(&shortcut, &second, None).unwrap());
-    assert_eq!(target(&load(&shortcut).unwrap()).unwrap(), second);
+    assert!(same_path(&target(&load(&shortcut).unwrap()).unwrap(), &second));
+    let other_spelling = PathBuf::from(second.display().to_string().to_uppercase());
+    assert!(same_path(&second, &other_spelling));
+    assert!(!same_path(&first, &second));
     assert!(!update(&shortcut, &second, Some(false)).unwrap());
     assert!(!shortcut.exists());
     std::fs::remove_file(second).unwrap();

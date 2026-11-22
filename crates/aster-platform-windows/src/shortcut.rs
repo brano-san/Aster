@@ -31,6 +31,10 @@ fn target(link: &IShellLinkW) -> windows::core::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_wide(&buffer[..end])))
 }
 
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
+}
+
 fn save(path: &Path, exe: &Path) -> windows::core::Result<()> {
     let link = shell_link::for_exe(exe)?;
     let store: IPropertyStore = link.cast()?;
@@ -51,7 +55,7 @@ fn update(path: &Path, exe: &Path, change: Option<bool>) -> Result<bool, Platfor
         return Ok(false);
     }
     let exists = path.try_exists().map_err(io_error)?;
-    if change.is_none() && (!exists || load(path).and_then(|link| target(&link)).is_ok_and(|target| target == exe)) {
+    if change.is_none() && (!exists || load(path).and_then(|link| target(&link)).is_ok_and(|target| same_path(&target, exe))) {
         return Ok(exists);
     }
     if let Some(parent) = path.parent() {
