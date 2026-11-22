@@ -229,8 +229,11 @@ pub struct App {
     pub(crate) zoom: f32,
     pub(crate) focused: bool,
     system_dark: bool,
+    system_animations: bool,
     pub(crate) effects: Vec<Effect>,
     pub(crate) dirty: bool,
+    pub(crate) motion: bool,
+    last_frame: Option<Instant>,
     events: Receiver<(PaneId, u64, VtEvent)>,
     sender: Sender<(PaneId, u64, VtEvent)>,
     wake: Wake,
@@ -350,8 +353,11 @@ impl App {
             zoom: 0.0,
             focused: true,
             system_dark,
+            system_animations: true,
             effects: Vec::new(),
             dirty: true,
+            motion: false,
+            last_frame: None,
             events,
             sender,
             wake,
@@ -694,6 +700,30 @@ impl App {
         &self.config
     }
 
+    pub fn animations(&self) -> bool {
+        self.config.appearance.animations && self.system_animations
+    }
+
+    pub fn clock(&self) -> Instant {
+        let now = Instant::now();
+        self.last_frame.map_or(now, |last| now.max(last))
+    }
+
+    pub fn set_system_animations(&mut self, on: bool) {
+        let before = self.animations();
+        self.system_animations = on;
+        let after = self.animations();
+        if after == before {
+            return;
+        }
+        if after {
+            self.reset_blink();
+        } else {
+            self.reset_animations();
+        }
+        self.apply_terminal_options();
+    }
+
     pub fn set_config(&mut self, config: Config) {
         let background_changed = self.config.appearance.background_image != config.appearance.background_image;
         let schemes_changed = self.config.color_schemes != config.color_schemes;
@@ -717,18 +747,20 @@ impl App {
         if sidebar_changed { self.sync_profile_sidebar(); }
         if activity_changed { self.reset_activity_tracking(); }
         if schemes_changed { self.sync_scheme_rows(); }
-        if !self.config.appearance.animations {
-            self.bell = None;
-            self.tab_toast = None;
-            self.reset_blink();
+        if !self.animations() {
+            self.reset_animations();
         }
         self.apply_language();
         if changed_version { self.warn_read_only_config(); }
+        self.apply_terminal_options();
+        self.restyle();
+    }
+
+    fn apply_terminal_options(&self) {
         let options = self.options();
         for p in self.panes.values() {
             p.terminal.lock().set_options(options.clone());
         }
-        self.restyle();
     }
 
     pub fn set_viewport(&mut self, width: u32, height: u32, scale: f32) {
@@ -1278,8 +1310,8 @@ impl App {
 
     pub fn flash_bell(&mut self) {
         if let Some(pane) = self.bell_pane {
-            if self.config.appearance.animations {
-                self.bell = Some((pane, Instant::now()));
+            if self.animations() {
+                self.bell = Some((pane, self.clock()));
                 self.dirty = true;
             } else if self.focused {
                 self.effects.push(Effect::Attention);
@@ -1287,8 +1319,8 @@ impl App {
         }
     }
 
-    pub(crate) fn bell_flash(&self, pane: PaneId) -> bool {
-        self.bell.is_some_and(|(p, t)| p == pane && t.elapsed() < BELL_FLASH)
+    pub(crate) fn bell_flash(&self, pane: PaneId, now: Instant) -> bool {
+        self.bell.is_some_and(|(p, t)| p == pane && now.saturating_duration_since(t) < BELL_FLASH)
     }
 
     fn copy(&mut self) -> bool {
@@ -1690,9 +1722,16 @@ impl App {
         self.preview_scheme();
     }
 
+    fn reset_animations(&mut self) {
+        self.motion = false;
+        self.bell = None;
+        self.tab_toast = None;
+        self.reset_blink();
+    }
+
     fn reset_blink(&mut self) {
         self.blink_on = true;
-        self.blink_since = Instant::now();
+        self.blink_since = self.clock();
         self.dirty = true;
     }
 
@@ -1701,7 +1740,7 @@ impl App {
     }
 
     pub(crate) fn cursor_blink_enabled(&self) -> bool {
-        self.config.appearance.animations && self.config.terminal.cursor_blink
+        self.animations() && self.config.terminal.cursor_blink
     }
 
     fn blinking(&self) -> bool {
@@ -1710,20 +1749,20 @@ impl App {
 
     pub fn on_timer(&mut self) {
         self.timer_due = None;
-        let now = Instant::now();
+        let now = self.clock();
         self.poll_commands(now);
         self.resume_connections(now);
-        if self.tab_toast.as_ref().is_some_and(|(_, until)| Instant::now() >= *until) {
+        if self.tab_toast.as_ref().is_some_and(|(_, until)| now >= *until) {
             self.tab_toast = None;
             self.dirty = true;
         }
-        if self.bell.is_some_and(|(_, t)| t.elapsed() >= BELL_FLASH) {
+        if self.bell.is_some_and(|(_, t)| now.saturating_duration_since(t) >= BELL_FLASH) {
             self.bell = None;
             self.dirty = true;
         }
-        if self.blinking() && self.blink_since.elapsed() >= BLINK {
+        if self.blinking() && now.saturating_duration_since(self.blink_since) >= BLINK {
             self.blink_on = !self.blink_on;
-            self.blink_since = Instant::now();
+            self.blink_since = now;
             self.dirty = true;
         }
         self.schedule_timer();
@@ -1800,8 +1839,8 @@ impl App {
             (Some(now), Some(before)) => self.tabs[self.active].root.contains(before) || now == before,
             (now, before) => now == before,
         };
-        if !same && self.config.appearance.animations && self.tab_bar_hidden() && self.tabs.len() > 1 && self.current_tab.is_some() {
-            self.tab_toast = Some((format!("{} / {}  {}", self.active + 1, self.tabs.len(), self.tab_title(self.active)), Instant::now() + TOAST));
+        if !same && self.animations() && self.tab_bar_hidden() && self.tabs.len() > 1 && self.current_tab.is_some() {
+            self.tab_toast = Some((format!("{} / {}  {}", self.active + 1, self.tabs.len(), self.tab_title(self.active)), self.clock() + TOAST));
             self.dirty = true;
         }
         if !same {
@@ -1944,6 +1983,7 @@ impl App {
                 self.system_dark = dark;
                 self.restyle();
             }
+            Event::Animations(on) => self.set_system_animations(on),
             Event::MouseMove { x, y } => self.on_move(x, y),
             Event::MouseDown { x, y, button, clicks } => {
                 if self.mru.selection().is_some() {
@@ -2887,8 +2927,9 @@ impl App {
         self.dirty
     }
 
-    pub(crate) fn mark_drawn(&mut self) {
-        self.dirty = false;
+    pub(crate) fn mark_drawn(&mut self, now: Instant) {
+        self.last_frame = Some(now);
+        self.dirty = self.motion && self.animations();
         let title = self.tab_title(self.active);
         let title = if title.is_empty() { "Aster".to_owned() } else { title };
         if title != self.title {
@@ -2907,7 +2948,7 @@ impl App {
             self.panes.values().filter_map(|p| p.reconnect_at).min(),
         ].into_iter().flatten().min();
         if let Some(due) = next.filter(|&due| self.timer_due.is_none_or(|armed| due < armed)) {
-            let left = due.saturating_duration_since(Instant::now()).as_millis().max(1) as u32;
+            let left = due.saturating_duration_since(self.clock()).as_millis().max(1) as u32;
             self.effects.push(Effect::Timer(left));
             self.timer_due = Some(due);
         }

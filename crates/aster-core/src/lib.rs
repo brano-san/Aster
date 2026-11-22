@@ -17,6 +17,7 @@ pub mod keymap;
 pub mod keys;
 pub mod links;
 pub mod menu;
+pub mod motion;
 pub mod notifications;
 pub mod overlay;
 mod palette;

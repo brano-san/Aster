@@ -54,3 +54,87 @@ fn a_panel_refits_with_its_shadow_margin_and_slid_items_keep_their_clip() {
     dl.fade(0, 1.0);
     assert_eq!(dl.instances[0].color >> 24, 0x40, "a full fade leaves colours alone");
 }
+
+#[test]
+fn grow_range_scales_only_selected_rects_and_radii_and_keeps_their_clip() {
+    let rect = Rect::new(10.0, 20.0, 20.0, 40.0);
+    let color = Color::rgba(0x1234_5641);
+    let mut dl = DrawList::default();
+    dl.set_clip(Some(rect));
+    for _ in 0..3 {
+        dl.outline(rect, color, 8.0, 2.0);
+    }
+    dl.grow_range(1..2, 0.5, (20.0, 40.0), 0.5);
+    assert_eq!(dl.instances[1].rect, [12.5, 25.0, 15.0, 30.0]);
+    assert_eq!(dl.instances[1].radius, 6.0);
+    assert_eq!(dl.instances[1].border, 2.0);
+    assert_eq!(dl.instances[1].clip, [10.0, 20.0, 30.0, 60.0]);
+    assert_eq!(dl.instances[1].color.to_le_bytes(), [0x12, 0x34, 0x56, 0x21]);
+    for i in [0, 2] {
+        assert_eq!(dl.instances[i].rect, [10.0, 20.0, 20.0, 40.0]);
+        assert_eq!(dl.instances[i].color, color.0);
+    }
+}
+
+#[test]
+fn pop_and_grow_use_their_start_scale_and_keep_the_final_frame_exact() {
+    let rect = Rect::new(10.0, 20.0, 20.0, 40.0);
+    let color = Color::rgb(0x123456);
+    let mut dl = DrawList::default();
+    dl.round_rect(rect, color, 8.0);
+    dl.round_rect(rect, color, 8.0);
+    dl.pop_in(1, 0.0, (20.0, 40.0));
+    assert!((dl.instances[1].rect[2] - 19.2).abs() < 0.00001);
+    assert_eq!(dl.instances[1].color, color.alpha(0).0);
+    dl.round_rect(rect, color, 8.0);
+    dl.grow(2, 0.0, (20.0, 40.0), 0.5);
+    assert_eq!(dl.instances[2].rect, [15.0, 30.0, 10.0, 20.0]);
+    assert_eq!(dl.instances[0].rect, [10.0, 20.0, 20.0, 40.0]);
+
+    dl.pop_in(0, 1.0, (1.0e9, 1.0e9));
+    dl.grow(0, 1.5, (1.0e9, 1.0e9), 0.5);
+    dl.grow_range(0..1, 1.0, (1.0e9, 1.0e9), 0.5);
+    dl.fade(0, 1.5);
+    assert_eq!(dl.instances[0].rect, [10.0, 20.0, 20.0, 40.0]);
+    assert_eq!(dl.instances[0].radius, 8.0);
+    assert_eq!(dl.instances[0].color, color.0);
+}
+
+#[test]
+fn shift_moves_clips_with_rects_but_leaves_the_unclipped_sentinel() {
+    let rect = Rect::new(10.0, 20.0, 20.0, 40.0);
+    let color = Color::rgb(0x123456);
+    let mut dl = DrawList::default();
+    dl.set_clip(Some(rect));
+    dl.rect(rect, color);
+    dl.rect(rect, color);
+    dl.set_clip(None);
+    dl.rect(rect, color);
+    dl.shift_range(1..2, 4.0, -6.0);
+    dl.shift(2, 500.0, 300.0);
+    assert_eq!(dl.instances[0].rect, [10.0, 20.0, 20.0, 40.0]);
+    assert_eq!(dl.instances[1].rect, [14.0, 14.0, 20.0, 40.0]);
+    assert_eq!(dl.instances[1].clip, [14.0, 14.0, 34.0, 54.0]);
+    assert_eq!(dl.instances[2].rect, [510.0, 320.0, 20.0, 40.0]);
+    assert_eq!(dl.instances[2].clip, NO_CLIP);
+    dl.shift(1, 0.0, 0.0);
+    dl.shift_range(1..3, 0.0, 0.0);
+    assert_eq!(dl.instances[1].rect, [14.0, 14.0, 20.0, 40.0]);
+    assert_eq!(dl.instances[1].clip, [14.0, 14.0, 34.0, 54.0]);
+    assert_eq!(dl.instances[2].clip, NO_CLIP);
+}
+
+#[test]
+fn refit_applies_all_edge_deltas_and_idle_translation_keeps_rects_exact() {
+    let was = Rect::new(10.0, 20.0, 100.0, 80.0);
+    let to = Rect::new(14.0, 26.0, 104.0, 69.0);
+    let mut dl = DrawList::default();
+    dl.rect(was, Color::rgb(0));
+    dl.rect(Rect::new(20.0, 40.0, 50.0, 30.0), Color::rgb(0));
+    dl.refit(1, was, to);
+    assert_eq!(dl.instances[0].rect, [10.0, 20.0, 100.0, 80.0]);
+    assert_eq!(dl.instances[1].rect, [24.0, 46.0, 54.0, 19.0]);
+    dl.refit(1, to, to);
+    dl.nudge(1, 0.0, 0.0);
+    assert_eq!(dl.instances[1].rect, [24.0, 46.0, 54.0, 19.0]);
+}

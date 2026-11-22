@@ -40,7 +40,7 @@
 "Search" = "Поиск"
 "Appearance" = "Внешний вид"
 "Animations" = "Анимации"
-"Show tab name toasts, visual bells and cursor blink" = "Показывать всплывающие названия вкладок, визуальный звонок и мигание курсора"
+"Animate menus, dialogs, tabs, panes and other interface elements" = "Анимировать меню, диалоги, вкладки, панели и другие элементы интерфейса"
 "Minimum contrast ratio" = "Минимальная контрастность"
 "Copy as HTML" = "Копировать как HTML"
 "Include text colors and bold weight when copying a selection" = "Сохранять цвета и полужирное начертание при копировании выделенного текста"

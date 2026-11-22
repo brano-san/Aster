@@ -474,7 +474,15 @@ impl WindowSystem for LinuxWindows {
         };
         let commands = Rc::new(RefCell::new(commands));
         let (notification_tx, notification_clicks) = mpsc::channel();
-        let mut app = Loop { handler, nodes: Vec::new(), commands, waiting, notification_tx, notification_clicks, notification_waker: self.waker(), pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None, monitors: Vec::new(), next_monitor_scan: None };
+        let (animation_tx, animation_result) = mpsc::channel();
+        let waker = self.waker();
+        let animation_waker = waker.clone();
+        let _ = std::thread::Builder::new().name("aster-animations".into()).spawn(move || {
+            if animation_tx.send(crate::animations::read()).is_ok() {
+                animation_waker.wake();
+            }
+        });
+        let mut app = Loop { handler, nodes: Vec::new(), commands, waiting, notification_tx, notification_clicks, notification_waker: waker, pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None, monitors: Vec::new(), next_monitor_scan: None, animation_result, system_animations: true };
         self.event_loop.run_app_on_demand(&mut app).map_err(|e| PlatformError::new(-1, format!("event loop: {e}")))?;
         app.error.map_or(Ok(()), Err)
     }
@@ -494,6 +502,8 @@ struct Loop<H> {
     notification_tx: mpsc::Sender<(WindowId, u64)>,
     notification_clicks: mpsc::Receiver<(WindowId, u64)>,
     notification_waker: LinuxWaker,
+    animation_result: mpsc::Receiver<bool>,
+    system_animations: bool,
     monitors: Vec<Monitor>,
     next_monitor_scan: Option<Instant>,
     pastes: HashMap<AsyncRequestSerial, (WindowId, Option<PasteTarget>)>,
@@ -614,6 +624,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
         self.nodes.push(Node { window, last_click: None, pointer: (0.0, 0.0) });
         let node = self.nodes.last().expect("node");
         self.handler.created(&node.window);
+        self.handler.event(&node.window, Event::Animations(self.system_animations));
         if crate::gl::capture_path().is_some() {
             for ev in capture_keys(&std::env::var("ASTER_CAPTURE_KEYS").unwrap_or_default()) {
                 self.handler.event(&node.window, ev);
@@ -749,6 +760,12 @@ impl<H: WindowHandler<LinuxWindows>> ApplicationHandler for Loop<H> {
 
     fn proxy_wake_up(&mut self, el: &dyn ActiveEventLoop) {
         self.pending.store(false, Ordering::Release);
+        if let Ok(on) = self.animation_result.try_recv() {
+            self.system_animations = on;
+            for node in &self.nodes {
+                self.handler.event(&node.window, Event::Animations(on));
+            }
+        }
         if self.waiting.is_some() && self.handler.background_woken() {
             self.commands.borrow_mut().extend(self.waiting.take().map(Command::Open));
         }

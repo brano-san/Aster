@@ -526,6 +526,12 @@ pub(crate) fn apply_dark(hwnd: HWND, dark: bool) {
     }
 }
 
+fn system_animations() -> bool {
+    let mut enabled = BOOL::default();
+    let result = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some((&mut enabled as *mut BOOL).cast()), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS::default()) };
+    result.map_or(true, |_| enabled.as_bool())
+}
+
 pub(crate) struct Node<H> {
     window: Win32Window,
     queue: RefCell<VecDeque<Event>>,
@@ -686,6 +692,7 @@ impl<H: WindowHandler<Win32>> Shared<H> {
         if let Ok(mut h) = self.handler.try_borrow_mut() {
             h.created(&node.window);
         }
+        node.queue.borrow_mut().push_back(Event::Animations(system_animations()));
         node.ready.set(true);
         self.flush();
         node.redraw_now();
@@ -1412,6 +1419,7 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
             None
         }
         WM_SETTINGCHANGE => {
+            s.send(Event::Animations(system_animations()));
             if lp.0 != 0 && PCWSTR(lp.0 as *const u16).to_string().is_ok_and(|v| v == "ImmersiveColorSet") {
                 s.send(Event::ThemeChanged { dark: crate::dark_mode() });
             }

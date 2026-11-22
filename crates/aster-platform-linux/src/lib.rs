@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+mod animations;
 mod autostart;
 mod desktop;
 mod explorer;

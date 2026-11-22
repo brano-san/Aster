@@ -209,6 +209,8 @@ impl App {
     }
 
     pub fn frame<B: TextBackend>(&mut self, g: &mut Gfx<B>, maximized: bool) {
+        self.motion = false;
+        let now = self.clock();
         self.prompt_pending_serial();
         let terminal = &self.config.terminal;
         g.set_mono_font(&terminal.font, [terminal.font_weight, terminal.font_weight_bold]);
@@ -277,7 +279,7 @@ impl App {
             if let Some((state, typed)) = self.offers.get(id).cloned() {
                 self.draw_offer(g, *rect, state, &typed);
             }
-            if self.bell_flash(*id) {
+            if self.bell_flash(*id, now) {
                 g.dl.rect(*rect, theme.foreground.alpha(0x2C));
             }
             self.draw_pane_header(g, *id, *rect, focus == Some(*id));
@@ -290,7 +292,7 @@ impl App {
         if let Some(dialog) = self.vault_prompt.as_ref().filter(|dialog| dialog.kind == crate::vault_settings::DialogKind::Startup) {
             g.dl.rect(content, theme.surface);
             self.draw_vault_dialog(g, content, dialog, false);
-            self.mark_drawn();
+            self.mark_drawn(now);
             return;
         }
         if self.tabs.is_empty() {
@@ -313,7 +315,7 @@ impl App {
         g.dl.confine(content_layers, content);
         self.draw_menu(g);
         self.draw_mru(g);
-        self.mark_drawn();
+        self.mark_drawn(now);
     }
 
     fn draw_start_page<B: TextBackend>(&self, g: &mut Gfx<B>) {

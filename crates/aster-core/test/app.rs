@@ -199,8 +199,66 @@ fn turning_animations_off_clears_transients_and_stops_the_cursor_timer() {
     assert!(!a.take_effects().iter().any(|effect| matches!(effect, Effect::Timer(_))));
     a.terminal(pane).unwrap().lock().feed(b"\x07");
     a.woken();
-    assert!(!a.bell_flash(pane));
+    assert!(!a.bell_flash(pane, a.clock()));
     assert_eq!(a.take_effects().iter().filter(|effect| matches!(effect, Effect::Attention)).count(), 1);
+}
+
+#[test]
+fn needs_redraw_stays_dirty_only_while_motion_continues() {
+    let (mut a, mut gfx) = app();
+    let now = Instant::now() + Duration::from_secs(1);
+    a.motion = true;
+    a.mark_drawn(now);
+    assert!(a.needs_redraw());
+    assert_eq!(a.last_frame, Some(now));
+    assert!(a.clock() >= now);
+    a.motion = false;
+    a.mark_drawn(now);
+    assert!(!a.needs_redraw());
+    a.motion = true;
+    a.frame(&mut gfx, false);
+    assert!(!a.motion);
+    assert!(!a.needs_redraw());
+}
+
+#[test]
+fn system_preference_clears_animations_and_combines_with_config() {
+    let (mut a, mut gfx) = app();
+    let mut config = Config::parse("[appearance]\ntab-bar = 'never'").unwrap();
+    a.set_config(config.clone());
+    a.open_default_tab();
+    a.open_default_tab();
+    a.on_event(Event::Modifiers(Mods::NONE));
+    a.activate(0);
+    a.on_event(Event::Modifiers(Mods::NONE));
+    assert!(a.tab_toast.is_some());
+    a.terminal(a.focused_pane().unwrap()).unwrap().lock().feed(b"\x07");
+    a.woken();
+    assert!(a.bell.is_some());
+    a.blink_on = false;
+    a.motion = true;
+    a.take_effects();
+
+    a.on_event(Event::Animations(false));
+    assert!(!a.animations());
+    assert!(!a.cursor_blink_enabled());
+    assert!(a.bell.is_none() && a.tab_toast.is_none());
+    assert!(a.blink_on && !a.motion);
+    assert!(a.needs_redraw());
+    a.activate(1);
+    a.on_event(Event::Modifiers(Mods::NONE));
+    a.flash_bell();
+    a.frame(&mut gfx, false);
+    assert!(a.bell.is_none() && a.tab_toast.is_none());
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Timer(_))));
+
+    config.appearance.animations = false;
+    a.set_config(config.clone());
+    a.on_event(Event::Animations(true));
+    assert!(!a.animations());
+    config.appearance.animations = true;
+    a.set_config(config);
+    assert!(a.animations() && a.cursor_blink_enabled());
 }
 
 #[test]

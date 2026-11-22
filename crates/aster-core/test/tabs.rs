@@ -153,7 +153,7 @@ fn pinning_preserves_order_focus_and_the_window_title() {
     assert_eq!((a.active, a.tab_title(0), a.tab_title(1)), (1, "D".into(), "B".into()));
     a.run(Action::MoveTabRight);
     assert_eq!(a.active, 1);
-    a.mark_drawn();
+    a.mark_drawn(a.clock());
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Title(title) if title == "B")));
     a.activate(0);
     a.open_default_tab();
@@ -370,7 +370,7 @@ fn numbered_and_pinned_tab_labels_preserve_the_full_window_title() {
     assert_eq!(a.tab_label(0), "");
     a.config.appearance.tab_icon = false;
     assert_eq!(a.tab_label(0), "Build output");
-    a.mark_drawn();
+    a.mark_drawn(a.clock());
     assert!(a.take_effects().iter().any(|effect| matches!(effect, Effect::Title(text) if text == "Build output")));
 }
 

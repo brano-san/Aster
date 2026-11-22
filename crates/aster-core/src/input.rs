@@ -134,6 +134,7 @@ pub enum Event {
     Preedit(Preedit),
     Focus(bool),
     ThemeChanged { dark: bool },
+    Animations(bool),
     DroppedFiles(Vec<String>),
     CloseRequested,
     Timer,

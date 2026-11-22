@@ -183,7 +183,7 @@ pub const SETTINGS: &[Setting] = &[
     item(WINDOW, "appearance.tab-bar-position", "Tab bar position", "Choose the edge of the window for the tab bar", Control::Segments(TAB_POSITIONS)),
     item(WINDOW, "appearance.mru-tabs", "Switch tabs in order of recent use", "Hold Ctrl and press Tab to choose a recently used tab", Control::Toggle),
     item(WINDOW, "appearance.cycle-tabs", "Cycle tabs", "Switching past the last tab wraps around", Control::Toggle),
-    item(WINDOW, "appearance.animations", "Animations", "Show tab name toasts, visual bells and cursor blink", Control::Toggle),
+    item(WINDOW, "appearance.animations", "Animations", "Animate menus, dialogs, tabs, panes and other interface elements", Control::Toggle),
     item(WINDOW, "terminal.close-window-with-last-tab", "Last tab closes the window", "Closing the only tab closes its window", Control::Toggle),
     item(WINDOW, "notifications.command-finished", "Notify when a command finishes", "Show system notifications for watched commands and finished sessions that stay open", Control::Toggle),
     item(WINDOW, "notifications.activity", "Notify about tab activity", "Notify once when output resumes in a background tab after a quiet period", Control::Toggle),
