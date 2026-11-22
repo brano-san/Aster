@@ -55,9 +55,50 @@ fn window_and_appearance_list_their_own_settings() {
         assert!(keys(APPEARANCE).contains(&key));
     }
     assert_eq!(&PAGES[..4], [SYSTEM, APPEARANCE, PROFILES, TERMINAL]);
-    assert!(PAGES[4..PAGES.len() - 1].iter().filter(|&&name| name != EXTENSIONS).map(|name| name.to_ascii_lowercase()).is_sorted());
+    assert!(PAGES[4..PAGES.len() - 3].iter().filter(|&&name| name != EXTENSIONS).map(|name| name.to_ascii_lowercase()).is_sorted());
     assert!(PAGES.windows(2).any(|pages| pages == [SHORTCUTS, EXTENSIONS]));
-    assert_eq!(PAGES.last(), Some(&CONFIG_FILE));
+    assert_eq!(&PAGES[PAGES.len() - 3..], [VAULT, SYNC, CONFIG_FILE]);
+}
+
+#[test]
+fn config_sync_shows_the_active_backend_and_persists_parts_as_an_array() {
+    use crate::sync::{Backend, Part as SyncPart};
+    let mut a = app();
+    a.open_settings();
+    a.show_settings_page(PAGES.iter().position(|name| *name == SYNC).unwrap());
+    let shown = |a: &App, key: &str| a.settings.as_ref().unwrap().shown.iter().any(|&i| SETTINGS.get(i).is_some_and(|s| s.key == key));
+    assert!(!shown(&a, "sync.folder"));
+    let mut config = a.config.clone();
+    config.sync.backend = Backend::Folder;
+    a.set_config(config);
+    assert!(shown(&a, "sync.folder"));
+    assert!(!shown(&a, "sync.repository"));
+    assert!(!a.config.sync.parts.contains(&SyncPart::Vault));
+    a.apply_setting("sync.parts.vault", Value::Boolean(true));
+    let saved = saved(&mut a).unwrap();
+    assert!(saved.sync.parts.contains(&SyncPart::Vault));
+    assert!(saved.to_text().contains("parts = ["));
+}
+
+#[test]
+fn deleting_a_synced_config_requires_a_second_action() {
+    use crate::sync::{Backend, Entry, Operation, View};
+    use crate::sync_settings::Row as SyncRow;
+    let mut a = app();
+    let mut config = a.config.clone();
+    config.sync.backend = Backend::Folder;
+    config.sync.folder = "store".into();
+    a.set_config(config);
+    a.open_settings();
+    a.show_settings_page(PAGES.iter().position(|name| *name == SYNC).unwrap());
+    a.set_sync_view(View { entries: vec![Entry { name: "Shared".into(), machine: "Laptop".into(), modified: 1 }], ..Default::default() });
+    let page = a.settings.as_mut().unwrap();
+    page.selected = page.shown.iter().position(|&item| page.sync_row(item) == Some(SyncRow::Entry(0))).unwrap();
+    a.take_effects();
+    a.settings_key(Key::Delete, Mods::NONE);
+    assert!(!a.take_effects().iter().any(|effect| matches!(effect, Effect::ConfigSync(Operation::Delete(_)))));
+    a.settings_key(Key::Enter, Mods::NONE);
+    assert!(a.take_effects().iter().any(|effect| matches!(effect, Effect::ConfigSync(Operation::Delete(name)) if name == "Shared")));
 }
 
 #[test]
@@ -329,8 +370,10 @@ fn the_query_filters_by_every_word_across_label_hint_and_section() {
     let mut page = SettingsPage::new();
     page.vault.configured = true;
     let mut listed = std::collections::BTreeSet::new();
-    for installed in [None, Some(false), Some(true)] {
+    use crate::sync::Backend;
+    for (installed, backend) in [(None, Backend::Off), (Some(false), Backend::Folder), (Some(true), Backend::Git)] {
         page.launcher_installed = installed;
+        page.sync.backend = backend;
         page.profiles_advanced = false;
         for (k, name) in PAGES.iter().enumerate() {
             page.show_page(k);

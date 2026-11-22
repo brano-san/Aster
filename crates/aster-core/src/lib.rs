@@ -43,6 +43,8 @@ mod ssh_auth;
 mod ssh_toolbar;
 mod start;
 pub mod sudo;
+pub mod sync;
+mod sync_settings;
 pub mod tabs;
 pub mod theme;
 pub mod update;

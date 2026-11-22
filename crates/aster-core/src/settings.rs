@@ -33,6 +33,7 @@ pub enum Info {
     ConfigPath,
     ConfigStatus,
     SshProfiles,
+    SyncStatus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,6 +92,7 @@ const WINDOW: &str = "Window";
 const COLORS: &str = "Color scheme";
 const DOCK: &str = "Docked window";
 const VAULT: &str = "Vault";
+pub(crate) const SYNC: &str = "Config sync";
 const SSH: &str = "SSH";
 pub(crate) const SYSTEM: &str = "Application";
 pub(crate) const CONFIG_FILE: &str = "Config file";
@@ -205,6 +207,17 @@ pub const SETTINGS: &[Setting] = &[
     item(DOCK, "appearance.global-hotkey", "Global hotkey", "Shows and hides the window from anywhere, for example Ctrl-`", Control::Text),
     item(VAULT, "vault.encrypt-config", "Encrypt the entire config", "Ask for the master passphrase when Aster starts", Control::Toggle),
     item(VAULT, "vault.remember-minutes", "Stay unlocked for (minutes)", "Zero asks for the master passphrase each time", Control::Number { min: 0.0, max: 1440.0, step: 1.0 }),
+    item(SYNC, "sync.backend", "Sync backend", "Choose where to store configuration snapshots", Control::Segments(crate::sync_settings::BACKENDS)),
+    item(SYNC, "sync.folder", "Folder path", "Existing folder that will hold the snapshots", Control::Text),
+    item(SYNC, "sync.repository", "Repository URL", "Remote Git repository for the snapshots", Control::Text),
+    item(SYNC, "info.sync-status", "Sync status", "Connection and last sync result", Control::ReadOnly(Info::SyncStatus)),
+    item(SYNC, "sync.name", "Config name", "Name to sync automatically. Uses the computer name when empty.", Control::Text),
+    item(SYNC, "sync.automatic", "Sync automatically", "Sync on startup and every minute while Aster is running", Control::Toggle),
+    item(SYNC, "sync.parts.shortcuts", "Keyboard shortcuts", "Include key bindings", Control::Toggle),
+    item(SYNC, "sync.parts.appearance", "Appearance", "Include colors and window preferences", Control::Toggle),
+    item(SYNC, "sync.parts.profiles", "Profiles", "Include profiles, groups and profile defaults", Control::Toggle),
+    item(SYNC, "sync.parts.terminal", "Terminal", "Include terminal, input and SSH settings", Control::Toggle),
+    item(SYNC, "sync.parts.vault", "Vault", "Include only the encrypted vault data", Control::Toggle),
     item(SSH, "ssh.client", "SSH client", "Built-in client, or the ssh program installed in the system", Control::Choice(SSH_CLIENTS)),
     item(SSH, "ssh.remember-passwords", "Offer to save passwords", "After a typed password or key passphrase works, offer to save it", Control::Toggle),
     item(SSH, "ssh.forward-agent", "Forward the SSH agent", "Let servers use your local SSH agent; ForwardAgent in ~/.ssh/config decides per host", Control::Toggle),
@@ -244,6 +257,9 @@ pub const SETTINGS: &[Setting] = &[
 ];
 
 pub fn get(config: &Config, key: &str) -> Option<Value> {
+    if let Some(part) = crate::sync_settings::part(key) {
+        return Some(Value::Boolean(config.sync.parts.contains(&part)));
+    }
     let root = Value::try_from(config).ok()?;
     let mut at = &root;
     for part in key.split('.') {
@@ -254,6 +270,12 @@ pub fn get(config: &Config, key: &str) -> Option<Value> {
 
 pub fn set(config: &Config, key: &str, value: Value) -> Result<Config, String> {
     if config.read_only() { return Err(config.read_only_message()); }
+    if let Some(part) = crate::sync_settings::part(key) {
+        let enabled = value.as_bool().ok_or_else(|| "expected a boolean".to_owned())?;
+        let mut next = config.clone();
+        next.sync.parts = crate::sync::Part::ALL.into_iter().filter(|p| if *p == part { enabled } else { config.sync.parts.contains(p) }).collect();
+        return Ok(next);
+    }
     let mut root = Value::try_from(config).map_err(|e| e.to_string())?;
     let mut at = &mut root;
     for part in key.split('.') {
@@ -280,7 +302,7 @@ pub(crate) fn found(hay: &str, query: &str) -> bool {
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
 pub const EXTENSIONS: &str = "Extensions";
 pub const PROFILES: &str = "Profiles";
-pub const PAGES: [&str; 14] = [SYSTEM, APPEARANCE, PROFILES, TERMINAL, INPUT, COLORS, DOCK, SHORTCUTS, EXTENSIONS, SEARCH, SSH, VAULT, WINDOW, CONFIG_FILE];
+pub const PAGES: [&str; 15] = [SYSTEM, APPEARANCE, PROFILES, TERMINAL, INPUT, COLORS, DOCK, SHORTCUTS, EXTENSIONS, SEARCH, SSH, WINDOW, VAULT, SYNC, CONFIG_FILE];
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileRow {
     pub group: Option<String>,
@@ -401,7 +423,7 @@ impl VaultView {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum InlineEdit {
+pub(crate) enum InlineEdit {
     Setting(String),
 }
 
@@ -504,7 +526,7 @@ pub struct SettingsPage {
     pub(crate) font_index: usize,
     pub(crate) font_replace: bool,
     pub(crate) segment_widths: std::collections::BTreeMap<&'static str, f32>,
-    editing: Option<InlineEdit>,
+    pub(crate) editing: Option<InlineEdit>,
     pub capture: Option<(Action, bool)>,
     pub(crate) profile_actions: Vec<crate::picker::ProfileAction>,
     pub(crate) shortcut_rows: std::collections::BTreeMap<usize, ShortcutLayout>,
@@ -512,6 +534,7 @@ pub struct SettingsPage {
     pub notice: Option<String>,
     pub profiles: Vec<ProfileRow>,
     pub(crate) vault: VaultView,
+    pub(crate) sync: crate::sync_settings::Page,
     launcher_installed: Option<bool>,
     pub(crate) vault_dialog: Option<VaultDialog>,
     vault_input_interrupted: bool,
@@ -551,6 +574,7 @@ impl SettingsPage {
         let mut shown: Vec<_> = (0..SETTINGS.len()).filter(|&i| {
             let available = match SETTINGS[i].control {
                 Control::Run(Action::ApplicationsMenu(install)) => self.launcher_installed == Some(!install),
+                _ if SETTINGS[i].section == SYNC => self.sync.setting_visible(SETTINGS[i].key),
                 _ => true,
             };
             available && (self.vault.configured || SETTINGS[i].key != "vault.encrypt-config") && (!colors_page || self.query.trim().is_empty() && !SchemeTab::matches_setting(SETTINGS[i].key)) && item_matches(i, query)
@@ -562,6 +586,12 @@ impl SettingsPage {
         });
         let before_vault = shown.iter().position(|&i| SETTINGS[i].section == VAULT).unwrap_or(shown.len());
         shown.splice(before_vault..before_vault, vault_rows);
+        let sync_rows = (0..).map_while(|i| self.sync.row(i).map(|row| (i, row))).filter_map(|(i, row)| {
+            let (label, detail) = self.sync.labels(row);
+            found(&format!("{SYNC} {} {label} {detail}", t(SYNC)), query).then_some(self.sync_base() + i)
+        });
+        let after_sync = shown.iter().rposition(|&i| SETTINGS.get(i).is_some_and(|s| s.section == SYNC)).map_or(shown.len(), |i| i + 1);
+        shown.splice(after_sync..after_sync, sync_rows);
         let shortcuts = (SETTINGS.len()..base).filter(|&i| {
             if let Some(entry) = self.profile_action(i) {
                 let action = &entry.action;
@@ -693,6 +723,14 @@ impl SettingsPage {
         self.vault.row(item.checked_sub(self.vault_base())?)
     }
 
+    fn sync_base(&self) -> usize {
+        self.vault_base() + self.vault.entries.len() + 2
+    }
+
+    pub(crate) fn sync_row(&self, item: usize) -> Option<crate::sync_settings::Row> {
+        self.sync.row(item.checked_sub(self.sync_base())?)
+    }
+
     pub(crate) fn editing(&self) -> bool {
         self.editing.is_some() || self.editing_passphrase()
     }
@@ -722,7 +760,9 @@ impl SettingsPage {
     }
 
     pub fn section(&self, item: usize) -> &'static str {
-        if self.vault_at(item).is_some() {
+        if self.sync_row(item).is_some() {
+            SYNC
+        } else if self.vault_at(item).is_some() {
             VAULT
         } else if self.scheme_at(item).is_some() {
             COLORS
@@ -915,9 +955,11 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
                 y += section_h;
             }
         }
+        let sync_row = page.sync_row(i);
         let item_h = match page.tree_at(i).map(|r| &r.kind) {
             Some(TreeKind::Profile(_)) => (50.0 * s).round(),
             Some(_) => (38.0 * s).round(),
+            None if sync_row.is_some_and(|row| row.stacked(width, s)) => (86.0 * s).round(),
             None => page.shortcut_rows.get(&i).map_or(item_h, |r| r.height) + page.info_rows.get(&i).map_or(0, |lines| lines.len().saturating_sub(1)) as f32 * (16.0 * s).round(),
         };
         let rect = Rect::new(x, y, width, item_h);
@@ -931,7 +973,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
             None if page.scheme_at(i).is_some() => ((300.0 * s).min(width * 0.45).round(), (36.0 * s).round()),
             None => ((240.0 * s).min(width * 0.45).round(), control_h),
         };
-        let control = Rect::new(rect.right() - cw - (14.0 * s).round(), rect.y + ((item_h - ch) / 2.0).round(), cw, ch);
+        let control = sync_row.map_or_else(|| Rect::new(rect.right() - cw - (14.0 * s).round(), rect.y + ((item_h - ch) / 2.0).round(), cw, ch), |row| row.control(rect, s));
         rows.push(Row { kind: RowKind::Item(n), rect, control });
         y += item_h;
     }
@@ -1048,6 +1090,7 @@ impl App {
 
     pub(crate) fn fresh_settings_page(&self) -> SettingsPage {
         let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.dynamic_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes: self.scheme_rows(), vault: self.vault.clone(), launcher_installed: self.launcher_installed, restart_pending: self.restart_pending(), ..SettingsPage::default() };
+        page.sync = crate::sync_settings::Page { backend: self.config.sync.backend, ready: self.config.sync.ready(), entries: self.sync_view.entries.clone(), ..Default::default() };
         page.refilter();
         page
     }
@@ -1058,11 +1101,13 @@ impl App {
         self.config_editor.cancel_paste();
         let Some(page) = self.settings.as_mut() else { return };
         page.show_page(k);
+        page.sync.delete = None;
         if page.colors_page() {
             self.select_scheme_tab(tab);
         }
         self.visit_extensions_page();
         self.reveal_selected();
+        self.refresh_sync_page();
     }
 
     fn show_profiles_tab(&mut self, advanced: bool) {
@@ -1077,6 +1122,7 @@ impl App {
     pub(crate) fn restore_settings_page(&mut self) {
         self.settings = Some(self.settings_stash.take().unwrap_or_else(|| self.fresh_settings_page()));
         self.effects.push(Effect::CheckConfigFile);
+        self.refresh_sync_page();
     }
 
     pub fn set_config_path(&mut self, path: Option<String>) {
@@ -1203,6 +1249,8 @@ impl App {
                 None => t("Checking the config file…"),
             }.to_owned(),
             Control::ReadOnly(Info::SshProfiles) => return t("Configure individual connections in Profiles and connections.").into(),
+            Control::ReadOnly(Info::SyncStatus) => return self.sync_status_text(),
+            Control::Text if setting.key == "sync.name" => return self.config.sync.name(&self.sync_view.machine).into(),
             _ => {}
         }
         let value = get(&self.config, setting.key);
@@ -1340,10 +1388,20 @@ impl App {
 
     fn apply_setting(&mut self, key: &str, value: Value) {
         if self.config.read_only() { return self.warn_read_only_config(); }
-        if let Ok(config) = set(&self.config, key, value) {
+        if key == "sync.name" && value.as_str().is_some_and(|name| !name.is_empty() && !crate::sync::valid_name(name)) {
+            if let Some(page) = self.settings.as_mut() { page.notice = Some(crate::sync::Issue::Name.message()); }
+            self.dirty = true;
+            return;
+        }
+        if let Ok(mut config) = set(&self.config, key, value) {
             if config != self.config {
+                let store_changed = !config.sync.same_store(&self.config.sync);
+                if !config.sync.same_target(&self.config.sync) {
+                    config.sync.last_synced = 0;
+                }
                 self.set_config(config);
                 self.push_save_config();
+                if store_changed { self.refresh_sync_page(); }
             }
         }
         self.dirty = true;
@@ -1447,7 +1505,7 @@ impl App {
         self.commit_edit();
     }
 
-    fn commit_edit(&mut self) {
+    pub(crate) fn commit_edit(&mut self) {
         let Some(page) = self.settings.as_mut() else { return };
         page.font_matches.clear();
         page.font_replace = false;
@@ -1539,6 +1597,7 @@ impl App {
         if self.scheme_bar_key(key, mods) {
             return;
         }
+        if self.sync_settings_key(key, mods) { return; }
         if key == Key::F(2) && mods == Mods::NONE && self.open_scheme_editor() {
             return;
         }
@@ -1738,12 +1797,15 @@ impl App {
         let RowKind::Item(n) = row.kind else { return self.commit_edit() };
         let scale = self.ui();
         let editing_same = self.settings.as_ref().is_some_and(|p| p.selected == n && p.editing.is_some());
-        let control = self.settings.as_ref().and_then(|p| SETTINGS.get(p.shown[n])).map(|s| s.control);
+        let item = self.settings.as_ref().and_then(|p| p.shown.get(n).copied());
+        let control = item.and_then(|i| SETTINGS.get(i)).map(|s| s.control);
+        if self.sync_settings_click(item, row, x, y, editing_same) { return; }
         if editing_same && row.control.contains(x, y) && control.is_some_and(|c| part_at(c, row.control, self.ui(), x) == Part::Whole) {
             return;
         }
         self.commit_edit();
         let Some(page) = self.settings.as_mut() else { return };
+        let Some(n) = page.shown.iter().position(|i| Some(*i) == item) else { return };
         page.selected = n;
         page.notice = None;
         let item = page.shown[n];

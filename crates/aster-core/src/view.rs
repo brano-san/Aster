@@ -2192,6 +2192,48 @@ impl App {
         }
     }
 
+    fn draw_sync_row<B: TextBackend>(&self, g: &mut Gfx<B>, page: &crate::settings::SettingsPage, geometry: crate::settings::Row, row: crate::sync_settings::Row, ui: FontStyle, small: FontStyle) {
+        use crate::sync_settings::{button_rects, Button, Row};
+        let s = self.ui();
+        let selected = geometry.kind == crate::settings::RowKind::Item(page.selected);
+        let editing = row == Row::New && selected && page.editing();
+        let confirming = page.sync.confirming(row);
+        let (label, detail) = page.sync.labels(row);
+        let detail = if editing { page.notice.as_deref().unwrap_or(&detail) } else { &detail };
+        let x = geometry.rect.x + (14.0 * s).round();
+        let width = if row.stacked(geometry.rect.w, s) { geometry.rect.w - 28.0 * s } else { geometry.control.x - x - 12.0 * s };
+        g.text(x, geometry.rect.y + (25.0 * s).round(), &label, ui, self.theme.text, width.max(1.0));
+        g.text(x, geometry.rect.y + (43.0 * s).round(), detail, small, if confirming || editing && page.notice.is_some() { self.theme.accent } else { self.theme.text_dim }, width.max(1.0));
+        let buttons = row.buttons(confirming, editing);
+        let rects = button_rects(geometry.control, s, buttons.len(), editing);
+        let radius = (6.0 * s).round();
+        let line = s.round().max(1.0);
+        if editing {
+            let c = geometry.control;
+            let field = Rect::new(c.x, c.y, (rects[0].x - c.x - 5.0 * s).max(1.0), c.h);
+            g.dl.round_rect(field, self.theme.overlay, radius);
+            g.dl.outline(field, self.theme.accent, radius, line);
+            let inner = field.inset(8.0 * s, 0.0);
+            let y = baseline(g, inner, ui);
+            let text = page.edit_text();
+            let width = if text.is_empty() {
+                g.text(inner.x, y, t("Config name"), ui, self.theme.text_dim, inner.w);
+                0.0
+            } else {
+                g.text(inner.x, y, &text, ui, self.theme.text, inner.w)
+            };
+            g.dl.rect(Rect::new(inner.x + width, field.y + 7.0 * s, line, field.h - 14.0 * s), self.theme.accent);
+        }
+        for (index, (&button, rect)) in buttons.iter().zip(rects).enumerate() {
+            let enabled = button == Button::Cancel || self.sync_view.status != crate::sync::Status::Syncing && (!self.config.read_only() || button == Button::Refresh);
+            let focused = selected && !editing && index == if confirming { 0 } else { page.sync.action.min(buttons.len() - 1) };
+            let hover = enabled && rect.contains(self.mouse.0, self.mouse.1);
+            g.dl.round_rect(rect, if hover { self.theme.button_hover } else { self.theme.overlay }, radius);
+            g.dl.outline(rect, if focused { self.theme.accent } else { self.theme.overlay_border }, radius, line);
+            centered(g, rect.inset(3.0 * s, 0.0), button.label(), ui, if enabled { self.theme.text } else { self.theme.text_dim });
+        }
+    }
+
     fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
         let s = self.ui();
@@ -2201,7 +2243,8 @@ impl App {
         let Some(page) = self.settings.as_ref() else { return };
         let info_rows = page.shown.iter().filter_map(|&index| {
             let setting = SETTINGS.get(index).filter(|setting| matches!(setting.control, Control::ReadOnly(_)))?;
-            Some((index, wrapped_info(g, &self.setting_text(setting), small, (width - 28.0 * s).max(1.0))))
+            let inset = if setting.key == "info.sync-status" { 43.0 } else { 28.0 };
+            Some((index, wrapped_info(g, &self.setting_text(setting), small, (width - inset * s).max(1.0))))
         }).collect();
         let Some(page) = self.settings.as_mut() else { return };
         page.info_rows = info_rows;
@@ -2354,6 +2397,10 @@ impl App {
                         continue;
                     }
                     let item = page.shown[n];
+                    if let Some(sync_row) = page.sync_row(item) {
+                        self.draw_sync_row(g, page, *row, sync_row, ui, small);
+                        continue;
+                    }
                     if let Some(vault_row) = page.vault_at(item) {
                         let (label, hint) = vault_row.labels(&page.vault);
                         let mut tx = row.rect.x + (14.0 * s).round();
@@ -2416,8 +2463,18 @@ impl App {
                     if let Some(lines) = page.info_rows.get(&page.shown[n]) {
                         let tw = (row.rect.w - 28.0 * s).max(1.0);
                         g.text(tx, row.rect.y + (25.0 * s).round(), t(setting.label), ui, theme.text, tw);
+                        let inset = if setting.key == "info.sync-status" {
+                            let color = match &self.sync_view.status {
+                                crate::sync::Status::Error(_) if self.config.sync.ready() => theme.close_hover,
+                                crate::sync::Status::Syncing | crate::sync::Status::Synced(_) if self.config.sync.ready() => theme.accent,
+                                _ if self.config.sync.ready() && self.config.sync.last_synced > 0 => theme.accent,
+                                _ => theme.text_dim,
+                            };
+                            g.dl.circle(Rect::new(tx, row.rect.y + 36.0 * s, 7.0 * s, 7.0 * s), color);
+                            15.0 * s
+                        } else { 0.0 };
                         for (k, text) in lines.iter().enumerate() {
-                            g.text(tx, row.rect.y + (43.0 * s).round() + k as f32 * (16.0 * s).round(), text, small, theme.text_dim, tw);
+                            g.text(tx + inset, row.rect.y + (43.0 * s).round() + k as f32 * (16.0 * s).round(), text, small, theme.text_dim, (tw - inset).max(1.0));
                         }
                         continue;
                     }

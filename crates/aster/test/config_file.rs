@@ -29,10 +29,10 @@ fn stale_settings_and_vault_updates_preserve_each_others_changes() {
     let path = dir.file();
     let mut settings = Config::default();
     let mut access = ConfigAccess::default();
-    access.save_settings(&path, &mut settings, "").unwrap();
+    access.save_settings(&path, &mut settings, "", None).unwrap();
     access.save_vault(&path, "", "first", None).unwrap();
     settings.vault.remember_minutes = 35;
-    access.save_settings(&path, &mut settings, "").unwrap();
+    access.save_settings(&path, &mut settings, "", None).unwrap();
     access.save_vault(&path, "first", "second", None).unwrap();
     assert!(access.save_vault(&path, "first", "", None).is_err());
     let saved = access.load(&path).unwrap();
@@ -47,7 +47,7 @@ fn unreadable_config_is_preserved_after_failed_writes() {
     fs::write(&path, "[invalid").unwrap();
     let mut access = ConfigAccess::default();
     assert!(access.save_vault(&path, "", "new", None).is_err());
-    assert!(access.save_settings(&path, &mut Config::default(), "").is_err());
+    assert!(access.save_settings(&path, &mut Config::default(), "", None).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"[invalid");
 }
 
@@ -60,7 +60,7 @@ fn future_config_is_preserved_by_settings_and_vault_writes() {
     let mut access = ConfigAccess::default();
     assert!(access.load(&path).unwrap().read_only());
     assert_eq!(access.save_vault(&path, "current", "new", None).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-    assert_eq!(access.save_settings(&path, &mut Config::default(), "").unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(access.save_settings(&path, &mut Config::default(), "", None).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(fs::read_to_string(&path).unwrap(), original);
 }
 
@@ -161,7 +161,7 @@ fn encrypted_config_round_trips_rekeys_and_returns_to_toml() {
     let mut config = Config::default();
     config.terminal.open_on_start = false;
     let mut access = ConfigAccess::default();
-    access.save_settings(&path, &mut config, &sealed).unwrap();
+    access.save_settings(&path, &mut config, &sealed, None).unwrap();
     access.set_encryption(&path, &sealed, "old", true).unwrap();
     let encrypted = fs::read_to_string(&path).unwrap();
     assert!(aster_vault::config::is_encrypted(&encrypted));
@@ -171,12 +171,12 @@ fn encrypted_config_round_trips_rekeys_and_returns_to_toml() {
     fs::write(&path, &encrypted).unwrap();
     let mut reopened = ConfigAccess::default();
     assert!(reopened.unlock(&path, "wrong").is_err());
-    assert!(reopened.save_settings(&path, &mut Config::default(), "").is_err());
+    assert!(reopened.save_settings(&path, &mut Config::default(), "", None).is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), encrypted);
     let mut loaded = reopened.unlock(&path, "old").unwrap();
     assert!(!loaded.terminal.open_on_start);
     loaded.vault.remember_minutes = 9;
-    reopened.save_settings(&path, &mut loaded, &sealed).unwrap();
+    reopened.save_settings(&path, &mut loaded, &sealed, None).unwrap();
     assert!(aster_vault::config::is_encrypted(&fs::read_to_string(&path).unwrap()));
     let next = aster_vault::Vault::default().seal("new");
     reopened.save_vault(&path, &sealed, &next, Some("new")).unwrap();
@@ -197,7 +197,7 @@ fn raw_editor_loads_plaintext_only_after_unlock_and_saves_ciphertext() {
     let path = dir.file();
     let sealed = Vault::default().seal("master");
     let mut access = ConfigAccess::default();
-    access.save_settings(&path, &mut Config::default(), &sealed).unwrap();
+    access.save_settings(&path, &mut Config::default(), &sealed, None).unwrap();
     access.set_encryption(&path, &sealed, "master", true).unwrap();
 
     let mut reopened = ConfigAccess::default();
@@ -232,7 +232,7 @@ fn encrypted_future_config_cannot_be_overwritten_or_unprotected() {
     assert!(access.unlock(&path, "master").unwrap().read_only());
     assert_eq!(access.save_raw(&path, Some(&original), "version = 1\n").unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(access.save_vault(&path, &sealed, "", None).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-    assert_eq!(access.save_settings(&path, &mut Config::default(), &sealed).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(access.save_settings(&path, &mut Config::default(), &sealed, None).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     assert!(access.set_encryption(&path, &sealed, "master", false).is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), encrypted);
 }
@@ -243,13 +243,13 @@ fn cancelled_startup_keeps_the_encrypted_file_byte_for_byte() {
     let path = dir.file();
     let sealed = aster_vault::Vault::default().seal("master");
     let mut access = ConfigAccess::default();
-    access.save_settings(&path, &mut Config::default(), &sealed).unwrap();
+    access.save_settings(&path, &mut Config::default(), &sealed, None).unwrap();
     access.set_encryption(&path, &sealed, "master", true).unwrap();
     let encrypted = fs::read_to_string(&path).unwrap();
     let mut startup = ConfigAccess::default();
     startup.unlock(&path, "master").unwrap();
     startup.skip();
-    assert!(startup.save_settings(&path, &mut Config::default(), "").is_err());
+    assert!(startup.save_settings(&path, &mut Config::default(), "", None).is_err());
     assert!(startup.save_vault(&path, &sealed, "", None).is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), encrypted);
 }
@@ -260,14 +260,14 @@ fn concurrent_settings_save_cannot_overwrite_a_new_encrypted_config() {
     let path = dir.file();
     let sealed = Vault::default().seal("master");
     let access = ConfigAccess::default();
-    access.save_settings(&path, &mut Config::default(), &sealed).unwrap();
+    access.save_settings(&path, &mut Config::default(), &sealed, None).unwrap();
     let lock = lock_config(&path).unwrap();
     let (started, start) = std::sync::mpsc::channel();
     let (finished, finish) = std::sync::mpsc::channel();
     let other_path = path.clone();
     let other = std::thread::spawn(move || {
         started.send(()).unwrap();
-        let result = ConfigAccess::default().save_settings(&other_path, &mut Config::default(), "");
+        let result = ConfigAccess::default().save_settings(&other_path, &mut Config::default(), "", None);
         finished.send(result).unwrap();
     });
     start.recv().unwrap();

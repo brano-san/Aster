@@ -42,6 +42,7 @@ enum StoreEvent {
     FontFamilies { monospace: Vec<String>, all: Vec<String> },
     CommandProbe { window: WindowId, request: u64, busy: bool },
     Vault(VaultUpdate),
+    Sync(crate::sync::Event),
     VaultReply(WindowId, u64, Result<VaultReply, VaultIssue>),
     VaultAccess(WindowId, AccessPrompt),
     ConfigEncryption(bool),
@@ -118,6 +119,9 @@ pub struct Handler<P: Platform> {
     raw_save_pending: bool,
     secrets: Secrets,
     vault_view: VaultView,
+    sync: crate::sync::Worker,
+    sync_view: aster_core::sync::View,
+    sync_requested: Option<aster_core::sync::Preferences>,
     vault_access: HashMap<WindowId, VecDeque<AccessPrompt>>,
     store_events: StoreEvents<<P::Windows as WindowSystem>::Waker>,
     store_rx: Receiver<StoreEvent>,
@@ -258,6 +262,8 @@ impl<P: Platform> Handler<P> {
         let config_startup = if encrypted { ConfigStartup::Prompt } else { ConfigStartup::Ready };
         let (tx, store_rx) = unbounded();
         let store_events = StoreEvents { tx, waker: waker.clone() };
+        let sync_events = store_events.clone();
+        let sync = crate::sync::Worker::start(config_path.clone(), config_access.clone(), move |event| sync_events.post(StoreEvent::Sync(event)))?;
         let fonts = store_events.clone();
         if let Err(e) = std::thread::Builder::new().name("aster-font-families".into()).spawn(move || {
             fonts.post(StoreEvent::FontFamilies { monospace: P::font_families(true), all: P::font_families(false) });
@@ -300,7 +306,7 @@ impl<P: Platform> Handler<P> {
         let extension_events = store_events.clone();
         let root = config_path.as_deref().and_then(std::path::Path::parent).map(|path| path.join("extensions"));
         let (extensions, extension_worker) = crate::extensions::Host::start::<P>(root, move |event| extension_events.post(StoreEvent::Extensions(event)))?;
-        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false, restart_preparing: false };
+        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, sync, sync_view: Default::default(), sync_requested: None, updates, update_window: None, restarting: false, restart_preparing: false };
         if !encrypted {
             handler.scan_extensions(&handler.config);
             handler.update_launcher(&handler.config, None);
@@ -351,6 +357,7 @@ impl<P: Platform> Handler<P> {
         if self.config.read_only() || config.read_only() { return; }
         config.vault.sealed.clone_from(&self.config.vault.sealed);
         config.vault.encrypt_config = self.config.vault.encrypt_config;
+        let base = self.config.clone();
         self.settings_revision += 1;
         self.apply_config(config.clone());
         if self.config_startup != ConfigStartup::Ready { return; }
@@ -360,7 +367,7 @@ impl<P: Platform> Handler<P> {
         let access = self.config_access.clone();
         self.secrets.sync_config(move |sealed| {
             if let Some(path) = path {
-                match access.lock().expect("config access").save_settings(&path, &mut config, sealed) {
+                match access.lock().expect("config access").save_settings(&path, &mut config, sealed, Some(&base)) {
                     Ok(()) => {
                         events.post(StoreEvent::ConfigStatus(revision, None));
                         return Some((config.vault.sealed, config.vault.remember_minutes));
@@ -446,6 +453,7 @@ impl<P: Platform> Handler<P> {
             self.apply_config(config);
             self.config_startup = ConfigStartup::Ready;
             self.reload_config(true);
+            self.automatic_config_sync();
         } else {
             self.config_startup = ConfigStartup::Skipped;
             self.pending.clear();
@@ -564,7 +572,15 @@ impl<P: Platform> Handler<P> {
             self.window_prefs_dirty = true;
             self.waker.wake();
         }
+        let store_changed = !self.config.sync.same_store(&config.sync);
         self.config = config;
+        if store_changed {
+            self.sync_view.entries.clear();
+            self.sync_view.conflict = None;
+            self.sync_view.git_conflicts.clear();
+            if self.sync_requested.is_none() { self.sync_view.status = aster_core::sync::Status::Idle; }
+            self.show_sync();
+        }
         self.refresh_jump_list();
     }
 
@@ -844,6 +860,7 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::SaveRawConfig { text, expected } => self.save_raw_config(id, text, expected),
+            Effect::ConfigSync(operation) => self.request_config_sync(operation),
             Effect::Restart => self.request_restart(id),
             Effect::Open(target) => P::open(&target),
             Effect::RecentProfiles(recent) => {
@@ -1220,6 +1237,83 @@ impl<P: Platform> Handler<P> {
         self.vault_view = view;
     }
 
+    fn show_sync(&mut self) {
+        for state in self.windows.values_mut() {
+            state.app.set_sync_view(self.sync_view.clone());
+        }
+    }
+
+    fn request_config_sync(&mut self, operation: aster_core::sync::Operation) {
+        use aster_core::sync::{Issue, Operation, Status};
+        if !self.config.sync.ready() || self.sync_requested.is_some() || self.config_startup != ConfigStartup::Ready
+            || self.raw_save_pending || self.restarting || self.config.read_only() && operation != Operation::List { return; }
+        let preferences = self.config.sync.clone();
+        self.sync_requested = Some(preferences.clone());
+        self.sync_view.status = Status::Syncing;
+        let worker = self.sync.clone();
+        let events = self.store_events.clone();
+        if !self.secrets.sync_config(move |_| {
+            if !worker.request(preferences, operation) {
+                events.post(StoreEvent::Sync(crate::sync::Event::Finished(Err(Issue::Unavailable))));
+            }
+            None
+        }) {
+            self.sync_requested = None;
+            self.sync_view.status = Status::Error(Issue::Unavailable);
+        }
+        self.show_sync();
+    }
+
+    fn automatic_config_sync(&mut self) {
+        if self.config.sync.automatic {
+            self.request_config_sync(aster_core::sync::Operation::Automatic);
+        }
+    }
+
+    fn sync_event(&mut self, event: crate::sync::Event) {
+        use aster_core::sync::Status;
+        match event {
+            crate::sync::Event::Machine(machine) => {
+                self.sync_view.machine = machine;
+                self.automatic_config_sync();
+            }
+            crate::sync::Event::Tick => return self.automatic_config_sync(),
+            crate::sync::Event::Finished(result) => {
+                let current = self.sync_requested.take().is_some_and(|preferences| preferences.same_store(&self.config.sync));
+                if !current {
+                    self.sync_view.status = Status::Idle;
+                    self.show_sync();
+                    self.request_config_sync(aster_core::sync::Operation::List);
+                    return;
+                }
+                match result {
+                    Ok(report) => {
+                        self.sync_view.entries = report.entries;
+                        self.sync_view.status = report.saved.map_or(Status::Idle, Status::Synced);
+                        if let Some(name) = report.conflict {
+                            if let Some(state) = self.request_target().and_then(|id| self.windows.get_mut(&id)) {
+                                state.app.notify_sync_conflict(&name);
+                            }
+                            self.sync_view.conflict = Some(name);
+                        } else if !report.git_conflicts.is_empty() {
+                            if let Some(state) = self.request_target().and_then(|id| self.windows.get_mut(&id)) {
+                                state.app.notify_git_sync_conflicts(&report.git_conflicts);
+                            }
+                            self.sync_view.conflict = None;
+                            self.sync_view.git_conflicts = report.git_conflicts;
+                        }
+                        if report.saved.is_some() { self.reload_config(true); }
+                    }
+                    Err(issue) => {
+                        self.sync_view.status = Status::Error(issue);
+                        self.reload_config(true);
+                    }
+                }
+            }
+        }
+        self.show_sync();
+    }
+
     fn drain_store(&mut self) {
         while let Ok(event) = self.store_rx.try_recv() {
             match event {
@@ -1241,6 +1335,7 @@ impl<P: Platform> Handler<P> {
                         state.app.extension_reply(reply);
                     }
                 }
+                StoreEvent::Sync(event) => self.sync_event(event),
                 StoreEvent::Launcher(window, result) => match result {
                     Ok(installed) => {
                         self.launcher_installed = Some(installed);
@@ -1631,6 +1726,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         app.set_system_language(&P::ui_language());
         app.warn_read_only_config();
         app.vault_state(self.vault_view.clone());
+        app.set_sync_view(self.sync_view.clone());
         app.set_config_encrypted(self.config.vault.encrypt_config || self.config_startup != ConfigStartup::Ready);
         app.set_cwd_probe(Arc::new(P::process_cwd));
         app.set_children_probe(Arc::new(P::child_processes));

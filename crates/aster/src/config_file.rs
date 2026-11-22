@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub struct ConfigAccess {
     cipher: Option<ConfigCipher>,
     skipped: bool,
+    sync_written: bool,
 }
 
 fn lock_config(path: &Path) -> io::Result<fs::File> {
@@ -112,12 +113,18 @@ impl ConfigAccess {
         }
     }
 
-    pub fn save_settings(&self, path: &Path, config: &mut Config, sealed: &str) -> io::Result<()> {
+    pub fn save_settings(&self, path: &Path, config: &mut Config, sealed: &str, base: Option<&Config>) -> io::Result<()> {
         self.writable()?;
         let _lock = lock_config(path)?;
         let existing = source(path)?;
         config.vault.sealed = match &existing {
-            Some(disk) => self.read_writable(disk)?.vault.sealed,
+            Some(disk) => {
+                let disk = self.read_writable(disk)?;
+                if let Some(base) = base.filter(|base| self.sync_written && *base != &disk) {
+                    *config = aster_core::sync::rebase_settings(base, config, &disk).map_err(invalid_data)?;
+                }
+                disk.vault.sealed
+            }
             None if self.cipher.is_none() => sealed.to_owned(),
             None => return Err(io::Error::new(io::ErrorKind::NotFound, "encrypted configuration is missing")),
         };
@@ -188,6 +195,30 @@ impl ConfigAccess {
         let config = self.parse_document(&self.plain_text(disk)?).map_err(invalid_data)?;
         ensure_writable(&config)?;
         Ok(config)
+    }
+
+    pub fn load_sync(&self, path: &Path) -> io::Result<(String, Config, std::time::SystemTime)> {
+        self.writable()?;
+        let _lock = lock_config(path)?;
+        let (text, config) = self.load_document(path)?;
+        let config = config.map_err(invalid_data)?;
+        ensure_writable(&config)?;
+        Ok((text, config, fs::metadata(path)?.modified()?))
+    }
+
+    pub fn save_sync(&mut self, path: &Path, expected: &str, text: &str) -> io::Result<()> {
+        self.writable()?;
+        ensure_writable(&self.parse_document(text).map_err(invalid_data)?)?;
+        let _lock = lock_config(path)?;
+        let disk = fs::read_to_string(path)?;
+        let current = self.plain_text(&disk)?;
+        expect_source(Some(&current), Some(expected))?;
+        ensure_writable(&self.parse_document(&current).map_err(invalid_data)?)?;
+        if current != text {
+            write_document(path, text, self.cipher.as_ref(), Some(Some(&disk)))?;
+            self.sync_written = true;
+        }
+        Ok(())
     }
 
     pub fn save_raw(&self, path: &Path, expected: Option<&str>, text: &str) -> io::Result<Config> {

@@ -18,6 +18,7 @@ mod serial;
 mod session;
 mod shell_integration;
 mod stream;
+mod sync;
 mod update;
 mod url_scheme;
 mod zmodem;

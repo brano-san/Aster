@@ -90,6 +90,7 @@ pub enum Effect {
     RequestVaultPaste(u64),
     RequestConfigPaste(u64),
     SaveConfig(String),
+    ConfigSync(crate::sync::Operation),
     SaveRawConfig { text: String, expected: Option<String> },
     Restart,
     Open(String),
@@ -263,6 +264,7 @@ pub struct App {
     pub(crate) vault_prompt: Option<crate::vault_settings::VaultDialog>,
     pub(crate) config_editor: crate::config_editor::ConfigEditor,
     pub(crate) vault: crate::settings::VaultView,
+    pub(crate) sync_view: crate::sync::View,
     pub(crate) vault_input_id: u64,
     pub(crate) ssh_editor_request: u64,
     pub(crate) ssh_auth: BTreeMap<PaneId, crate::ssh_auth::Panel>,
@@ -332,6 +334,7 @@ impl App {
         let keymap = Keymap::with_mru(&config.hotkeys, config.appearance.mru_tabs);
         let mut app = App {
             vault: crate::settings::VaultView { configured: !config.vault.sealed.is_empty(), ..Default::default() },
+            sync_view: crate::sync::View::default(),
             vault_input_id: 0,
             ssh_editor_request: 0,
             ssh_auth: BTreeMap::new(),
@@ -765,12 +768,14 @@ impl App {
         if config.appearance.backdrop != self.config.appearance.backdrop {
             self.effects.push(Effect::Surface(config.appearance.backdrop));
         }
+        let sync_changed = !self.config.sync.same_store(&config.sync) || self.config.sync.ready() != config.sync.ready();
         self.config = config;
         if extension_index_changed { self.extension_index_changed(); }
         self.profiles.clone_from(&self.detected);
         self.profiles.extend(self.config.profiles.iter().cloned());
         self.profiles.extend(self.extension_profiles());
         self.keymap = self.extension_keymap();
+        if sync_changed { self.sync_settings_changed(); }
         if background_changed { self.request_background_image(); }
         self.update_restart_pending();
         if profiles_changed { self.sync_profile_page(); }
