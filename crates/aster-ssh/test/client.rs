@@ -218,6 +218,9 @@ fn captures_the_interactive_panel_with_a_local_server() {
     if let Some(path) = std::env::var_os("ASTER_SSH_CAPTURE_PORTS") {
         capture(&PathBuf::from(path), "Wait;Wait;'office;Tab;'secret;Enter;Wait;'123456;Enter;Wait;Click@1045,50", "10500");
     }
+    if let Some(path) = std::env::var_os("ASTER_SSH_CAPTURE_FORWARD_FORM") {
+        capture(&PathBuf::from(path), "Wait;Wait;'office;Tab;'secret;Enter;Wait;'123456;Enter;Wait;Click@1045,50;Enter;'8080", "10500");
+    }
     if let Some(path) = std::env::var_os("ASTER_SSH_CAPTURE_RECONNECT") {
         capture(&PathBuf::from(path), "Wait;Wait;'office;Tab;'secret;Enter;Wait;'123456;Enter;Wait;Click@900,50;Wait", "10500");
     }
@@ -601,4 +604,63 @@ fn a_profile_forward_uses_the_shell_connection_and_carries_data() {
     let mut s = std::net::TcpStream::connect(("127.0.0.1", local)).unwrap();
     assert_eq!(round_trip(&mut s, b"profile forward"), b"profile forward");
     assert_eq!(*seen.tunnels.lock().unwrap(), [format!("127.0.0.1:{echo}")]);
+}
+
+#[test]
+fn live_forward_commands_reach_a_shared_connection_through_a_jump_host() {
+    use aster_proto::ssh_forward::{Command, Forward, ForwardStatus};
+    let (jump, _) = serve();
+    let (target, _) = serve();
+    let echo = echo_server();
+    let dir = temp_ssh_dir();
+    std::fs::write(dir.join("config"), format!("Host target\n  HostName 127.0.0.1\n  Port {target}\n  User ann\n  ProxyJump ann@127.0.0.1:{jump}\n")).unwrap();
+    let mut req = request("target".into(), dir);
+    req.share = true;
+    req.interactive_panel = true;
+    let mut first = Pane { conn: start(req.clone()), seen: String::new() };
+    for _ in 0..2 {
+        first.wait_for("(yes/no)? ");
+        first.send("yes\r");
+        first.wait_for("password: ");
+        first.send("secret\r");
+        first.seen.clear();
+    }
+    first.wait_for("welcome");
+    let mut second = Pane { conn: start(req), seen: String::new() };
+    second.wait_for("welcome");
+    let wait = |pane: &Pane, matches: &dyn Fn(&[ForwardStatus]) -> bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let SshEvent::Forwards(rows) = pane.conn.events.recv_deadline(deadline).unwrap() {
+                if matches(&rows) { return rows; }
+            }
+        }
+    };
+    let add = |forward| first.conn.input.send(Input::Forward(Command::AddForward(forward))).unwrap();
+    let bind = "127.0.0.1".to_owned();
+    add(Forward::Local { bind: bind.clone(), port: 0, host: bind.clone(), host_port: echo });
+    add(Forward::Remote { bind: bind.clone(), port: 0, host: bind.clone(), host_port: echo });
+    add(Forward::Dynamic { bind: bind.clone(), port: 0 });
+    let rows = wait(&first, &|rows| rows.len() == 3);
+    assert_eq!(wait(&second, &|status| status.len() == 3), rows);
+    for row in &rows[..2] {
+        let mut socket = std::net::TcpStream::connect((bind.as_str(), row.bound.clone().unwrap() as u16)).unwrap();
+        assert_eq!(round_trip(&mut socket, b"live forwarding"), b"live forwarding");
+    }
+    let dynamic = rows[2].bound.clone().unwrap() as u16;
+    let mut socket = std::net::TcpStream::connect((bind.as_str(), dynamic)).unwrap();
+    assert_eq!(exchange(&mut socket, &[5, 1, 0], 2), [5, 0]);
+    add(Forward::Dynamic { bind: bind.clone(), port: dynamic });
+    let with_error = wait(&first, &|rows| rows.len() == 4);
+    assert!(with_error[3].bound.is_err());
+    for row in &with_error {
+        second.conn.input.send(Input::Forward(Command::StopForward(row.index))).unwrap();
+    }
+    assert!(wait(&first, &|rows| rows.is_empty()).is_empty());
+    assert!(wait(&second, &|rows| rows.is_empty()).is_empty());
+    for row in rows {
+        assert!(std::net::TcpStream::connect((bind.as_str(), row.bound.unwrap() as u16)).is_err());
+    }
+    first.send("still connected\r");
+    first.wait_for("still connected");
 }

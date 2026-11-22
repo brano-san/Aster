@@ -46,6 +46,7 @@ mod settings_colors;
 pub mod vault_settings;
 pub mod ssh;
 mod ssh_auth;
+mod ssh_forward_form;
 mod ssh_toolbar;
 mod start;
 pub mod sudo;

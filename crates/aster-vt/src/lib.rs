@@ -13,7 +13,7 @@ pub use alacritty_terminal::term::TermMode;
 pub use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 pub use osc::{Progress, ProgressState};
 pub use palette::Palette;
-pub use search::{SearchStatus, VisibleMatch};
+pub use search::{SearchOverview, SearchStatus, VisibleMatch};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
@@ -223,6 +223,27 @@ impl Terminal {
         let Some(found) = self.search.as_mut() else { return Vec::new() };
         found.refresh(&self.term);
         found.visible(self.term.grid().display_offset(), self.size.rows, self.size.cols)
+    }
+
+    pub fn search_overview(&mut self) -> Option<SearchOverview> {
+        let found = self.search.as_mut()?;
+        found.refresh(&self.term);
+        let grid = self.term.grid();
+        Some(found.overview(grid.history_size(), grid.display_offset(), self.size.rows))
+    }
+
+    pub fn search_jump_to_row(&mut self, row: usize) -> bool {
+        let Some(found) = self.search.as_mut() else { return false };
+        found.refresh(&self.term);
+        let grid = self.term.grid();
+        let history = grid.history_size();
+        let row = row.min(history + self.size.rows - 1);
+        if !found.select_nearest(row, history) { return false; }
+        let viewport_start = row.saturating_sub(self.size.rows / 2).min(history);
+        let offset = history - viewport_start;
+        self.term.scroll_display(Scroll::Delta(offset as i32 - grid.display_offset() as i32));
+        self.bump();
+        true
     }
 
     pub fn search_marks(&mut self) -> Vec<(f32, bool)> {

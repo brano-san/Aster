@@ -499,7 +499,7 @@ impl ProfileEditor {
         let options = SshOptions {
             user: self.ssh_user(), port, identity_files, keepalive_ms: self.number(Field::Keepalive)?,
             proxy: self.ssh_proxy()?, auth: enum_value(self.value(Field::Auth)),
-            forwards: self.ssh_forwards()?,
+            forwards: self.ssh_forwards()?, inherit_forwards: old.is_some_and(|o| o.inherit_forwards),
             forward_agent: self.flag(Field::ForwardAgent), reuse_session: self.flag(Field::ReuseSession),
             keepalive_count: self.number(Field::Count)?, ready_timeout_ms: self.number(Field::Timeout)?,
             skip_banner: self.flag(Field::Banner), remember_cwd: self.flag(Field::Remember), x11: self.flag(Field::X11),

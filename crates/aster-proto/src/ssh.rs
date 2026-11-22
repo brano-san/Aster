@@ -11,6 +11,8 @@ pub struct SshOptions {
     pub proxy: Option<SshProxy>,
     pub auth: Option<SshAuth>,
     pub forwards: Option<Vec<crate::ssh_forward::ForwardRule>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub inherit_forwards: bool,
     pub identity_files: Option<Vec<String>>,
     pub keepalive_ms: Option<u64>,
     pub keepalive_count: Option<usize>,

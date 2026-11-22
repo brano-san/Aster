@@ -135,3 +135,25 @@ fn marks_follow_dense_output_that_arrives_after_the_query() {
     let bad: Vec<f32> = marks.iter().map(|m| m.0).filter(|f| !(0.0..=1.0).contains(f)).take(5).collect();
     assert!(bad.is_empty(), "{bad:?} of {}", marks.len());
 }
+
+#[test]
+fn overview_marks_are_capped_and_fast_on_a_100_000_line_buffer() {
+    let mut t = term(24, 24, 100_000);
+    lines(&mut t, 0, 99_999, 1);
+    t.set_search("needle", search::SearchOptions::default()).unwrap();
+    assert!(t.search_jump_to_row(95_000));
+    let began = Instant::now();
+    for _ in 0..32 {
+        std::hint::black_box(t.search_overview().unwrap());
+    }
+    let per_overview = began.elapsed() / 32;
+    eprintln!("100,000-line search overview: {per_overview:?} per snapshot");
+    assert!(per_overview.as_micros() < 5_000, "overview took {per_overview:?}");
+    let overview = t.search_overview().unwrap();
+    assert_eq!(overview.total_lines, 100_000);
+    assert_eq!(overview.rows.len(), 10_000);
+    assert_eq!(overview.rows[0], 0);
+    assert_eq!(overview.rows[9_999], 9_999);
+    assert_eq!(overview.current_row, Some(95_000));
+    assert_eq!(overview.viewport_start + overview.viewport_rows / 2, 95_000);
+}

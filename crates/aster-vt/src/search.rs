@@ -56,6 +56,16 @@ pub struct SearchStatus {
     pub count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchOverview {
+    pub rows: Vec<usize>,
+    pub current_row: Option<usize>,
+    pub total_lines: usize,
+    pub viewport_start: usize,
+    pub viewport_rows: usize,
+}
+
+const OVERVIEW_LIMIT: usize = 10_000;
 const SIGNATURE_ROWS: usize = 3;
 const MAX_SHIFT_SCAN: usize = 100_000;
 
@@ -227,6 +237,34 @@ impl Search {
             }
         }
         out
+    }
+
+    pub(crate) fn overview(&self, history: usize, offset: usize, screen_rows: usize) -> SearchOverview {
+        let first = self.scrolled - history as i64;
+        let total_lines = history + screen_rows;
+        let mut rows = Vec::with_capacity((self.history.len() + self.screen.len()).min(OVERVIEW_LIMIT));
+        let mut next = 0;
+        for span in self.all().take(OVERVIEW_LIMIT) {
+            let start = (span.start.0 - first).max(0) as usize;
+            let end = (span.end.0 - first + 1).max(0) as usize;
+            rows.extend((start.max(next)..end.min(total_lines)).take(OVERVIEW_LIMIT - rows.len()));
+            if rows.len() == OVERVIEW_LIMIT { break; }
+            next = end.max(next);
+        }
+        let current_row = self.current.and_then(|span| usize::try_from(span.start.0 - first).ok()).filter(|&row| row < total_lines);
+        SearchOverview { rows, current_row, total_lines, viewport_start: history.saturating_sub(offset), viewport_rows: screen_rows }
+    }
+
+    pub(crate) fn select_nearest(&mut self, row: usize, history: usize) -> bool {
+        let absolute = self.scrolled - history as i64 + row as i64;
+        self.current = [&self.history[..], &self.screen[..]].into_iter().flat_map(|spans| {
+            let at = spans.partition_point(|span| span.start.0 < absolute);
+            [at.checked_sub(1).and_then(|prev| spans.get(prev)), spans.get(at)].into_iter().flatten()
+        }).min_by_key(|span| {
+            let distance = if absolute < span.start.0 { span.start.0 - absolute } else { (absolute - span.end.0).max(0) };
+            (distance, span.start)
+        }).copied();
+        self.current.is_some()
     }
 
     pub fn marks(&self, history: usize, rows: usize) -> Vec<(f32, bool)> {

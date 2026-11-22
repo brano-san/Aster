@@ -10,6 +10,7 @@ pub enum Input {
     Close,
     Sftp(crate::sftp::Request),
     Interactive(InteractiveAnswer),
+    Forward(aster_proto::ssh_forward::Command),
 }
 
 pub struct Console {
@@ -18,6 +19,7 @@ pub struct Console {
     pub size: (u16, u16),
     pub closed: bool,
     pub(crate) interactive: Option<Sender<SshEvent>>,
+    pub(crate) forwards: Option<Sender<SshEvent>>,
     format_error: fn(&str) -> String,
 }
 
@@ -27,7 +29,7 @@ pub fn crlf(text: &str) -> String {
 
 impl Console {
     pub fn new(out: Sender<Vec<u8>>, input: UnboundedReceiver<Input>, size: (u16, u16)) -> Self {
-        Self { out, input, size, closed: false, interactive: None, format_error: str::to_owned }
+        Self { out, input, size, closed: false, interactive: None, forwards: None, format_error: str::to_owned }
     }
 
     pub fn with_error_formatter(mut self, format_error: fn(&str) -> String) -> Self {
@@ -101,7 +103,7 @@ impl Console {
                         return Some(String::from_utf8_lossy(line).into_owned());
                     }
                 }
-                Input::Resize(..) | Input::Sftp(_) | Input::Interactive(_) => {}
+                Input::Resize(..) | Input::Sftp(_) | Input::Interactive(_) | Input::Forward(_) => {}
                 Input::Close => return None,
             }
         }
@@ -139,7 +141,7 @@ impl Console {
     }
 
     pub(crate) fn forward_status(&self, statuses: Vec<aster_proto::ssh_forward::ForwardStatus>) {
-        if let Some(tx) = &self.interactive { let _ = tx.send(SshEvent::Forwards(statuses)); }
+        if let Some(tx) = &self.forwards { let _ = tx.send(SshEvent::Forwards(statuses)); }
     }
 
     pub(crate) async fn wait_for_close(&mut self) {

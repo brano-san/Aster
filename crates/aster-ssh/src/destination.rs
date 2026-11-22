@@ -92,20 +92,22 @@ pub fn resolve_options(spec: &str, cx: &Context, profile: &SshOptions) -> Destin
     let agent = entry.identity_agent.filter(|a| a != "SSH_AUTH_SOCK");
     let mut forwards = Vec::new();
     let mut forward_errors = Vec::new();
-    if let Some(rules) = &profile.forwards {
-        for (index, rule) in rules.iter().enumerate() {
-            match rule.resolve() {
-                Ok(forward) => forwards.push(forward),
-                Err(e) => forward_errors.push(format!("{} forward #{}: {e}", rule.kind.as_str(), index + 1)),
-            }
-        }
-    } else {
+    if profile.forwards.is_none() || profile.inherit_forwards {
         for (kind, specs) in [("local", &entry.local_forwards), ("remote", &entry.remote_forwards), ("dynamic", &entry.dynamic_forwards)] {
             for spec in specs {
                 match crate::forward::parse(kind, spec) {
                     Ok(f) => forwards.push(f),
                     Err(e) => forward_errors.push(format!("{kind} forward \"{spec}\": {e}")),
                 }
+            }
+        }
+    }
+    if let Some(rules) = &profile.forwards {
+        for (index, rule) in rules.iter().enumerate() {
+            match rule.resolve() {
+                Ok(forward) if profile.inherit_forwards && forwards.contains(&forward) => {}
+                Ok(forward) => forwards.push(forward),
+                Err(e) => forward_errors.push(format!("{} forward #{}: {e}", rule.kind.as_str(), index + 1)),
             }
         }
     }

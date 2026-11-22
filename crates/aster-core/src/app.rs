@@ -131,6 +131,7 @@ pub enum Effect {
     SshPassword { request: u64, destination: String, options: Box<crate::profile::SshOptions>, value: Option<String> },
     BrowseSshKeys { request: u64, directory: Option<std::path::PathBuf>, import: bool },
     SshInteractive { pane: PaneId, answer: aster_proto::ssh::InteractiveAnswer },
+    SshForward { pane: PaneId, command: aster_proto::ssh_forward::Command },
     ImportSshIdentity { request: u64, path: std::path::PathBuf },
     VaultCreate { passphrase: String },
     VaultUnlock { passphrase: String },
@@ -274,6 +275,7 @@ pub struct App {
     pub(crate) ssh_editor_request: u64,
     pub(crate) ssh_auth: BTreeMap<PaneId, crate::ssh_auth::Panel>,
     pub(crate) ssh_forwards: BTreeMap<PaneId, Vec<aster_proto::ssh_forward::ForwardStatus>>,
+    pub(crate) ssh_forward_form: Option<crate::ssh_forward_form::ForwardForm>,
     pub(crate) ssh_auth_paste: Option<(u64, PaneId, u64, usize)>,
     pub(crate) ssh_algorithm_catalog: aster_proto::ssh::AlgorithmCatalog,
     pub(crate) menu: Option<crate::menu::Menu>,
@@ -346,6 +348,7 @@ impl App {
             ssh_editor_request: 0,
             ssh_auth: BTreeMap::new(),
             ssh_forwards: BTreeMap::new(),
+            ssh_forward_form: None,
             ssh_auth_paste: None,
             ssh_algorithm_catalog: Default::default(),
             restart_baseline: crate::settings::RestartSettings::from_config(&config),
@@ -994,6 +997,7 @@ impl App {
         self.prompts.remove(&pane);
         self.ssh_auth.remove(&pane);
         self.ssh_forwards.remove(&pane);
+        self.ssh_forward_form.take_if(|form| form.pane == pane);
         self.ssh_auth_paste.take_if(|(_, target, _, _)| *target == pane);
         self.overlay.take_if(|overlay| overlay.kind == OverlayKind::SshPorts(pane));
         if self.search.as_ref().is_some_and(|s| s.pane == pane) {
@@ -1077,6 +1081,7 @@ impl App {
         self.panes.clear();
         self.ssh_auth.clear();
         self.ssh_forwards.clear();
+        self.ssh_forward_form = None;
         self.tabs.clear();
     }
 
@@ -1273,7 +1278,7 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if self.config_editor_text(&text) { return; }
+        if self.ssh_forward_form_text(&text) || self.config_editor_text(&text) { return; }
         let text = if self.config.terminal.paste_newlines_as_spaces && text.contains(['\r', '\n']) {
             text.replace("\r\n", " ").replace(['\r', '\n'], " ")
         } else {
@@ -1668,6 +1673,9 @@ impl App {
     }
 
     fn choose(&mut self, kind: OverlayKind, value: String) {
+        if let OverlayKind::SshPorts(pane) = kind {
+            return self.choose_ssh_forward(pane, &value);
+        }
         self.overlay = None;
         self.dirty = true;
         match kind {
@@ -1860,6 +1868,7 @@ impl App {
         p.queued.clear();
         self.ssh_auth.remove(&pane);
         self.ssh_forwards.remove(&pane);
+        self.ssh_forward_form.take_if(|form| form.pane == pane);
         self.offers.remove(&pane);
         self.prompts.remove(&pane);
         if self.files.as_ref().is_some_and(|page| page.pane == pane) { self.files = None; }
@@ -1994,6 +2003,13 @@ impl App {
         if self.vault_prompt.is_some() && self.vault_prompt_event(&event) {
             if matches!(event, Event::Key { key: Key::Escape | Key::Enter, pressed: true, .. }) {
                 self.swallow_control = true;
+            }
+            return;
+        }
+        if self.ssh_forward_form_event(&event) {
+            if self.ssh_forward_form.is_none() {
+                self.swallow_control = matches!(event, Event::Key { key: Key::Enter | Key::Escape, pressed: true, .. });
+                self.swallow_char = matches!(event, Event::Key { key: Key::Space, pressed: true, .. });
             }
             return;
         }
@@ -2447,6 +2463,12 @@ impl App {
             }
         }
         if !modal && self.drag == Drag::None {
+            if self.search_ruler_rect().is_some_and(|rect| rect.contains(x, y)) {
+                self.hover_link = None;
+                self.set_cursor(CursorIcon::Hand);
+                self.dirty = true;
+                return;
+            }
             if let Some(cursor) = self.pane_at(x, y).and_then(|(pane, rect)| self.ssh_pointer_at(pane, rect, x, y)) {
                 self.hover_link = None;
                 self.set_cursor(cursor);
@@ -2527,6 +2549,7 @@ impl App {
             return;
         }
         if let Some(o) = self.overlay.as_ref() {
+            if matches!(o.kind, OverlayKind::SshPorts(_)) && button != MouseButton::Left { return; }
             match view::overlay_hit(self, o, x, y) {
                 Some(Some(i)) => {
                     let o = self.overlay.as_mut().expect("overlay");
@@ -2924,6 +2947,7 @@ impl App {
         p.ssh_connecting = false;
         self.ssh_auth.remove(&pane);
         self.ssh_forwards.remove(&pane);
+        self.ssh_forward_form.take_if(|form| form.pane == pane);
         if self.overlay.as_ref().is_some_and(|overlay| overlay.kind == OverlayKind::SshPorts(pane)) { self.overlay = None; }
         p.pid = None;
         self.offers.remove(&pane);

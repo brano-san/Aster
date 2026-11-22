@@ -216,7 +216,11 @@ pub fn overlay_hit(app: &App, o: &Overlay, x: f32, y: f32) -> Option<Option<usiz
     if !geo.frame.contains(x, y) {
         return None;
     }
-    Some(geo.items.iter().find(|(_, r)| r.contains(x, y)).map(|(i, _)| *i))
+    Some(geo.items.iter().find(|(i, r)| {
+        if !r.contains(x, y) { return false; }
+        let item = &o.items[o.shown[*i].0];
+        !matches!(o.kind, OverlayKind::SshPorts(_)) || item.badge.is_empty() || crate::ssh_toolbar::forward_action_rect(*r, app.ui()).contains(x, y)
+    }).map(|(i, _)| *i))
 }
 
 impl App {
@@ -366,6 +370,11 @@ impl App {
         self.draw_settings(g, now);
         self.draw_files(g, now);
         self.draw_overlay(g, now);
+        if let Some(form) = &self.ssh_forward_form {
+            if let Some(caret) = self.draw_ssh_forward_form(g, content, form) {
+                self.set_ime_area(caret);
+            }
+        }
         self.draw_update_notice(g);
         self.draw_paste(g, m);
         self.draw_close(g);
@@ -940,14 +949,19 @@ impl App {
         let terminal = pane.terminal.clone();
         let mut t = terminal.lock();
         let searching = self.search.as_ref().is_some_and(|s| s.pane == id);
-        let (matches, marks) = if searching { (t.visible_matches(), t.search_marks()) } else { (Vec::new(), Vec::new()) };
-        if searching {
-            if let (Some(bar), Some(status)) = (self.search.as_mut(), t.search_status()) {
+        let mut has_matches = false;
+        let matches = if searching {
+            let status = t.search_status().unwrap_or_default();
+            has_matches = status.count != 0;
+            if let Some(bar) = &mut self.search {
                 bar.current = status.current;
                 bar.count = status.count;
-                bar.missing = !bar.query.is_empty() && status.count == 0;
+                bar.missing = !bar.error && !bar.query.is_empty() && !has_matches;
             }
-        }
+            t.visible_matches()
+        } else {
+            Vec::new()
+        };
         let overrides = *t.colors();
         let default_bg = palette.background(&overrides);
         if default_bg != self.palette.background {
@@ -978,9 +992,9 @@ impl App {
             let r = cell_rect(mt.line, mt.start, mt.end.saturating_sub(mt.start).max(1));
             if mt.current {
                 g.dl.rect(r, rgb(selection_bg));
-                g.dl.outline(r, Color::rgb(0xF0A030), 0.0, (1.0 * dpi).round().max(1.0));
+                g.dl.outline(r, rgb(theme.search_current), 0.0, (1.0 * dpi).round().max(1.0));
             } else {
-                g.dl.rect(r, Color::rgb(0xE5C07B).alpha(0x58));
+                g.dl.rect(r, rgb(theme.search_match).alpha(0x58));
             }
         }
         let cursor = t.cursor();
@@ -1031,7 +1045,7 @@ impl App {
                 if min_contrast > 1.0 && !matches.is_empty() {
                     let i = matches.partition_point(|mt| (mt.line, mt.end) <= (v.line, v.col));
                     if let Some(mt) = matches.get(i).filter(|mt| mt.line == v.line && mt.start <= v.col) {
-                        backdrop = if mt.current { selection_bg } else { crate::theme::mix(backdrop, Rgb { r: 0xe5, g: 0xc0, b: 0x7b }, 0x58 as f32 / 255.0) };
+                        backdrop = if mt.current { selection_bg } else { crate::theme::mix(backdrop, theme.search_match, 0x58 as f32 / 255.0) };
                     }
                 }
                 let backdrop = if at_cursor { cursor_color } else { backdrop };
@@ -1093,31 +1107,13 @@ impl App {
             g.text(r.x, r.y + m.baseline, &self.preedit.text, style, theme.foreground, f32::MAX);
             g.dl.rect(Rect::new(r.x, r.y + under_y, w, thin), theme.foreground);
         }
-        if offset > 0 && history > 0 {
+        if !has_matches && offset > 0 && history > 0 {
             let total = (history + size.rows) as f32;
             let track = rect.inset(0.0, (4.0 * s).round());
             let th = (track.h * size.rows as f32 / total).max(24.0 * s);
             let ty = track.y + (track.h - th) * (1.0 - offset as f32 / history as f32);
             let bw = (4.0 * s).round();
             g.dl.round_rect(Rect::new(track.right() - bw - 2.0 * s, ty, bw, th), theme.text_dim.alpha(0x90), bw / 2.0);
-        }
-        if !marks.is_empty() {
-            let track = rect.inset(0.0, (4.0 * s).round());
-            let (mw, mh) = ((6.0 * s).round(), (2.0 * s).round().max(2.0));
-            let mut last = f32::MIN;
-            let mut current = None;
-            for (frac, is_current) in &marks {
-                let y = (track.y + frac * (track.h - mh)).round();
-                if *is_current {
-                    current = Some(y);
-                } else if y > last {
-                    g.dl.rect(Rect::new(track.right() - mw, y, mw, mh), Color::rgb(0xE5C07B).alpha(0xC0));
-                    last = y;
-                }
-            }
-            if let Some(y) = current {
-                g.dl.rect(Rect::new(track.right() - mw, y - 1.0, mw, mh + 2.0), Color::rgb(0xF0A030));
-            }
         }
         g.dl.set_clip(None);
         if focused && self.pane_rename.is_none() && !self.sidebar_focused() {
@@ -1185,10 +1181,26 @@ impl App {
         g.dl.set_clip(None);
     }
 
+    fn draw_search_ruler<B: TextBackend>(&self, g: &mut Gfx<B>, pane: PaneId) {
+        let Some(track) = self.search_ruler_rect() else { return };
+        let Some(state) = self.panes.get(&pane) else { return };
+        let Some(overview) = state.terminal.lock().search_overview() else { return };
+        if overview.rows.is_empty() { return; }
+        let theme = self.theme;
+        g.dl.rect(track, theme.overlay.alpha(0xA0));
+        let viewport = crate::search::ruler_viewport(track, overview.viewport_start, overview.viewport_rows, overview.total_lines);
+        g.dl.rect(viewport, theme.text_dim.alpha(0x72));
+        for mark in crate::search::ruler_marks(track, &overview.rows, overview.current_row, overview.total_lines) {
+            let color = if mark.current { rgb(theme.search_current) } else { rgb(theme.search_match).alpha(0xC0) };
+            g.dl.rect(mark.rect, color);
+        }
+    }
+
     fn draw_search<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         use crate::search::SearchHit;
         let Some(geo) = self.search_geometry() else { return };
         let Some(bar) = self.search.clone() else { return };
+        self.draw_search_ruler(g, bar.pane);
         let s = self.ui();
         let theme = self.theme;
         let radius = (6.0 * s).round();
@@ -1357,6 +1369,90 @@ impl App {
             g.dl.outline(*button, if active { theme.accent } else { theme.overlay_border }, 4.0 * s, line);
             centered(g, *button, label, ui, if enabled { theme.text } else { theme.text_dim });
         }
+    }
+
+    fn draw_ssh_forward_form<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, form: &crate::ssh_forward_form::ForwardForm) -> Option<Rect> {
+        use crate::ssh_forward_form::{ADD, CANCEL, SAVE};
+        let geo = form.geometry(area, self.ui());
+        let s = geo.scale;
+        let theme = self.theme;
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        let heading = FontStyle::new(FontFamily::Ui, (16.0 * s).round(), true);
+        let line = s.round().max(1.0);
+        let (mx, my) = self.mouse;
+        g.dl.rect(area, theme.dim);
+        g.dl.round_rect(geo.frame, theme.overlay, 8.0 * s);
+        g.dl.outline(geo.frame, theme.overlay_border, 8.0 * s, line);
+        let y = baseline(g, geo.title, heading);
+        g.text(geo.title.x, y, t("Add port forward"), heading, theme.text, geo.title.w);
+
+        let button = |g: &mut Gfx<B>, rect: Rect, label: &str, selected: bool, focused: bool| {
+            let color = if rect.contains(mx, my) { theme.button_hover } else if selected { theme.accent.alpha(0x38) } else { theme.surface };
+            g.dl.round_rect(rect, color, 5.0 * s);
+            g.dl.outline(rect, if focused || selected { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
+            centered(g, rect, label, ui, theme.text);
+        };
+        let labels = [t("Local"), t("Remote"), t("Dynamic")];
+        for ((rect, label), kind) in geo.kinds.into_iter().zip(labels).zip(crate::ssh_forward_form::KINDS) {
+            button(g, rect, label, form.kind == kind, form.kind_focused() && form.kind == kind);
+        }
+
+        let labels = [t("Listening address"), t("Port"), t("Destination host"), t("Destination port")];
+        let mut ime = None;
+        for (i, (slot, label)) in geo.fields.into_iter().zip(labels).take(form.field_count()).enumerate() {
+            let field = &form.fields[i];
+            let focused = i == form.focus;
+            let label_r = Rect::new(slot.x, slot.y, slot.w, 19.0 * s);
+            let y = baseline(g, label_r, small);
+            g.text(label_r.x, y, label, small, theme.text_dim, label_r.w);
+            let r = Rect::new(slot.x, label_r.bottom() + 2.0 * s, slot.w, 31.0 * s).snap();
+            g.dl.round_rect(r, theme.surface, 5.0 * s);
+            g.dl.outline(r, if focused { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
+            let inner = r.inset(9.0 * s, 2.0 * s);
+            let y = baseline(g, inner, ui);
+            let text = field.text();
+            if focused {
+                let offset = text.char_indices().nth(field.cursor_position().1).map_or(text.len(), |(i, _)| i);
+                let head = g.measure(&text[..offset], ui);
+                let x = inner.x.min(inner.right() - head - 2.0 * line);
+                let first = g.dl.instances.len();
+                let selection = field.selection();
+                if !selection.is_empty() {
+                    let a = g.measure(&text[..selection.start], ui);
+                    let b = g.measure(&text[..selection.end], ui);
+                    g.dl.rect(Rect::new(x + a, inner.y, b - a, inner.h), theme.accent.alpha(0x52));
+                }
+                let width = g.measure(text, ui);
+                g.text(x, y, text, ui, theme.text, width + 1.0);
+                let caret = Rect::new(x + head + 1.0, inner.y + 4.0 * s, line, (inner.h - 8.0 * s).max(1.0)).snap();
+                g.dl.rect(caret, theme.accent);
+                g.dl.confine(first, inner);
+                ime = Some(caret);
+            } else {
+                g.text(inner.x, y, text, ui, theme.text, inner.w);
+            }
+        }
+
+        let can_save = self.can_save_forward(form.pane);
+        let box_r = Rect::new(geo.save.x, geo.save.y + (geo.save.h - 15.0 * s) * 0.5, 15.0 * s, 15.0 * s).snap();
+        let checked = can_save && form.save;
+        g.dl.round_rect(box_r, if checked { theme.accent } else { theme.surface }, 3.0 * s);
+        g.dl.outline(box_r, if checked || can_save && (form.focus == SAVE || geo.save.contains(mx, my)) { theme.accent } else { theme.overlay_border }, 3.0 * s, line);
+        if checked {
+            centered(g, box_r, "✓", small, theme.on_accent);
+        }
+        let y = baseline(g, geo.save, ui);
+        g.text(box_r.right() + 8.0 * s, y, t("Save to profile"), ui, if can_save { theme.text } else { theme.text_dim }, geo.save.w - 23.0 * s);
+
+        if let Some(message) = form.error.or_else(|| (!can_save).then(|| t("Available for editable SSH profiles"))) {
+            let y = baseline(g, geo.status, small);
+            let color = if form.error.is_some() { Color::rgb(if theme.dark { 0xFF9490 } else { 0xA52320 }) } else { theme.text_dim };
+            g.text(geo.status.x, y, message, small, color, geo.status.w);
+        }
+        button(g, geo.cancel, t("Cancel"), false, form.focus == CANCEL);
+        button(g, geo.add, t("Add"), true, form.focus == ADD);
+        ime
     }
 
     fn draw_ssh_auth<B: TextBackend>(&self, g: &mut Gfx<B>, pane: Rect, panel: &crate::ssh_auth::Panel, geo: crate::ssh_auth::Geometry, focused: bool, phase: Option<f32>) -> Rect {
@@ -3068,6 +3164,7 @@ impl App {
     }
 
     fn draw_overlay_content<B: TextBackend>(&self, g: &mut Gfx<B>, o: &Overlay, geo: &OverlayGeometry, now: Instant) {
+        let (mx, my) = self.mouse;
         let s = self.ui();
         let theme = self.theme;
         let radius = (8.0 * s).round();
@@ -3139,8 +3236,17 @@ impl App {
                 centered(g, tag_rect, label, tag, theme.text);
                 right = tag_rect.x - (8.0 * s).round();
             }
-            let label_w = g.measure(&pick.label, ui).min(right - x);
-            g.text(x, y, &pick.label, ui, theme.text, right - x);
+            let port_action = matches!(o.kind, OverlayKind::SshPorts(_)) && !pick.badge.is_empty();
+            if port_action {
+                let action = crate::ssh_toolbar::forward_action_rect(*r, s);
+                g.dl.round_rect(action, if action.contains(mx, my) { theme.button_hover } else { theme.surface }, 4.0 * s);
+                g.dl.outline(action, theme.overlay_border, 4.0 * s, s.round().max(1.0));
+                centered(g, action, &pick.badge, small, theme.text);
+                right = action.x - 8.0 * s;
+            }
+            let label_room = if port_action && !pick.hint.is_empty() { ((right - x) * 0.52).max(0.0) } else { (right - x).max(0.0) };
+            let label_w = g.measure(&pick.label, ui).min(label_room);
+            g.text(x, y, &pick.label, ui, theme.text, label_room);
             if !pick.hint.is_empty() && pick.hint != pick.label {
                 let hy = baseline(g, *r, small);
                 if profiles {
@@ -3148,6 +3254,9 @@ impl App {
                     if right - hx > 24.0 * s {
                         g.text(hx, hy, &pick.hint, small, theme.text_dim, right - hx);
                     }
+                } else if port_action {
+                    let hx = x + label_w + 9.0 * s;
+                    g.text(hx, hy, &pick.hint, small, theme.text_dim, (right - hx).max(0.0));
                 } else {
                     let hint_w = g.measure(&pick.hint, small).min(right - x);
                     g.text(right - hint_w, hy, &pick.hint, small, theme.text_dim, hint_w + 1.0);

@@ -115,7 +115,7 @@ fn add_text(rows: &mut Vec<Row>, text: &[char]) {
 impl App {
     pub fn ssh_event(&mut self, pane: PaneId, event: SshEvent) {
         if !self.panes.get(&pane).is_some_and(|pane| pane.exited.is_none()) { return; }
-        self.ssh_auth_paste = None;
+        if !matches!(event, SshEvent::Forwards(_)) { self.ssh_auth_paste = None; }
         let now = self.clock();
         match event {
             SshEvent::Challenge(challenge) => { self.ssh_auth.insert(pane, Panel::new(challenge, now)); }

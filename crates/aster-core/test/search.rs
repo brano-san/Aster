@@ -92,3 +92,47 @@ fn dense_matches_draw_marks_along_the_right_edge() {
     let edge = g.dl.instances.iter().filter(|i| i.rect[0] >= pane.x + pane.w - 7.0 && i.rect[2] <= 7.0 && i.rect[3] <= 5.0).count();
     assert!(edge > 50, "marks drawn: {edge}, count {}", a.search.as_ref().unwrap().count);
 }
+
+#[test]
+fn ruler_maps_rows_and_merges_adjacent_marks_in_favor_of_current() {
+    use crate::search::{ruler_marks, ruler_row, ruler_track, ruler_viewport};
+    use aster_gfx::render::Rect;
+    let pane = Rect::new(20.0, 50.0, 180.0, 100.0);
+    let track = ruler_track(pane, 1.5);
+    assert_eq!(track, Rect::new(191.0, 50.0, 9.0, 100.0));
+    assert_eq!(ruler_row(track, 50.0, 200), Some(0));
+    assert_eq!(ruler_row(track, 100.0, 200), Some(100));
+    assert_eq!(ruler_row(track, 149.99, 200), Some(199));
+    assert_eq!(ruler_row(track, 150.0, 200), None);
+    assert_eq!(ruler_row(track, 100.0, 0), None);
+    let marks = ruler_marks(track, &[0, 80, 81, 115, 199], Some(81), 200);
+    assert_eq!(marks.len(), 4);
+    assert_eq!(marks.iter().filter(|mark| mark.current).count(), 1);
+    assert_eq!(marks[1].rect.y, 90.0);
+    assert!(marks.iter().all(|mark| mark.rect.h == 2.0 && mark.rect.y >= track.y && mark.rect.bottom() <= track.bottom()));
+    assert_eq!(ruler_viewport(track, 50, 100, 200), Rect::new(191.0, 75.0, 9.0, 50.0));
+    let small = ruler_viewport(track, 99_960, 40, 100_000);
+    assert_eq!(small.bottom(), track.bottom());
+    assert!(small.h >= 2.0);
+}
+
+#[test]
+fn ruler_click_centers_the_clicked_row_and_selects_the_nearest_match() {
+    let (mut app, mut gfx) = ready();
+    let term = app.focused_terminal().unwrap().clone();
+    term.lock().feed("\r\n".repeat(150).as_bytes());
+    app.open_search();
+    app.search_paste("error");
+    app.frame(&mut gfx, false);
+    let track = app.search_ruler_rect().unwrap();
+    let before = term.lock().search_overview().unwrap();
+    let row = before.total_lines / 2;
+    let y = track.y + (row as f32 + 0.5) / before.total_lines as f32 * track.h;
+    app.on_event(Event::MouseDown { x: track.x + 1.0, y, button: MouseButton::Left, clicks: 1 });
+    let after = term.lock().search_overview().unwrap();
+    assert_eq!(after.viewport_start + after.viewport_rows / 2, row);
+    assert_eq!(after.current_row, after.rows.last().copied());
+    assert!(app.take_effects().iter().all(|e| !matches!(e, Effect::Write { .. })));
+    app.close_search();
+    assert!(app.search_ruler_rect().is_none());
+}

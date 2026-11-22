@@ -977,6 +977,11 @@ impl<P: Platform> Handler<P> {
                     let _ = input.send(message);
                 }
             }
+            Effect::SshForward { pane, command } => {
+                if let Some(input) = self.remotes.get(&(id, pane)) {
+                    let _ = input.send(aster_ssh::console::Input::Forward(command));
+                }
+            }
             Effect::ImportSshIdentity { request, path } => {
                 let events = self.store_events.clone();
                 self.window_secrets(id).use_secret(SecretUse::ImportSshIdentity(path), move |result| {

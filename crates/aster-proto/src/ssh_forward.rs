@@ -46,8 +46,16 @@ pub enum Forward {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForwardStatus {
+    pub index: usize,
     pub forward: Forward,
     pub bound: Result<u32, String>,
+    pub stop_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Command {
+    AddForward(Forward),
+    StopForward(usize),
 }
 
 fn fields(value: &str) -> Result<Vec<String>, String> {

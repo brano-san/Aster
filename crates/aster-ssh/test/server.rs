@@ -27,8 +27,15 @@ struct Server {
     client_key: PublicKey,
     sessions: Vec<ChannelId>,
     channels: HashMap<ChannelId, Channel<Msg>>,
+    forwards: HashMap<(String, u32), tokio::task::JoinHandle<()>>,
     files: Option<PathBuf>,
     interactive: Option<u8>,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        for task in self.forwards.values() { task.abort(); }
+    }
 }
 
 impl server::Handler for Server {
@@ -111,7 +118,8 @@ impl server::Handler for Server {
         let Ok(listener) = tokio::net::TcpListener::bind((address.to_owned(), *port as u16)).await else { return Ok(false) };
         *port = listener.local_addr().map(|a| a.port() as u32).unwrap_or(*port);
         let (handle, address, bound) = (session.handle(), address.to_owned(), *port);
-        tokio::spawn(async move {
+        let key = (address.clone(), bound);
+        let task = tokio::spawn(async move {
             while let Ok((mut socket, peer)) = listener.accept().await {
                 let (handle, address) = (handle.clone(), address.clone());
                 tokio::spawn(async move {
@@ -122,6 +130,14 @@ impl server::Handler for Server {
                 });
             }
         });
+        self.forwards.insert(key, task);
+        Ok(true)
+    }
+
+    async fn cancel_tcpip_forward(&mut self, address: &str, port: u32, _: &mut Session) -> Result<bool, Self::Error> {
+        let Some(task) = self.forwards.remove(&(address.into(), port)) else { return Ok(false) };
+        task.abort();
+        let _ = task.await;
         Ok(true)
     }
 
@@ -213,7 +229,7 @@ fn serve_with(files: Option<PathBuf>, interactive: bool) -> (u16, Seen) {
             let client_key = PublicKey::from_openssh(CLIENT_PUB.trim()).unwrap();
             loop {
                 let (socket, _) = listener.accept().await.unwrap();
-                let handler = Server { seen: shared.clone(), client_key: client_key.clone(), sessions: Vec::new(), channels: HashMap::new(), files: files.clone(), interactive: interactive.then_some(0) };
+                let handler = Server { seen: shared.clone(), client_key: client_key.clone(), sessions: Vec::new(), channels: HashMap::new(), forwards: HashMap::new(), files: files.clone(), interactive: interactive.then_some(0) };
                 let config = config.clone();
                 tokio::spawn(async move {
                     if let Ok(running) = server::run_stream(config, socket, handler).await {

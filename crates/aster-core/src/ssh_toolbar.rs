@@ -1,10 +1,12 @@
-use crate::app::App;
-use crate::i18n::{t, tf};
+use crate::app::{App, Effect};
+use crate::i18n::{ssh_error, t, tf};
 use crate::input::{CursorIcon, MouseButton};
-use crate::overlay::{OverlayKind, Pick};
+use crate::overlay::{Overlay, OverlayKind, Pick};
 use crate::panes::PaneId;
 use aster_gfx::render::Rect;
-use aster_proto::ssh_forward::{Forward, ForwardStatus};
+use aster_proto::ssh_forward::{Command, Forward, ForwardStatus};
+
+const ADD_FORWARD: &str = "add";
 
 pub(crate) struct Toolbar {
     pub buttons: [Rect; 3],
@@ -79,19 +81,36 @@ impl App {
         if let Some(p) = self.panes.get_mut(&pane) {
             p.ssh_connecting = false;
         }
-        if self.overlay.as_ref().is_some_and(|overlay| overlay.kind == OverlayKind::SshPorts(pane)) {
-            let opened = self.overlay.as_ref().map(|overlay| overlay.opened_at);
-            self.open_overlay(OverlayKind::SshPorts(pane));
-            if let (Some(overlay), Some(opened)) = (self.overlay.as_mut(), opened) {
-                overlay.opened_at = opened;
+        if let Some(previous) = self.overlay.as_ref().filter(|overlay| overlay.kind == OverlayKind::SshPorts(pane)) {
+            let mut overlay = Overlay::new(previous.kind, self.ssh_forward_picks(pane));
+            overlay.opened_at = previous.opened_at;
+            overlay.set_query(&previous.query);
+            if let Some(value) = previous.selected_value() {
+                if let Some(at) = overlay.shown.iter().position(|(item, _)| overlay.items[*item].value == value) {
+                    overlay.select(at);
+                }
             }
+            self.overlay = Some(overlay);
         }
         self.dirty = true;
     }
 
+    pub(crate) fn choose_ssh_forward(&mut self, pane: PaneId, value: &str) {
+        if value == ADD_FORWARD {
+            return self.open_forward_form(pane);
+        }
+        if let Ok(index) = value.parse() {
+            if self.ssh_forwards.get(&pane).is_some_and(|rows| rows.iter().any(|status| status.index == index)) {
+                self.push(Effect::SshForward { pane, command: Command::StopForward(index) });
+            }
+        }
+    }
+
     pub(crate) fn ssh_forward_picks(&self, pane: PaneId) -> Vec<Pick> {
+        let Some(statuses) = self.ssh_forwards.get(&pane) else { return Vec::new() };
         let rules = self.panes.get(&pane).and_then(|p| p.profile.ssh_options.as_ref()).and_then(|options| options.forwards.as_deref()).unwrap_or_default();
-        self.ssh_forwards.get(&pane).into_iter().flatten().enumerate().map(|(i, status)| {
+        let add = Pick { label: t("Add forwarding…").into(), value: ADD_FORWARD.into(), ..Default::default() };
+        std::iter::once(add).chain(statuses.iter().map(|status| {
             let (kind, bind, port, destination) = match &status.forward {
                 Forward::Local { bind, port, host, host_port } => (t("Local forwarding"), bind, *port, Some(endpoint(host, u32::from(*host_port)))),
                 Forward::Remote { bind, port, host, host_port } => (t("Remote forwarding"), bind, *port, Some(endpoint(host, u32::from(*host_port)))),
@@ -103,13 +122,23 @@ impl App {
             let mut hint = description.map_or_else(|| kind.to_owned(), |text| format!("{kind} · {text}"));
             if let Err(reason) = &status.bound {
                 hint.push_str(" · ");
-                hint.push_str(&tf("Unavailable ({reason})", &[("reason", reason)]));
+                hint.push_str(&tf("Unavailable ({reason})", &[("reason", &ssh_error(reason))]));
             }
-            Pick { label, hint, value: i.to_string(), ..Default::default() }
-        }).collect()
+            if let Some(reason) = &status.stop_error {
+                hint.push_str(" · ");
+                hint.push_str(&tf("Could not stop forwarding ({reason})", &[("reason", &ssh_error(reason))]));
+            }
+            let badge = if status.bound.is_ok() { t("Stop") } else { t("Dismiss") };
+            Pick { label, hint, value: status.index.to_string(), badge: badge.into(), ..Default::default() }
+        })).collect()
     }
 }
 
-fn endpoint(host: &str, port: u32) -> String {
+pub(crate) fn endpoint(host: &str, port: u32) -> String {
     if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
+}
+
+pub(crate) fn forward_action_rect(row: Rect, scale: f32) -> Rect {
+    let w = (78.0 * scale).min(row.w * 0.36);
+    Rect::new(row.right() - w - 5.0 * scale, row.y + 3.0 * scale, w, (row.h - 6.0 * scale).max(0.0)).snap()
 }

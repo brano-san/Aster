@@ -1,6 +1,7 @@
 mod algorithms;
 pub use algorithms::catalog as algorithm_catalog;
 pub mod client;
+mod client_forwards;
 pub mod config;
 pub mod console;
 pub mod destination;

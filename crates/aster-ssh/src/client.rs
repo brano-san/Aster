@@ -1,3 +1,4 @@
+use crate::client_forwards::{ForwardWorker, LiveForwards};
 use crate::console::{Console, Input, InteractiveChallenge, SshEvent, InteractivePrompt};
 use crate::destination::{self, Destination};
 use aster_proto::quote::login_shell_in;
@@ -79,7 +80,8 @@ pub fn start_with_error_formatter(req: Request, format_error: fn(&str) -> String
     let (files_tx, files) = crossbeam_channel::unbounded();
     let (event_tx, events) = crossbeam_channel::unbounded();
     let mut console = Console::new(out_tx, in_rx, (req.cols, req.rows)).with_error_formatter(format_error);
-    console.interactive = req.interactive_panel.then_some(event_tx);
+    console.interactive = req.interactive_panel.then(|| event_tx.clone());
+    console.forwards = Some(event_tx);
     match runtime() {
         Some(rt) => {
             rt.spawn(async move {
@@ -110,21 +112,22 @@ fn runtime() -> Option<&'static tokio::runtime::Runtime> {
         .as_ref()
 }
 
+type RemoteTargets = HashMap<(String, u32), (String, u16)>;
+
 #[derive(Clone, Default)]
 struct Incoming {
-    tcp: Arc<std::sync::Mutex<HashMap<u32, (String, u16)>>>,
+    tcp: Arc<std::sync::Mutex<RemoteTargets>>,
     x11: crate::x11::Grants,
 }
 
-struct Conn {
+pub(super) struct Conn {
     handle: Mutex<Option<Handle<Client>>>,
     jump: Option<Arc<Conn>>,
     incoming: Incoming,
-    forwards: std::sync::Mutex<Vec<crate::forward::Running>>,
-    forward_status: std::sync::Mutex<Vec<ForwardStatus>>,
+    forwards: LiveForwards,
 }
 
-struct Tunnel(Weak<Conn>);
+pub(super) struct Tunnel(pub Weak<Conn>);
 
 impl crate::forward::Opener for Tunnel {
     fn open(&self, host: String, port: u16) -> crate::forward::Opened {
@@ -139,58 +142,20 @@ impl crate::forward::Opener for Tunnel {
     }
 }
 
-async fn start_forwards(conn: &Arc<Conn>, dest: &Destination, console: &Shared) {
-    use crate::forward::{Event, Forward};
+async fn start_forwards(conn: &Arc<Conn>, worker: &mut ForwardWorker, dest: &Destination, console: &Shared) {
+    use crate::forward::Forward;
     for e in &dest.forward_errors {
         console.lock().await.warn(&format!("Ignored {e}"));
     }
     for forward in &dest.forwards {
-        if let Forward::Remote { bind, port, host, host_port } = forward {
-            let asked = {
-                let guard = conn.handle.lock().await;
-                match guard.as_ref() {
-                    Some(h) => h.tcpip_forward(bind.clone(), *port as u32).await.map_err(|e| e.to_string()),
-                    None => Err("the connection is closed".into()),
-                }
-            };
-            let status = match asked {
-                Ok(got) => {
-                    let bound = if *port == 0 { got } else { *port as u32 };
-                    if let Ok(mut t) = conn.incoming.tcp.lock() {
-                        t.insert(bound, (host.clone(), *host_port));
-                    }
-                    console.lock().await.note(&format!("The server listens on {bind}:{bound} and forwards to {host}:{host_port}"));
-                    Ok(bound)
-                }
-                Err(e) => {
-                    console.lock().await.warn(&format!("The server refused to listen on {bind}:{port}: {e}"));
-                    Err(e)
-                }
-            };
-            conn.record_forward(ForwardStatus { forward: forward.clone(), bound: status });
-            continue;
-        }
-        let (events, mut seen) = tokio::sync::mpsc::unbounded_channel();
-        let running = crate::forward::start(forward.clone(), Arc::new(Tunnel(Arc::downgrade(conn))), events).await;
-        while let Ok(event) = seen.try_recv() {
-            match event {
-                Event::Listening { forward, port } => {
-                    match &forward {
-                        Forward::Local { bind, host, host_port, .. } => console.lock().await.note(&format!("Forwarding {bind}:{port} to {host}:{host_port}")),
-                        Forward::Dynamic { bind, .. } => console.lock().await.note(&format!("SOCKS proxy on {bind}:{port}")),
-                        Forward::Remote { .. } => {}
-                    }
-                    conn.record_forward(ForwardStatus { forward, bound: Ok(u32::from(port)) });
-                }
-                Event::Failed { forward, error } => {
-                    console.lock().await.warn(&format!("Cannot forward {}: {error}", describe(&forward)));
-                    conn.record_forward(ForwardStatus { forward, bound: Err(error) });
-                }
-                _ => {}
-            }
-        }
-        if let Ok(mut f) = conn.forwards.lock() {
-            f.push(running);
+        let ForwardStatus { forward, bound, .. } = worker.add(conn, forward.clone()).await;
+        let console = console.lock().await;
+        match (&forward, bound) {
+            (Forward::Remote { bind, host, host_port, .. }, Ok(port)) => console.note(&format!("The server listens on {bind}:{port} and forwards to {host}:{host_port}")),
+            (Forward::Remote { bind, port, .. }, Err(error)) => console.warn(&format!("The server refused to listen on {bind}:{port}: {error}")),
+            (Forward::Local { bind, host, host_port, .. }, Ok(port)) => console.note(&format!("Forwarding {bind}:{port} to {host}:{host_port}")),
+            (Forward::Dynamic { bind, .. }, Ok(port)) => console.note(&format!("SOCKS proxy on {bind}:{port}")),
+            (_, Err(error)) => console.warn(&format!("Cannot forward {}: {error}", describe(&forward))),
         }
     }
 }
@@ -219,16 +184,25 @@ impl Drop for Conn {
 }
 
 impl Conn {
-    fn new(handle: Handle<Client>, jump: Option<Arc<Self>>, incoming: Incoming) -> Arc<Self> {
-        Arc::new(Self { handle: Mutex::new(Some(handle)), jump, incoming, forwards: std::sync::Mutex::new(Vec::new()), forward_status: std::sync::Mutex::new(Vec::new()) })
+    fn new(handle: Handle<Client>, jump: Option<Arc<Self>>, incoming: Incoming, forwards: LiveForwards) -> Arc<Self> {
+        Arc::new(Self { handle: Mutex::new(Some(handle)), jump, incoming, forwards })
     }
 
-    fn record_forward(&self, status: ForwardStatus) {
-        if let Ok(mut statuses) = self.forward_status.lock() { statuses.push(status); }
+    pub(super) async fn request_remote_forward(&self, bind: &str, port: u16, host: &str, host_port: u16) -> Result<u32, String> {
+        let guard = self.handle.lock().await;
+        let handle = guard.as_ref().ok_or("the connection is closed")?;
+        let got = handle.tcpip_forward(bind.to_owned(), u32::from(port)).await.map_err(|e| e.to_string())?;
+        let bound = if port == 0 { got } else { u32::from(port) };
+        self.incoming.tcp.lock().unwrap().insert((bind.into(), bound), (host.into(), host_port));
+        Ok(bound)
     }
 
-    fn active_forwards(&self) -> Vec<ForwardStatus> {
-        self.forward_status.lock().map(|statuses| statuses.clone()).unwrap_or_default()
+    pub(super) async fn cancel_remote_forward(&self, bind: &str, port: u32) -> Result<(), String> {
+        let guard = self.handle.lock().await;
+        let handle = guard.as_ref().ok_or("the connection is closed")?;
+        handle.cancel_tcpip_forward(bind.to_owned(), port).await.map_err(|e| e.to_string())?;
+        self.incoming.tcp.lock().unwrap().remove(&(bind.into(), port));
+        Ok(())
     }
 
     async fn open_session(&self) -> Result<russh::Channel<client::Msg>, String> {
@@ -360,7 +334,7 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
         }
         Err(e) => return Err(e),
     };
-    console.lock().await.forward_status(conn.active_forwards());
+    let mut forwards = conn.forwards.statuses.clone();
     let _x11 = if dest.x11 {
         request_x11(&mut channel, &conn.incoming.x11, req, dest.ready_timeout_ms, console).await?
     } else {
@@ -383,8 +357,10 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
     let mut files: Option<crate::sftp::Files> = None;
     let mut con = console.lock().await;
     let mut clear = req.clear_after_connect;
+    con.forward_status(forwards.borrow_and_update().clone());
     loop {
         tokio::select! {
+            Ok(()) = forwards.changed() => con.forward_status(forwards.borrow_and_update().clone()),
             msg = rx.wait() => match msg {
                 Some(ChannelMsg::Failure) => return Err(if remembered { "The server refused to start the remote shell in the remembered folder." } else { "The server refused to start the remote shell." }.into()),
                 Some(ChannelMsg::Success) if std::mem::take(&mut clear) => con.write(b"\x1b[H\x1b[2J".to_vec()),
@@ -421,6 +397,7 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
                     }
                 }
                 Some(Input::Interactive(_)) => {}
+                Some(Input::Forward(command)) => { let _ = conn.forwards.commands.send(command); }
                 Some(Input::Close) | None => {
                     let _ = tx.close().await;
                     return Ok(0);
@@ -529,10 +506,12 @@ fn open<'a>(dest: Destination, req: &'a Request, console: &'a Shared, depth: usi
         let auth = authenticate(&mut handle, &dest, req, console).await;
         console.lock().await.finish_interactive();
         auth?;
-        let conn = Conn::new(handle, jump, incoming);
-        if depth == 0 && (!dest.forwards.is_empty() || !dest.forward_errors.is_empty()) {
-            start_forwards(&conn, &dest, console).await;
+        let (forwards, mut worker) = ForwardWorker::new();
+        let conn = Conn::new(handle, jump, incoming, forwards);
+        if depth == 0 {
+            start_forwards(&conn, &mut worker, &dest, console).await;
         }
+        tokio::spawn(worker.run(Arc::downgrade(&conn)));
         Ok(conn)
     })
 }
@@ -657,8 +636,14 @@ impl client::Handler for Client {
         Ok(())
     }
 
-    async fn server_channel_open_forwarded_tcpip(&mut self, channel: russh::Channel<client::Msg>, _address: &str, port: u32, _from: &str, _from_port: u32, reply: client::ChannelOpenHandle, _session: &mut client::Session) -> Result<(), Self::Error> {
-        let target = self.incoming.tcp.lock().ok().and_then(|t| t.get(&port).cloned());
+    async fn server_channel_open_forwarded_tcpip(&mut self, channel: russh::Channel<client::Msg>, address: &str, port: u32, _from: &str, _from_port: u32, reply: client::ChannelOpenHandle, _session: &mut client::Session) -> Result<(), Self::Error> {
+        let target = self.incoming.tcp.lock().ok().and_then(|targets| {
+            targets.get(&(address.to_owned(), port)).or_else(|| {
+                let ip = address.parse::<std::net::IpAddr>().ok()?;
+                targets.get(&(if ip.is_ipv4() { "0.0.0.0" } else { "::" }.into(), port))
+                    .or_else(|| ip.is_loopback().then(|| targets.get(&("localhost".into(), port))).flatten())
+            }).cloned()
+        });
         let Some((host, host_port)) = target else { return Ok(()) };
         let Ok(mut local) = tokio::net::TcpStream::connect((host, host_port)).await else { return Ok(()) };
         reply.accept().await;

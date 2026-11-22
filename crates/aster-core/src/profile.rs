@@ -121,7 +121,10 @@ fn fill<T: Clone>(value: &mut Option<T>, fallback: &Option<T>) {
 fn inherit_ssh(options: &mut SshOptions, defaults: &SshOptions) {
     fill(&mut options.proxy, &defaults.proxy);
     fill(&mut options.auth, &defaults.auth);
-    fill(&mut options.forwards, &defaults.forwards);
+    if options.forwards.is_none() && defaults.forwards.is_some() {
+        options.forwards.clone_from(&defaults.forwards);
+        options.inherit_forwards = defaults.inherit_forwards;
+    }
     fill(&mut options.forward_agent, &defaults.forward_agent);
     fill(&mut options.reuse_session, &defaults.reuse_session);
     fill(&mut options.user, &defaults.user);
