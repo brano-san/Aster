@@ -44,3 +44,18 @@ fn entirely_unsupported_list_rejects_connection() {
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("unknown"));
 }
+
+#[test]
+fn algorithm_catalog_defaults_match_negotiation_and_hide_protocol_markers() {
+    let catalog = catalog();
+    let (selected, warnings) = preferred(&catalog.defaults);
+    let selected = selected.unwrap();
+    assert!(warnings.is_empty());
+    assert_eq!(exchange_names(selected.kex.iter()), exchange_names(Preferred::DEFAULT.kex.iter()));
+    assert_eq!(selected.cipher, Preferred::DEFAULT.cipher);
+    assert_eq!(selected.mac, Preferred::DEFAULT.mac);
+    assert_eq!(selected.key, Preferred::DEFAULT.key);
+    assert_eq!(selected.compression, Preferred::DEFAULT.compression);
+    assert!(!catalog.supported.kex.iter().any(|name| name.starts_with("ext-info") || name.starts_with("kex-strict")));
+    assert!(!catalog.supported.cipher.iter().any(|name| name == "clear" || name == "none"));
+}

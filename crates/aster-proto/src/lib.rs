@@ -7,6 +7,7 @@ pub mod quote;
 pub mod scripts;
 pub mod serial;
 pub mod ssh;
+pub mod ssh_forward;
 pub mod stream;
 pub mod telnet;
 mod utf8;

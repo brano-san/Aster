@@ -74,6 +74,24 @@ fn the_window_close_button_asks_and_the_setting_turns_it_off() {
 }
 
 #[test]
+fn active_ssh_connections_have_their_own_close_confirmation() {
+    let mut a = app(1);
+    let mut config = Config::default();
+    config.terminal.confirm_close = false;
+    a.set_config(config.clone());
+    a.open_tab(Profile { name: "Remote profile".into(), ssh: Some("ann@host".into()), ..Profile::default() });
+    a.take_effects();
+    a.run(Action::CloseTab);
+    assert_eq!(a.tabs.len(), 2);
+    assert!(a.close_confirm().is_some_and(|confirm| confirm.ssh));
+    key(&mut a, Key::Escape);
+    config.ssh.warn_on_close = false;
+    a.set_config(config);
+    a.run(Action::CloseTab);
+    assert_eq!(a.tabs.len(), 1);
+}
+
+#[test]
 fn ending_the_session_never_asks() {
     let mut a = app(1);
     busy(&mut a, 0);

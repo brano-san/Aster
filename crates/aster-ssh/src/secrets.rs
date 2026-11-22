@@ -3,6 +3,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use russh::keys::{HashAlg, PrivateKey, PublicKey};
 use russh::keys::ssh_encoding::base64::{Base64Unpadded, Encoding};
+pub use aster_proto::ssh::PRIVATE_KEY_KIND;
+use aster_proto::ssh::VAULT_IDENTITY_PREFIX;
 
 pub trait Secrets: Send + Sync {
     fn get(&self, key: &str) -> Option<String>;
@@ -12,6 +14,8 @@ pub trait Secrets: Send + Sync {
     fn key_file(&self, fingerprint_or_label: &str) -> Option<String> {
         self.get(&key_file_key(fingerprint_or_label))
     }
+
+    fn private_key(&self, _id: &str) -> Option<String> { None }
 }
 
 #[derive(Default)]
@@ -33,6 +37,20 @@ impl Secrets for Memory {
             v.remove(key);
         }
     }
+
+    fn private_key(&self, id: &str) -> Option<String> {
+        self.get(&format!("{VAULT_IDENTITY_PREFIX}{id}"))
+    }
+}
+
+pub fn private_key_id(name: &str, encoded: &str) -> Option<String> {
+    match russh::keys::decode_secret_key(encoded, None) {
+        Ok(_) | Err(russh::keys::Error::KeyIsEncrypted) => {}
+        Err(_) if encoded.trim_start().starts_with("-----BEGIN ENCRYPTED PRIVATE KEY-----") => {}
+        Err(_) => return None,
+    }
+    let digest = Base64Unpadded::encode_string(&HashAlg::Sha256.digest(encoded.as_bytes()));
+    Some(format!("{name}:{digest}"))
 }
 
 pub fn password_key(user: &str, host: &str, port: u16) -> String {

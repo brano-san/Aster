@@ -9,6 +9,7 @@ use russh::server::{self, Auth, Msg, Session};
 use russh::{Channel, ChannelId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use std::borrow::Cow;
 
 pub const HOST_KEY: &str = include_str!("keys/host");
 pub const CLIENT_KEY: &str = include_str!("keys/client");
@@ -27,6 +28,7 @@ struct Server {
     sessions: Vec<ChannelId>,
     channels: HashMap<ChannelId, Channel<Msg>>,
     files: Option<PathBuf>,
+    interactive: Option<u8>,
 }
 
 impl server::Handler for Server {
@@ -34,6 +36,24 @@ impl server::Handler for Server {
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
         Ok(if user == "ann" && password == "secret" { Auth::Accept } else { Auth::reject() })
+    }
+
+    async fn auth_keyboard_interactive<'a>(&'a mut self, user: &str, _: &str, response: Option<server::Response<'a>>) -> Result<Auth, Self::Error> {
+        let Some(round) = self.interactive.as_mut().filter(|_| user == "ann") else { return Ok(Auth::reject()) };
+        let responses = response.map(|answers| answers.collect::<Vec<_>>());
+        Ok(match (*round, responses.as_deref()) {
+            (0, None) => Auth::Partial {
+                name: "Sign in to the SSH server".into(), instructions: "See https://example.test/device for instructions.".into(),
+                prompts: vec![(Cow::Borrowed("Account label"), true), (Cow::Borrowed("Password"), false)].into(),
+            },
+            (0, Some([account, password])) if account.as_ref() == b"office" && password.as_ref() == b"secret" => {
+                *round = 1;
+                Auth::Partial { name: "Verification".into(), instructions: "Enter the verification code.".into(),
+                    prompts: vec![(Cow::Borrowed("Code"), false)].into() }
+            }
+            (1, Some([code])) if code.as_ref() == b"123456" => Auth::Accept,
+            _ => Auth::reject(),
+        })
     }
 
     async fn auth_publickey(&mut self, user: &str, key: server::VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
@@ -168,6 +188,14 @@ pub fn serve() -> (u16, Seen) {
 }
 
 pub fn serve_files(files: Option<PathBuf>) -> (u16, Seen) {
+    serve_with(files, false)
+}
+
+pub fn serve_interactive() -> (u16, Seen) {
+    serve_with(None, true)
+}
+
+fn serve_with(files: Option<PathBuf>, interactive: bool) -> (u16, Seen) {
     let seen = Seen::default();
     let shared = seen.clone();
     let (port_tx, port_rx) = std::sync::mpsc::channel();
@@ -185,7 +213,7 @@ pub fn serve_files(files: Option<PathBuf>) -> (u16, Seen) {
             let client_key = PublicKey::from_openssh(CLIENT_PUB.trim()).unwrap();
             loop {
                 let (socket, _) = listener.accept().await.unwrap();
-                let handler = Server { seen: shared.clone(), client_key: client_key.clone(), sessions: Vec::new(), channels: HashMap::new(), files: files.clone() };
+                let handler = Server { seen: shared.clone(), client_key: client_key.clone(), sessions: Vec::new(), channels: HashMap::new(), files: files.clone(), interactive: interactive.then_some(0) };
                 let config = config.clone();
                 tokio::spawn(async move {
                     if let Ok(running) = server::run_stream(config, socket, handler).await {

@@ -56,3 +56,23 @@ fn service_lines_reset_each_line_and_escape_terminal_controls() {
     c.error("bad\x1b[2J");
     assert_eq!(shown(&out), "\x1b[2mone\x1b[0m\r\n\x1b[2mtwo\x1b[0m\r\n\x1b[33mwarning\x1b[0m\r\n\x1b[31mbad[2J\x1b[0m\r\n");
 }
+
+#[test]
+fn interactive_rounds_reject_stale_replies_and_keep_answers_out_of_the_terminal() {
+    let (mut c, out, tx) = console();
+    let (events, rx) = crossbeam_channel::unbounded();
+    c.interactive = Some(events);
+    for (id, echo) in [(10, true), (11, false)] {
+        tx.send(Input::Interactive(InteractiveAnswer { id: id - 1, answers: Some(vec!["stale".into()]), remember: false })).unwrap();
+        tx.send(Input::Interactive(InteractiveAnswer { id, answers: Some(vec!["response".into()]), remember: !echo })).unwrap();
+        let round = InteractiveChallenge { id, name: "Sign in".into(), instructions: "Follow the prompts".into(),
+            prompts: vec![InteractivePrompt { label: "Prompt".into(), echo }], remember: (!echo).then_some(0) };
+        let result = block(c.ask_interactive(round.clone())).unwrap();
+        assert_eq!(result.answers.unwrap(), ["response"]);
+        assert_eq!(result.remember, !echo);
+        assert_eq!(rx.try_recv().unwrap(), SshEvent::Challenge(round));
+    }
+    c.finish_interactive();
+    assert_eq!(rx.try_recv().unwrap(), SshEvent::Finished);
+    assert_eq!(shown(&out), "");
+}

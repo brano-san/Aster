@@ -126,6 +126,25 @@ fn an_encrypted_key_from_the_config_logs_in_after_its_passphrase() {
 }
 
 #[test]
+fn a_private_key_from_the_vault_logs_in_without_a_key_file() {
+    let (port, _) = serve();
+    let dir = temp_ssh_dir();
+    let store = Arc::new(crate::secrets::Memory::default());
+    crate::secrets::Secrets::set(store.as_ref(), "vault:test-key", CLIENT_KEY);
+    let mut req = request(format!("ann@127.0.0.1:{port}"), dir);
+    req.profile.identity_files = Some(vec!["vault:test-key".into()]);
+    req.profile.auth = Some(SshAuth::Key);
+    req.secrets = Some(store);
+    let mut pane = Pane { conn: start(req), seen: String::new() };
+    pane.wait_for("(yes/no)? ");
+    pane.send("yes\r");
+    pane.wait_for("Enter passphrase for key");
+    pane.send("pw\r");
+    pane.wait_for("welcome");
+    assert!(!pane.seen.contains("password:"));
+}
+
+#[test]
 fn a_changed_host_key_is_refused_with_a_warning() {
     let (port, _) = serve();
     let dir = temp_ssh_dir();
@@ -134,6 +153,74 @@ fn a_changed_host_key_is_refused_with_a_warning() {
     pane.wait_for("has changed");
     assert_eq!(pane.exit(), FAILED);
     assert!(!pane.seen.contains("password"));
+}
+
+#[test]
+fn disabling_host_key_checks_does_not_write_a_known_hosts_entry() {
+    let (port, _) = serve();
+    let dir = temp_ssh_dir();
+    let mut req = request(format!("ann@127.0.0.1:{port}"), dir.clone());
+    req.verify_host_keys = false;
+    let mut pane = Pane { conn: start(req), seen: String::new() };
+    pane.wait_for("password: ");
+    assert!(!pane.seen.contains("(yes/no)?"));
+    pane.send("secret\r");
+    pane.wait_for("welcome");
+    assert!(!dir.join("known_hosts").exists());
+}
+
+#[test]
+fn interactive_login_stores_only_the_password_after_both_steps_succeed() {
+    use crate::console::InteractiveAnswer;
+    use crate::secrets::Secrets;
+    let (port, _) = serve_interactive();
+    let store = Arc::new(crate::secrets::Memory::default());
+    let mut req = request(format!("ann@127.0.0.1:{port}"), temp_ssh_dir());
+    req.verify_host_keys = false;
+    req.profile.auth = Some(SshAuth::Interactive);
+    req.interactive_panel = true;
+    req.remember = true;
+    req.secrets = Some(store.clone());
+    let mut pane = Pane { conn: start(req), seen: String::new() };
+    let next = |pane: &Pane| pane.conn.events.recv_timeout(Duration::from_secs(10)).unwrap();
+    let SshEvent::Challenge(first) = next(&pane) else { panic!("first authentication step") };
+    assert_eq!(first.remember, Some(1));
+    pane.conn.input.send(Input::Interactive(InteractiveAnswer { id: first.id, answers: Some(vec!["office".into(), "secret".into()]), remember: true })).unwrap();
+    let SshEvent::Challenge(second) = next(&pane) else { panic!("second authentication step") };
+    assert_ne!(second.id, first.id);
+    assert_eq!(second.remember, None);
+    let key = crate::secrets::password_key("ann", "127.0.0.1", port);
+    assert!(store.get(&key).is_none());
+    pane.conn.input.send(Input::Interactive(InteractiveAnswer { id: second.id, answers: Some(vec!["123456".into()]), remember: false })).unwrap();
+    assert_eq!(next(&pane), SshEvent::Finished);
+    pane.wait_for("welcome");
+    assert_eq!(store.get(&key).as_deref(), Some("secret"));
+    assert!(!pane.seen.contains("123456"));
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires the Windows application and an explicit capture path"]
+fn captures_the_interactive_panel_with_a_local_server() {
+    let exe = std::env::var_os("ASTER_SSH_CAPTURE_EXE").expect("application path");
+    let png = PathBuf::from(std::env::var_os("ASTER_CAPTURE").expect("capture path"));
+    let (port, _) = serve_interactive();
+    let appdata = temp_ssh_dir();
+    std::fs::create_dir(appdata.join("Aster")).unwrap();
+    let config = format!("[terminal]\nprofile = \"custom:capture\"\n[appearance]\nlanguage = \"en\"\n[ssh]\nverify-host-keys = false\nwarn-on-close = false\n[[profiles]]\nid = \"custom:capture\"\nname = \"SSH Capture\"\nssh = \"ann@127.0.0.1:{port}\"\n[profiles.ssh-options]\nauth = \"interactive\"\nreuse-session = false\n[[profiles.ssh-options.forwards]]\nkind = \"dynamic\"\nlisten = \"127.0.0.1:0\"\ndescription = \"Local proxy\"\n");
+    std::fs::write(appdata.join("Aster/config.toml"), config).unwrap();
+    let capture = |path: &std::path::Path, keys: &str, ms: &str| {
+        let exit = std::process::Command::new(&exe).env("APPDATA", &appdata).env("ASTER_CAPTURE", path)
+            .env("ASTER_CAPTURE_SIZE", "1100,700").env("ASTER_CAPTURE_MS", ms).env("ASTER_CAPTURE_KEYS", keys).status().unwrap();
+        assert!(exit.success() && path.is_file());
+    };
+    capture(&png, "Wait;Wait;'office;Tab;'secret;Tab;Space", "7000");
+    if let Some(path) = std::env::var_os("ASTER_SSH_CAPTURE_PORTS") {
+        capture(&PathBuf::from(path), "Wait;Wait;'office;Tab;'secret;Enter;Wait;'123456;Enter;Wait;Click@1045,50", "10500");
+    }
+    if let Some(path) = std::env::var_os("ASTER_SSH_CAPTURE_RECONNECT") {
+        capture(&PathBuf::from(path), "Wait;Wait;'office;Tab;'secret;Enter;Wait;'123456;Enter;Wait;Click@900,50;Wait", "10500");
+    }
 }
 
 #[test]
@@ -178,6 +265,40 @@ fn a_jump_host_tunnels_to_the_target_and_each_hop_authenticates() {
     pane.send("secret\r");
     pane.wait_for("welcome");
     assert_eq!(jump_seen.tunnels.lock().unwrap().as_slice(), [format!("127.0.0.1:{target_port}")]);
+    pane.send("exit\r");
+    assert_eq!(pane.exit(), 7);
+}
+
+#[test]
+fn nested_jump_profiles_use_their_own_destinations_and_authentication() {
+    use aster_proto::ssh::{SshAuth, SshOptions, SshProxy};
+    let (outer_port, outer_seen) = serve();
+    let (inner_port, inner_seen) = serve();
+    let (target_port, _) = serve();
+    let dir = temp_ssh_dir();
+    let mut req = request(format!("ann@127.0.0.1:{target_port}"), dir);
+    req.profile = SshOptions { proxy: Some(SshProxy::Jump { profile: "inner".into() }), auth: Some(SshAuth::Password), ..Default::default() };
+    req.jump_profiles = Arc::new([
+        ("inner".into(), (format!("127.0.0.1:{inner_port}"), SshOptions {
+            user: Some("ann".into()), auth: Some(SshAuth::Password), proxy: Some(SshProxy::Jump { profile: "outer".into() }), ..Default::default()
+        })),
+        ("outer".into(), (format!("127.0.0.1:{outer_port}"), SshOptions {
+            user: Some("ann".into()), auth: Some(SshAuth::Password), ..Default::default()
+        })),
+    ].into());
+    let mut pane = Pane { conn: start(req), seen: String::new() };
+    for port in [outer_port, inner_port, target_port] {
+        pane.wait_for(&format!("'[127.0.0.1]:{port}'"));
+        pane.send("yes\r");
+        pane.seen.clear();
+        pane.wait_for("password: ");
+        assert!(!pane.seen.contains("Keyboard-interactive"));
+        pane.send("secret\r");
+        pane.seen.clear();
+    }
+    pane.wait_for("welcome");
+    assert_eq!(*outer_seen.tunnels.lock().unwrap(), [format!("127.0.0.1:{inner_port}")]);
+    assert_eq!(*inner_seen.tunnels.lock().unwrap(), [format!("127.0.0.1:{target_port}")]);
     pane.send("exit\r");
     assert_eq!(pane.exit(), 7);
 }
@@ -239,6 +360,30 @@ fn unshared_tabs_each_log_in() {
     assert!(first.seen.contains("X11 forwarding enabled."));
     let mut second = connect_to(port, dir);
     second.wait_for("password: ");
+}
+
+#[test]
+fn reuse_session_profile_option_overrides_the_global_value() {
+    let (port, _) = serve();
+    let dir = temp_ssh_dir();
+    let mut req = request(format!("ann@127.0.0.1:{port}"), dir);
+    req.share = false;
+    req.profile.reuse_session = Some(true);
+    let mut first = Pane { conn: start(req.clone()), seen: String::new() };
+    first.wait_for("(yes/no)? ");
+    first.send("yes\r");
+    first.wait_for("password: ");
+    first.send("secret\r");
+    first.wait_for("welcome");
+
+    let mut another = Pane { conn: start(req.clone()), seen: String::new() };
+    another.wait_for("welcome");
+    assert!(!another.seen.contains("password"));
+
+    req.share = true;
+    req.profile.reuse_session = Some(false);
+    let mut dedicated = Pane { conn: start(req), seen: String::new() };
+    dedicated.wait_for("password: ");
 }
 
 fn remembering(port: u16, dir: PathBuf, secrets: Arc<crate::secrets::Memory>) -> Pane {
@@ -429,4 +574,31 @@ fn forwards_from_the_config_start_with_the_connection_and_carry_data() {
     let remote = port_after(&pane.seen, "The server listens on 127.0.0.1:");
     let mut s = std::net::TcpStream::connect(("127.0.0.1", remote)).unwrap();
     assert_eq!(round_trip(&mut s, b"from the server side"), b"from the server side");
+}
+
+#[test]
+fn a_profile_forward_uses_the_shell_connection_and_carries_data() {
+    use aster_proto::ssh_forward::{ForwardKind, ForwardRule};
+    let (port, seen) = serve();
+    let echo = echo_server();
+    let dir = temp_ssh_dir();
+    std::fs::write(dir.join("config"), "Host *\n  LocalForward nonsense\n").unwrap();
+    let mut req = request(format!("ann@127.0.0.1:{port}"), dir);
+    req.interactive_panel = true;
+    req.profile.forwards = Some(vec![ForwardRule {
+        kind: ForwardKind::Local, listen: "127.0.0.1:0".into(), destination: Some(format!("127.0.0.1:{echo}")), description: "Local test".into(),
+    }]);
+    let mut pane = Pane { conn: start(req), seen: String::new() };
+    pane.wait_for("(yes/no)? ");
+    pane.send("yes\r");
+    pane.wait_for("password: ");
+    pane.send("secret\r");
+    pane.wait_for("welcome");
+    assert!(!pane.seen.contains("Ignored local forward"));
+    let local = port_after(&pane.seen, "Forwarding 127.0.0.1:");
+    let mut events = pane.conn.events.try_iter();
+    assert!(events.any(|event| matches!(event, SshEvent::Forwards(forwards) if forwards.len() == 1 && forwards[0].bound == Ok(u32::from(local)))));
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", local)).unwrap();
+    assert_eq!(round_trip(&mut s, b"profile forward"), b"profile forward");
+    assert_eq!(*seen.tunnels.lock().unwrap(), [format!("127.0.0.1:{echo}")]);
 }

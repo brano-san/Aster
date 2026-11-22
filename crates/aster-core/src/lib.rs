@@ -32,6 +32,8 @@ pub mod settings;
 mod settings_colors;
 pub mod vault_settings;
 pub mod ssh;
+mod ssh_auth;
+mod ssh_toolbar;
 mod start;
 pub mod sudo;
 pub mod tabs;

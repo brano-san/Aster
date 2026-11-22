@@ -20,7 +20,8 @@ impl App {
         let shown = self.panes.get(&pane).is_some_and(|p| {
             self.config.appearance.pane_titles || p.name.is_some() || self.pane_rename.as_ref().is_some_and(|edit| edit.pane == pane)
         });
-        let height = if shown { (24.0 * self.ui()).round().min((rect.h / 2.0).floor()) } else { 0.0 };
+        let base = if self.ssh_toolbar_visible(pane, rect) { 30.0 } else if shown { 24.0 } else { 0.0 };
+        let height = (base * self.ui()).round().min((rect.h / 2.0).floor());
         Rect::new(rect.x, rect.y, rect.w, height)
     }
 
@@ -77,6 +78,10 @@ impl App {
         let Some(old) = self.panes.get(&pane).filter(|_| self.focused_pane() == Some(pane)) else { return };
         let pid = old.pid.filter(|&pid| pid != 0 && old.exited.is_none() && self.config.terminal.confirm_close);
         self.pane_profile_probe = None;
+        if self.config.ssh.warn_on_close && old.exited.is_none() && old.profile.ssh.is_some() {
+            self.request_close(CloseTarget::PaneProfile(pane, profile));
+            return;
+        }
         if let Some(pid) = pid {
             let request = command_probe_id();
             self.pane_profile_probe = Some(ProfileProbe { request, pane, profile });
@@ -96,7 +101,7 @@ impl App {
         } else {
             self.menu = None;
             self.commit_pane_rename();
-            self.close_confirm = Some(CloseConfirm { target: CloseTarget::PaneProfile(probe.pane, probe.profile), programs: Vec::new(), button: 0 });
+            self.close_confirm = Some(CloseConfirm { target: CloseTarget::PaneProfile(probe.pane, probe.profile), programs: Vec::new(), ssh: false, button: 0 });
             self.dirty = true;
         }
         true

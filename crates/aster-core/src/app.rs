@@ -122,6 +122,10 @@ pub enum Effect {
     CheckSecret { pane: PaneId, key: String },
     FillSecret { pane: PaneId, key: String },
     SaveSecret { key: String, value: String },
+    SshPassword { request: u64, destination: String, options: Box<crate::profile::SshOptions>, value: Option<String> },
+    BrowseSshKeys { request: u64, directory: Option<std::path::PathBuf>, import: bool },
+    SshInteractive { pane: PaneId, answer: aster_proto::ssh::InteractiveAnswer },
+    ImportSshIdentity { request: u64, path: std::path::PathBuf },
     VaultCreate { passphrase: String },
     VaultUnlock { passphrase: String },
     VaultLock,
@@ -244,6 +248,11 @@ pub struct App {
     pub(crate) vault_prompt: Option<crate::vault_settings::VaultDialog>,
     pub(crate) vault: crate::settings::VaultView,
     pub(crate) vault_input_id: u64,
+    pub(crate) ssh_editor_request: u64,
+    pub(crate) ssh_auth: BTreeMap<PaneId, crate::ssh_auth::Panel>,
+    pub(crate) ssh_forwards: BTreeMap<PaneId, Vec<aster_proto::ssh_forward::ForwardStatus>>,
+    pub(crate) ssh_auth_paste: Option<(u64, PaneId, u64, usize)>,
+    pub(crate) ssh_algorithm_catalog: aster_proto::ssh::AlgorithmCatalog,
     pub(crate) menu: Option<crate::menu::Menu>,
     pub(crate) rename: Option<crate::tabs::Rename>,
     pub(crate) pane_rename: Option<crate::pane_header::Rename>,
@@ -308,6 +317,11 @@ impl App {
         let mut app = App {
             vault: crate::settings::VaultView { configured: !config.vault.sealed.is_empty(), ..Default::default() },
             vault_input_id: 0,
+            ssh_editor_request: 0,
+            ssh_auth: BTreeMap::new(),
+            ssh_forwards: BTreeMap::new(),
+            ssh_auth_paste: None,
+            ssh_algorithm_catalog: Default::default(),
             config,
             profiles,
             detected,
@@ -550,6 +564,10 @@ impl App {
 
     pub fn set_ssh(&mut self, command: Option<String>) {
         self.ssh = command;
+    }
+
+    pub fn set_ssh_algorithm_catalog(&mut self, catalog: aster_proto::ssh::AlgorithmCatalog) {
+        self.ssh_algorithm_catalog = catalog;
     }
 
     pub fn profiles(&self) -> &[Profile] {
@@ -873,6 +891,10 @@ impl App {
         }
         self.offers.remove(&pane);
         self.prompts.remove(&pane);
+        self.ssh_auth.remove(&pane);
+        self.ssh_forwards.remove(&pane);
+        self.ssh_auth_paste.take_if(|(_, target, _, _)| *target == pane);
+        self.overlay.take_if(|overlay| overlay.kind == OverlayKind::SshPorts(pane));
         if self.search.as_ref().is_some_and(|s| s.pane == pane) {
             self.search = None;
         }
@@ -953,6 +975,8 @@ impl App {
         let ids: Vec<PaneId> = self.panes.iter().filter(|(_, p)| p.exited.is_none()).map(|(id, _)| *id).collect();
         self.effects.extend(ids.into_iter().map(|pane| Effect::Kill { pane }));
         self.panes.clear();
+        self.ssh_auth.clear();
+        self.ssh_forwards.clear();
         self.tabs.clear();
     }
 
@@ -1124,7 +1148,8 @@ impl App {
             }
             return;
         }
-        if input == self.vault_input_id && self.settings.as_ref().is_some_and(|p| p.editing_passphrase()) {
+        if self.ssh_auth_pasted(input, &text) { return; }
+        if input == self.vault_input_id && self.settings.as_ref().is_some_and(|p| p.editing_passphrase() || p.editor.as_ref().is_some_and(|e| e.password_focused())) {
             self.settings_text(&text);
         }
     }
@@ -1176,6 +1201,7 @@ impl App {
         if self.rearranging() {
             return;
         }
+        if self.ssh_auth_active() { return; }
         if let Some(pane) = self.offered_pane() {
             if let Some((PaneTransfer::AwaitingFiles, p)) = self.offers.get_mut(&pane) {
                 p.push_str(text.lines().next().unwrap_or_default());
@@ -1283,7 +1309,7 @@ impl App {
         }
     }
 
-    fn focus_pane(&mut self, pane: PaneId) {
+    pub(crate) fn focus_pane(&mut self, pane: PaneId) {
         if let Some(tab) = self.tabs.get_mut(self.active) {
             if tab.root.contains(pane) && tab.focus != pane {
                 tab.focus = pane;
@@ -1516,6 +1542,8 @@ impl App {
                 self.dirty = true;
                 return;
             }
+            OverlayKind::SshKeys(_) => Vec::new(),
+            OverlayKind::SshPorts(pane) => self.ssh_forward_picks(pane),
         };
         let mut overlay = Overlay::new(kind, items);
         if kind == OverlayKind::Profiles {
@@ -1537,6 +1565,8 @@ impl App {
         self.dirty = true;
         match kind {
             OverlayKind::ProfileTemplates => self.edit_profile_template(&value),
+            OverlayKind::SshKeys(_) => self.choose_ssh_key(value),
+            OverlayKind::SshPorts(_) => {}
             OverlayKind::SerialSpeed(pane) => {
                 let Ok(baud) = value.parse() else { return };
                 if let Some(launch) = self.panes.get_mut(&pane).and_then(|p| p.pending.as_mut()) {
@@ -1688,6 +1718,28 @@ impl App {
                 self.dirty = true;
             }
         }
+    }
+
+    pub(crate) fn reconnect_ssh(&mut self, pane: PaneId) {
+        let options = self.options();
+        let Some(p) = self.panes.get_mut(&pane).filter(|p| p.profile.ssh.is_some()) else { return };
+        let Some(launch) = p.retry_launch.as_ref() else { return };
+        if p.exited.is_none() { self.effects.push(Effect::Kill { pane }); }
+        p.generation += 1;
+        let sink = Self::terminal_sink(self.sender.clone(), self.wake.clone(), pane, p.generation);
+        let terminal = p.terminal.lock().next_session(options, sink, launch.cwd.clone());
+        p.terminal = Arc::new(FairMutex::new(terminal));
+        p.pid = None;
+        p.title = None;
+        p.queued.clear();
+        self.ssh_auth.remove(&pane);
+        self.ssh_forwards.remove(&pane);
+        self.offers.remove(&pane);
+        self.prompts.remove(&pane);
+        if self.files.as_ref().is_some_and(|page| page.pane == pane) { self.files = None; }
+        let now = Instant::now();
+        p.reconnect_at = Some(now);
+        self.resume_connections(now);
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -1923,7 +1975,8 @@ impl App {
     }
 
     fn on_key(&mut self, key: Key, mods: Mods) {
-        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.pane_rename.is_some() || self.settings.is_some() || self.files.is_some() || self.sidebar_focused() || self.rearranging();
+        let ssh_auth = self.ssh_auth_active();
+        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.pane_rename.is_some() || self.settings.is_some() || self.files.is_some() || self.sidebar_focused() || self.rearranging() || ssh_auth;
         self.swallow_char = false;
         self.swallow_chord = None;
         self.swallow_control = (modal || self.tabs.is_empty()) && matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
@@ -2005,6 +2058,17 @@ impl App {
         if self.rearrange_key(key, mods) {
             self.swallow_chord = Some(key);
             return;
+        }
+        if ssh_auth {
+            if mods.ctrl && !matches!(key, Key::Char('C' | 'V')) {
+                if let Outcome::Action(action) = self.keymap.press(Chord { key, mods }) {
+                    if action.works_beside_settings() {
+                        self.swallow_chord = Some(key);
+                        return self.run_shortcut(action, mods);
+                    }
+                }
+            }
+            return self.ssh_auth_key(key, mods);
         }
         if key == Key::Other {
             return;
@@ -2091,6 +2155,7 @@ impl App {
         if self.rearranging() {
             return self.rearrange_char(c);
         }
+        if self.ssh_auth_active() && self.ssh_auth_text(&c.to_string()) { return; }
         if let Some(pane) = self.offered_pane() {
             if !c.is_control() {
                 if let Some((PaneTransfer::AwaitingFiles, p)) = self.offers.get_mut(&pane) {
@@ -2159,6 +2224,7 @@ impl App {
     }
 
     fn on_move(&mut self, x: f32, y: f32) {
+        let previous = self.mouse;
         let was_on_bar = self.chrome.tab_bar.contains(self.mouse.0, self.mouse.1);
         let was_on_sidebar = self.chrome.profile_sidebar.contains(self.mouse.0, self.mouse.1);
         self.mouse = (x, y);
@@ -2235,6 +2301,17 @@ impl App {
         if self.config.panes.focus_follows_mouse && !modal && self.drag == Drag::None {
             if let Some((pane, _)) = self.pane_at(x, y) {
                 self.focus_pane(pane);
+            }
+        }
+        if !modal && self.drag == Drag::None {
+            if let Some(cursor) = self.pane_at(x, y).and_then(|(pane, rect)| self.ssh_pointer_at(pane, rect, x, y)) {
+                self.hover_link = None;
+                self.set_cursor(cursor);
+                self.dirty = true;
+                return;
+            }
+            if self.pane_at(previous.0, previous.1).and_then(|(pane, rect)| self.ssh_pointer_at(pane, rect, previous.0, previous.1)).is_some() {
+                self.dirty = true;
             }
         }
         let link = self.link_at(x, y);
@@ -2411,6 +2488,9 @@ impl App {
             return;
         }
         if let Some(pane) = self.pane_header_at(x, y) {
+            if !self.rearranging() && self.pane_at(x, y).is_some_and(|(_, rect)| self.ssh_toolbar_click(pane, rect, x, y, button)) {
+                return;
+            }
             match button {
                 MouseButton::Left => {
                     self.focus_pane(pane);
@@ -2443,6 +2523,10 @@ impl App {
             self.non_keyboard_shortcut(chord);
             return;
         };
+        if self.ssh_auth_click(pane, self.pane_terminal_rect(pane, rect), x, y, button) {
+            if button == MouseButton::Left { self.focus_pane(pane); }
+            return;
+        }
         if self.broadcast.is_some() && self.broadcast_targets().contains(&pane) && y >= rect.bottom() - view::hint_height(self.ui()) {
             self.broadcast = None;
             self.dirty = true;
@@ -2592,6 +2676,10 @@ impl App {
             self.non_keyboard_shortcut(chord);
             return;
         }
+        if self.ssh_auth.contains_key(&pane) {
+            if vertical { self.ssh_auth_wheel(pane, self.pane_terminal_rect(pane, rect), dy); }
+            return;
+        }
         let action = match direction {
             WheelDirection::Up => MouseAction::WheelUp,
             WheelDirection::Down => MouseAction::WheelDown,
@@ -2678,6 +2766,9 @@ impl App {
             return;
         }
         p.exited = Some(code);
+        self.ssh_auth.remove(&pane);
+        self.ssh_forwards.remove(&pane);
+        if self.overlay.as_ref().is_some_and(|overlay| overlay.kind == OverlayKind::SshPorts(pane)) { self.overlay = None; }
         p.pid = None;
         self.offers.remove(&pane);
         self.prompts.remove(&pane);

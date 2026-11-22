@@ -13,6 +13,8 @@ pub enum OverlayKind {
     Schemes,
     TabColors,
     SerialSpeed(PaneId),
+    SshKeys(u64),
+    SshPorts(PaneId),
 }
 
 impl OverlayKind {
@@ -95,6 +97,8 @@ impl Overlay {
             OverlayKind::Schemes => t("Select a color scheme"),
             OverlayKind::TabColors => t("Select a tab color"),
             OverlayKind::SerialSpeed(_) => t("Select or enter the serial port speed"),
+            OverlayKind::SshKeys(_) => t("Choose a private key"),
+            OverlayKind::SshPorts(_) => t("SSH port forwards"),
         }
     }
 

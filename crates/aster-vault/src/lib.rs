@@ -82,7 +82,7 @@ fn canonical_kind<'a>(kind: &'a str, key: &str) -> &'a str {
         "password" | "" => kind_for_key(key),
         "ssh:password" => "ssh-password",
         "ssh:key-passphrase" => "key-passphrase",
-        "ssh:key-file" => "key-file",
+        "ssh:key-file" | "private-key" => "key-file",
         _ => kind,
     }
 }

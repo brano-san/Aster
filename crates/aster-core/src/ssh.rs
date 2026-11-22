@@ -1,5 +1,13 @@
 use crate::profile::Profile;
 
+#[derive(Clone, Copy)]
+pub enum PasswordUpdate {
+    Saved,
+    Forgotten,
+    MissingUser,
+    Failed,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub user: Option<String>,

@@ -1,4 +1,30 @@
 use super::*;
+
+#[test]
+fn ssh_toolbar_reserves_its_header_and_reconnects_the_existing_pane() {
+    let mut a = App::new(Config::default(), Vec::new(), true, None, std::sync::Arc::new(|| {}));
+    a.set_viewport(1000, 700, 1.0);
+    a.open_tab(Profile { name: "Remote".into(), ssh: Some("ann@host".into()), ..Default::default() });
+    let pane = a.focused_pane().unwrap();
+    a.chrome = a.tab_chrome();
+    a.layout = a.tabs[0].root.layout(a.chrome.content, a.ui());
+    let bounds = a.layout.panes[0].1;
+    let header = a.pane_header(pane, bounds);
+    let inner = a.pane_terminal_rect(pane, bounds);
+    let reconnect = a.ssh_toolbar(pane, bounds).unwrap().buttons[0];
+    assert_eq!(header.bottom(), inner.y);
+    assert_eq!(inner.bottom(), bounds.bottom());
+    let state = a.panes.get_mut(&pane).unwrap();
+    state.retry_launch = state.pending.take().map(Box::new);
+    a.take_effects();
+    a.on_down(reconnect.x + 1.0, reconnect.y + 1.0, MouseButton::Left, 1);
+    let effects = a.take_effects();
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Kill { pane: target } if *target == pane)));
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Spawn { pane: target, reconnecting: true, .. } if *target == pane)));
+    assert_eq!(a.focused_pane(), Some(pane));
+    a.on_down(header.x + 10.0, reconnect.y + 1.0, MouseButton::Left, 2);
+    assert_eq!(a.pane_rename.as_ref().map(|edit| edit.pane), Some(pane));
+}
 use crate::config::Config;
 use aster_gfx::text::{FontMetrics, FontStyle, GlyphBitmap, GlyphKey, Gfx, ShapedGlyph, ShapedText, TextBackend};
 

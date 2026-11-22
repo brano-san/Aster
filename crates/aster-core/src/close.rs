@@ -46,6 +46,7 @@ pub enum CloseTarget {
 pub struct CloseConfirm {
     pub target: CloseTarget,
     pub programs: Vec<String>,
+    pub ssh: bool,
     pub button: usize,
 }
 
@@ -173,14 +174,23 @@ impl App {
     }
 
     pub(crate) fn request_close(&mut self, target: CloseTarget) {
-        let programs = if self.config.terminal.confirm_close { self.busy_programs(&self.target_panes(&target)) } else { Vec::new() };
+        let panes = self.target_panes(&target);
+        let mut programs = if self.config.terminal.confirm_close { self.busy_programs(&panes) } else { Vec::new() };
+        let mut ssh = false;
+        if self.config.ssh.warn_on_close {
+            for pane in panes.iter().filter_map(|pane| self.panes.get(pane)).filter(|pane| pane.exited.is_none() && pane.profile.ssh.is_some()) {
+                ssh = true;
+                let name = if pane.profile.name.is_empty() { pane.profile.ssh.as_deref().unwrap_or_default() } else { &pane.profile.name };
+                if !programs.iter().any(|item| item == name) { programs.push(name.to_owned()); }
+            }
+        }
         let pinned = matches!(&target, CloseTarget::Tabs(reps) if self.tabs.iter().any(|tab| tab.pinned && reps.contains(&tab.focus)));
-        if programs.is_empty() && !pinned {
+        if programs.is_empty() && !pinned && !ssh {
             return self.close_now(target);
         }
         self.overlay = None;
         self.menu = None;
-        self.close_confirm = Some(CloseConfirm { target, programs, button: 0 });
+        self.close_confirm = Some(CloseConfirm { target, programs, ssh, button: 0 });
         self.dirty = true;
     }
 

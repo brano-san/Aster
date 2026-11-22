@@ -208,7 +208,7 @@ fn editor_tabs_follow_the_connection_and_keep_keyboard_focus_inside_the_tab() {
     let local = Profile::new("id", "Shell", "cmd", &[]);
     for (profile, expected) in [
         (local.clone(), vec!["General", "Command", "Colors"]),
-        (Profile { ssh: Some("host".into()), ..local.clone() }, vec!["General", "SSH", "Stream", "Colors"]),
+        (Profile { ssh: Some("host".into()), ..local.clone() }, vec!["General", "SSH", "Ports", "Advanced", "Algorithms", "Stream", "Colors"]),
         (Profile { serial: Some("COM3".into()), ..local.clone() }, vec!["General", "Serial", "Stream", "Colors"]),
         (Profile { socket: Some("tcp://host:3000".into()), ..local }, vec!["General", "Network", "Stream", "Colors"]),
     ] {
@@ -355,10 +355,79 @@ fn editor_rejects_invalid_address_and_scheme_and_keeps_unsupported_profile_value
     let mut e = model(p.clone());
     set_field(&mut e, "Name", "Renamed");
     let edited = e.profile_result().unwrap();
-    assert_eq!(edited.ssh_options, p.ssh_options);
+    let mut expected = p.ssh_options.clone().unwrap();
+    expected.user = Some(String::new());
+    assert_eq!(edited.ssh_options, Some(expected));
     assert_eq!(edited.cwd, p.cwd);
     let config = Config { profiles: vec![edited], ..Config::default() };
     assert_eq!(Config::parse(&config.to_text()).unwrap().profiles[0].extra, p.extra);
+}
+
+#[test]
+fn ssh_editor_switches_proxy_fields_and_round_trips_the_connection_method() {
+    use aster_proto::ssh::{SshAuth, SshProxy};
+    use crate::input::{Key, Mods};
+    let mut e = model(Profile { name: "Host".into(), ssh: Some(String::new()), ..Profile::default() });
+    set_field(&mut e, "SSH destination", "example.test");
+    set_field(&mut e, "Authentication", "interactive");
+    focus(&mut e, "Connection method");
+    for _ in 0..4 { e.key(Key::Right, Mods::NONE); }
+    set_field(&mut e, "SOCKS5 proxy address", "proxy.test");
+    assert!(e.profile_result().is_err());
+    set_field(&mut e, "SOCKS5 proxy address", "[::1]:1080");
+    let p = e.profile_result().unwrap();
+    let conf = Config { profiles: vec![p], ..Config::default() };
+    let options = Config::parse(&conf.to_text()).unwrap().profiles.remove(0).ssh_options.unwrap();
+    assert_eq!(options.proxy, Some(SshProxy::Socks { address: "[::1]:1080".into() }));
+    assert_eq!(options.auth, Some(SshAuth::Interactive));
+    assert_eq!(options.user.as_deref(), Some(""));
+}
+
+#[test]
+fn ssh_ports_editor_adds_validates_and_round_trips_a_forward() {
+    use aster_proto::ssh_forward::{Forward, ForwardKind};
+    use crate::input::{Key, Mods};
+    let mut e = model(Profile { name: "Host".into(), ssh: Some("example.test".into()), ..Profile::default() });
+    focus(&mut e, "Add port forward");
+    e.key(Key::Enter, Mods::NONE);
+    assert!(e.profile_result().is_err());
+    set_field(&mut e, "Forward type", "remote");
+    set_field(&mut e, "Listening address", "[::1]:2222");
+    set_field(&mut e, "Forward to", "10.0.0.3:80");
+    set_field(&mut e, "Forward description", "Internal site");
+    let conf = Config { profiles: vec![e.profile_result().unwrap()], ..Config::default() };
+    let mut parsed = Config::parse(&conf.to_text()).unwrap();
+    let profile = parsed.profiles.remove(0);
+    let options = profile.ssh_options.as_ref().unwrap();
+    let rule = &options.forwards.as_ref().unwrap()[0];
+    assert_eq!(rule.kind, ForwardKind::Remote);
+    assert_eq!(rule.description, "Internal site");
+    assert_eq!(rule.resolve().unwrap(), Forward::Remote { bind: "::1".into(), port: 2222, host: "10.0.0.3".into(), host_port: 80 });
+    let mut e = model(profile);
+    focus(&mut e, "Forward description");
+    e.key(Key::Delete, Mods::NONE);
+    assert_eq!(e.profile_result().unwrap().ssh_options.unwrap().forwards, Some(Vec::new()));
+}
+
+#[test]
+fn ssh_algorithm_checkboxes_edit_only_the_selected_category() {
+    use aster_proto::ssh::{AlgorithmCatalog, Algorithms};
+    use crate::input::{Key, Mods};
+    let mut e = model(Profile { name: "Host".into(), ssh: Some("example.test".into()), ..Profile::default() });
+    e.set_algorithm_catalog(AlgorithmCatalog {
+        supported: Algorithms { cipher: vec!["aes128-ctr".into(), "chacha20-poly1305".into(), "aes256-ctr".into()], ..Algorithms::default() },
+        defaults: Algorithms { cipher: vec!["chacha20-poly1305".into(), "aes128-ctr".into()], ..Algorithms::default() },
+    });
+    focus(&mut e, "aes128-ctr");
+    assert_eq!(e.tabs[e.tab].fields[e.focus].checked(), Some(true));
+    e.key(Key::Space, Mods::NONE);
+    focus(&mut e, "aes256-ctr");
+    assert_eq!(e.tabs[e.tab].fields[e.focus].checked(), Some(false));
+    e.key(Key::Space, Mods::NONE);
+    let profile = e.profile_result().unwrap();
+    let configured = profile.ssh_options.unwrap().algorithms.unwrap();
+    assert_eq!(configured.cipher.unwrap(), ["chacha20-poly1305", "aes256-ctr"]);
+    assert!(configured.kex.is_none() && configured.mac.is_none());
 }
 
 #[test]

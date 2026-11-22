@@ -1,10 +1,11 @@
 use aster_core::settings::{VaultEntry, VaultIssue, VaultView};
 use aster_core::vault_settings::{VaultAction, VaultReply};
-use aster_ssh::secrets::Secrets as SecretStore;
+use aster_ssh::secrets::{key_file_key, private_key_id, Secrets as SecretStore, PRIVATE_KEY_KIND};
 use aster_vault::{kind_for_key, Vault};
 use crossbeam_channel::{bounded, unbounded, Receiver, RecvTimeoutError, Sender};
 use std::collections::BTreeMap;
 use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -45,12 +46,15 @@ pub struct VaultUpdate {
 }
 
 pub type Reply<T> = Box<dyn FnOnce(T) + Send>;
+type ResolveKey = Box<dyn FnOnce() -> Option<String> + Send>;
 type SyncConfig = Box<dyn FnOnce(&str) -> Option<(String, u32)> + Send>;
 
 #[derive(Clone)]
 pub enum SecretUse {
     Read(String),
     Write(String, Option<String>),
+    ReadPrivateKey(String),
+    ImportSshIdentity(PathBuf),
 }
 
 type UseResult = Result<Option<String>, VaultIssue>;
@@ -107,6 +111,10 @@ impl SecretStore for WindowSecrets {
     fn delete(&self, key: &str) {
         let _ = self.wait(SecretUse::Write(key.to_owned(), None));
     }
+
+    fn private_key(&self, id: &str) -> Option<String> {
+        self.wait(SecretUse::ReadPrivateKey(id.to_owned())).ok().flatten()
+    }
 }
 
 enum Request {
@@ -115,6 +123,7 @@ enum Request {
     Read(String, Reply<Option<String>>),
     Use(SecretUse, Option<String>, Reply<UseResult>),
     Write(String, Option<String>, Reply<bool>),
+    ResolveKey(ResolveKey, Reply<UseResult>),
     SyncConfig(SyncConfig),
     Shutdown,
 }
@@ -185,6 +194,12 @@ impl Secrets {
 
     pub fn write(&self, key: String, value: String, done: impl FnOnce(bool) + Send + 'static) {
         self.update(key, Some(value), done);
+    }
+
+    pub(crate) fn resolve_key(&self, resolve: impl FnOnce() -> Option<String> + Send + 'static, done: impl FnOnce(UseResult) + Send + 'static) {
+        if let Err(crossbeam_channel::SendError(Request::ResolveKey(_, done))) = self.tx.send(Request::ResolveKey(Box::new(resolve), Box::new(done))) {
+            done(Err(VaultIssue::Unavailable));
+        }
     }
 
     fn update(&self, key: String, value: Option<String>, done: impl FnOnce(bool) + Send + 'static) {
@@ -268,6 +283,7 @@ impl Store {
                 Request::Read(key, done) => done(self.read(&key)),
                 Request::Use(action, passphrase, done) => done(self.use_secret(action, passphrase.as_deref())),
                 Request::Write(key, value, done) => done(self.write(key, value)),
+                Request::ResolveKey(resolve, done) => done(Ok(resolve())),
                 Request::SyncConfig(load) => {
                     if let Some((sealed, minutes)) = load(&self.sealed) {
                         let preview_closed = self.minutes != minutes && self.preview.take().is_some();
@@ -357,6 +373,15 @@ impl Store {
             return match action {
                 SecretUse::Read(key) => Ok(self.read(&key)),
                 SecretUse::Write(key, value) => self.write(key, value).then_some(None).ok_or(VaultIssue::SaveFailed),
+                SecretUse::ReadPrivateKey(id) => Ok(self.unlocked.as_ref().and_then(|(vault, _, _)| vault.key_file(&id)).map(str::to_owned)),
+                SecretUse::ImportSshIdentity(path) => {
+                    if self.unlocked.is_none() {
+                        return Err(if self.sealed.is_empty() { VaultIssue::NotConfigured } else { VaultIssue::ImportFailed });
+                    }
+                    let (id, encoded) = read_ssh_identity(&path).ok_or(VaultIssue::ImportFailed)?;
+                    self.edit(PRIVATE_KEY_KIND, &key_file_key(&id), Some(&encoded))?;
+                    Ok(Some(id))
+                }
             };
         }
         if let SecretUse::Read(key) = &action {
@@ -371,6 +396,14 @@ impl Store {
         self.apply_pending(&mut vault);
         let (result, edited) = match action {
             SecretUse::Read(key) => (Self::lookup(&vault, &key).map(str::to_owned), false),
+            SecretUse::ReadPrivateKey(id) => (vault.key_file(&id).map(str::to_owned), false),
+            SecretUse::ImportSshIdentity(path) => {
+                let (id, encoded) = read_ssh_identity(&path).ok_or(VaultIssue::ImportFailed)?;
+                let key = key_file_key(&id);
+                let edited = vault.get(PRIVATE_KEY_KIND, &key) != Some(&encoded);
+                vault.set(PRIVATE_KEY_KIND, &key, &encoded);
+                (Some(id), edited)
+            }
             SecretUse::Write(key, value) => {
                 let kind = kind_for_key(&key);
                 let edited = vault.get(kind, &key) != value.as_deref();
@@ -601,6 +634,18 @@ impl Store {
         self.publish(None, changed);
         Ok(())
     }
+}
+
+fn read_ssh_identity(path: &Path) -> Option<(String, String)> {
+    use std::io::Read;
+    let limit = 2 * 1024 * 1024;
+    let name = path.file_name()?.to_str()?;
+    let file = std::fs::File::open(path).ok()?;
+    let mut encoded = String::new();
+    file.take(limit as u64 + 1).read_to_string(&mut encoded).ok()?;
+    if encoded.len() > limit { return None; }
+    let id = private_key_id(name, &encoded)?;
+    Some((id, encoded))
 }
 
 fn export_secret(path: &str, value: &str) -> io::Result<()> {

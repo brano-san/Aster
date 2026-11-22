@@ -21,6 +21,9 @@ use std::time::SystemTime;
 
 const ATLAS: u32 = 2048;
 
+type RemoteInput = tokio::sync::mpsc::UnboundedSender<aster_ssh::console::Input>;
+type RemoteFile = (WindowId, PaneId, RemoteInput, aster_core::files::FileReply);
+
 type Win<P> = <<P as Platform>::Windows as WindowSystem>::Window;
 type Device<P> = <<P as Platform>::Renderer as Renderer>::Device;
 
@@ -46,6 +49,10 @@ enum StoreEvent {
     ConfigStatus(u64, Option<String>),
     StartMenuShortcut(Option<WindowId>, Result<bool, aster_platform::PlatformError>),
     DefaultConfig(WindowId, std::io::Result<PathBuf>),
+    SshPassword(WindowId, u64, aster_core::ssh::PasswordUpdate),
+    SshKeys(WindowId, u64, bool, Option<crate::remote::KeyFiles>),
+    SshKeyImported(WindowId, u64, Option<String>),
+    SshUpdate(WindowId, PaneId, RemoteInput, aster_ssh::console::SshEvent),
     Known { window: WindowId, pane: PaneId, key: String, line: usize, known: bool },
     Fill { window: WindowId, pane: PaneId, key: String, request: u64, secret: Option<String> },
 }
@@ -88,9 +95,9 @@ pub struct Handler<P: Platform> {
     sessions: HashMap<(WindowId, PaneId), Session>,
     serials: HashMap<(WindowId, PaneId), crate::serial::Serial>,
     exits: Receiver<Exit>,
-    remotes: HashMap<(WindowId, PaneId), tokio::sync::mpsc::UnboundedSender<aster_ssh::console::Input>>,
-    file_tx: Sender<(WindowId, PaneId, aster_core::files::FileReply)>,
-    file_rx: Receiver<(WindowId, PaneId, aster_core::files::FileReply)>,
+    remotes: HashMap<(WindowId, PaneId), RemoteInput>,
+    file_tx: Sender<RemoteFile>,
+    file_rx: Receiver<RemoteFile>,
     note_tx: Sender<crate::session::TransferNote>,
     note_rx: Receiver<crate::session::TransferNote>,
     local_spawns: crate::local_spawn::LocalSpawns,
@@ -565,24 +572,45 @@ impl<P: Platform> Handler<P> {
             }
             Effect::Spawn { pane, launch, terminal, reconnecting } if launch.ssh.is_some() && self.config.ssh.client == SshClient::Native => {
                 let destination = launch.ssh.unwrap_or_default();
+                let profile = launch.ssh_options.map(|o| *o).unwrap_or_default();
+                let jump_profiles = if matches!(profile.proxy, Some(aster_core::profile::SshProxy::Jump { .. })) {
+                    let profiles = self.windows.get(&id).map_or(&[][..], |state| state.app.profiles());
+                    Arc::new(profiles.iter().filter(|p| p.ssh.is_some()).filter_map(|p| {
+                        let p = aster_core::profile::effective(p, &self.config);
+                        Some((p.id, (p.ssh?, p.ssh_options.unwrap_or_default())))
+                    }).collect())
+                } else { Default::default() };
                 let options = crate::remote::Options {
-                    profile: launch.ssh_options.map(|o| *o).unwrap_or_default(),
+                    profile, jump_profiles,
                     cwd: launch.cwd,
                     clear_after_connect: self.config.ssh.clear_after_connect && !reconnecting,
                     x11_display: self.config.ssh.x11_display.clone(),
                     share: self.config.ssh.share_connections,
                     forward_agent: self.config.ssh.forward_agent,
+                    verify_host_keys: self.config.ssh.verify_host_keys,
+                    windows_agent: self.config.ssh.windows_agent,
+                    agent_pipe: self.config.ssh.agent_pipe.clone(),
                     remember: self.config.ssh.remember_passwords,
                     secrets: Arc::new(self.window_secrets(id)),
                 };
                 let remote = crate::remote::connect(&destination, launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), P::home_dir(), options);
                 let (files, tx, waker) = (remote.files, self.file_tx.clone(), self.waker.clone());
+                let ssh_events = remote.events;
+                let events = self.store_events.clone();
+                let session_input = remote.input.clone();
                 let spawned = std::thread::Builder::new().name(format!("aster-files-{pane}")).spawn(move || {
-                    for reply in files {
-                        if tx.send((id, pane, crate::remote::file_reply(reply))).is_err() {
-                            break;
+                    loop {
+                        crossbeam_channel::select! {
+                            recv(files) -> reply => {
+                                let Ok(reply) = reply else { break };
+                                if tx.send((id, pane, session_input.clone(), crate::remote::file_reply(reply))).is_err() { break; }
+                                waker.wake();
+                            }
+                            recv(ssh_events) -> event => {
+                                let Ok(event) = event else { break };
+                                events.post(StoreEvent::SshUpdate(id, pane, session_input.clone(), event));
+                            }
                         }
-                        waker.wake();
                     }
                 });
                 if let Err(e) = spawned {
@@ -649,6 +677,7 @@ impl<P: Platform> Handler<P> {
             Effect::Kill { pane } => {
                 self.local_spawns.take_pending((id, pane));
                 self.serials.remove(&(id, pane));
+                self.remotes.remove(&(id, pane));
                 if let Some(s) = self.sessions.remove(&(id, pane)) {
                     s.pty.kill();
                 }
@@ -771,6 +800,20 @@ impl<P: Platform> Handler<P> {
                     }
                 });
             }
+            Effect::SshPassword { request, destination, options, value } => self.update_ssh_password(id, request, destination, options, value),
+            Effect::BrowseSshKeys { request, directory, import } => self.browse_ssh_keys(id, request, directory, import),
+            Effect::SshInteractive { pane, answer } => {
+                if let Some(input) = self.remotes.get(&(id, pane)) {
+                    let message = if answer.answers.is_none() { aster_ssh::console::Input::Close } else { aster_ssh::console::Input::Interactive(answer) };
+                    let _ = input.send(message);
+                }
+            }
+            Effect::ImportSshIdentity { request, path } => {
+                let events = self.store_events.clone();
+                self.window_secrets(id).use_secret(SecretUse::ImportSshIdentity(path), move |result| {
+                    events.post(StoreEvent::SshKeyImported(id, request, result.ok().flatten()));
+                });
+            }
             Effect::UnlockConfig { request, passphrase } => self.unlock_config(id, request, passphrase),
             Effect::CancelConfigUnlock if self.config_startup == ConfigStartup::Prompt => {
                 let access = self.config_access.clone();
@@ -861,6 +904,40 @@ impl<P: Platform> Handler<P> {
                 Some(input) => s.app.paste_vault(input, text),
                 None => s.app.paste(text),
             }
+        }
+    }
+
+    fn update_ssh_password(&mut self, id: WindowId, request: u64, destination: String, options: Box<aster_core::profile::SshOptions>, value: Option<String>) {
+        use aster_core::ssh::PasswordUpdate;
+        let events = self.store_events.clone();
+        let secrets = self.window_secrets(id);
+        let success = if value.is_some() { PasswordUpdate::Saved } else { PasswordUpdate::Forgotten };
+        self.secrets.resolve_key(move || {
+            let home = P::home_dir().unwrap_or_default();
+            crate::remote::password_key(&destination, &options, &home)
+        }, move |key| {
+            let update = match key {
+                Ok(Some(key)) => {
+                    secrets.use_secret(SecretUse::Write(key, value), move |result| {
+                        events.post(StoreEvent::SshPassword(id, request, if result.is_ok() { success } else { PasswordUpdate::Failed }));
+                    });
+                    return;
+                }
+                Ok(None) => PasswordUpdate::MissingUser,
+                Err(_) => PasswordUpdate::Failed,
+            };
+            events.post(StoreEvent::SshPassword(id, request, update));
+        });
+    }
+
+    fn browse_ssh_keys(&mut self, id: WindowId, request: u64, directory: Option<PathBuf>, import: bool) {
+        let events = self.store_events.clone();
+        let started = std::thread::Builder::new().name("aster-ssh-keys".into()).spawn(move || {
+            let files = crate::remote::key_files(directory, P::home_dir());
+            events.post(StoreEvent::SshKeys(id, request, import, files.ok()));
+        });
+        if started.is_err() {
+            self.store_events.post(StoreEvent::SshKeys(id, request, import, None));
         }
     }
 
@@ -1074,6 +1151,20 @@ impl<P: Platform> Handler<P> {
                         }
                     }
                 },
+                StoreEvent::SshPassword(window, request, result) => {
+                    if let Some(state) = self.windows.get_mut(&window) { state.app.ssh_password_updated(request, result); }
+                }
+                StoreEvent::SshKeys(window, request, import, result) => {
+                    if let Some(state) = self.windows.get_mut(&window) { state.app.ssh_key_files(request, import, result); }
+                }
+                StoreEvent::SshKeyImported(window, request, result) => {
+                    if let Some(state) = self.windows.get_mut(&window) { state.app.ssh_identity_imported(request, result); }
+                }
+                StoreEvent::SshUpdate(window, pane, source, event) => {
+                    if self.remotes.get(&(window, pane)).is_some_and(|input| input.same_channel(&source)) {
+                        if let Some(state) = self.windows.get_mut(&window) { state.app.ssh_event(pane, event); }
+                    }
+                }
                 StoreEvent::Known { window, pane, key, line, known } => {
                     if let Some(s) = self.windows.get_mut(&window) {
                         if s.app.password_prompt(pane).is_some_and(|p| p.key == key && p.line == line) {
@@ -1155,7 +1246,8 @@ impl<P: Platform> Handler<P> {
 
     fn drain_exits(&mut self) {
         self.drain_local_spawns();
-        while let Ok((wid, pane, note)) = self.note_rx.try_recv() {
+        while let Ok((wid, pane, session, note)) = self.note_rx.try_recv() {
+            if self.sessions.get(&(wid, pane)).is_none_or(|current| current.id() != session) { continue; }
             if let Some(s) = self.windows.get_mut(&wid) {
                 let state = match note {
                     crate::zmodem::Note::AwaitingFiles => aster_core::app::PaneTransfer::AwaitingFiles,
@@ -1166,12 +1258,14 @@ impl<P: Platform> Handler<P> {
                 s.app.transfer_offered(pane, state);
             }
         }
-        while let Ok((wid, pane, reply)) = self.file_rx.try_recv() {
+        while let Ok((wid, pane, source, reply)) = self.file_rx.try_recv() {
+            if self.remotes.get(&(wid, pane)).is_none_or(|current| !current.same_channel(&source)) { continue; }
             if let Some(s) = self.windows.get_mut(&wid) {
                 s.app.files_reply(pane, reply);
             }
         }
-        while let Ok((wid, pane, code)) = self.exits.try_recv() {
+        while let Ok((wid, pane, session, code)) = self.exits.try_recv() {
+            if self.sessions.get(&(wid, pane)).is_none_or(|current| current.id() != session) { continue; }
             use aster_core::profile::OnExit;
             let policy = self.windows.get(&wid).and_then(|s| s.app.pane_exit_policy(pane));
             let manual_retry = matches!(policy, Some(OnExit::Auto | OnExit::Inherit)) && self.serials.get_mut(&(wid, pane)).is_some_and(|s| s.disconnected(code));
@@ -1234,6 +1328,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         let flow = crate::session::OutputFlow::new(move || waker.wake());
         text.set_font_waker(flow.wake.clone());
         let mut app = App::new(self.config.clone(), self.profiles.clone(), window.is_dark_mode(), home, flow.wake.clone());
+        app.set_ssh_algorithm_catalog(aster_ssh::algorithm_catalog());
         if let Some((monospace, all)) = &self.font_families {
             app.set_font_families(monospace.clone(), all.clone());
         }

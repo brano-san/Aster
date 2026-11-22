@@ -1,7 +1,7 @@
 use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-pub use aster_proto::ssh::SshOptions;
+pub use aster_proto::ssh::{SshOptions, SshProxy};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -117,6 +117,11 @@ fn fill<T: Clone>(value: &mut Option<T>, fallback: &Option<T>) {
 }
 
 fn inherit_ssh(options: &mut SshOptions, defaults: &SshOptions) {
+    fill(&mut options.proxy, &defaults.proxy);
+    fill(&mut options.auth, &defaults.auth);
+    fill(&mut options.forwards, &defaults.forwards);
+    fill(&mut options.forward_agent, &defaults.forward_agent);
+    fill(&mut options.reuse_session, &defaults.reuse_session);
     fill(&mut options.user, &defaults.user);
     fill(&mut options.port, &defaults.port);
     fill(&mut options.identity_files, &defaults.identity_files);

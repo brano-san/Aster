@@ -30,6 +30,7 @@ pub enum Control {
 pub enum Info {
     ConfigPath,
     ConfigStatus,
+    SshProfiles,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,6 +71,8 @@ const TAB_POSITIONS: &[(&str, &str)] = &[("top", "Top"), ("bottom", "Bottom"), (
 const BACKDROPS: &[(&str, &str)] = &[("none", "None"), ("acrylic", "Acrylic"), ("mica", "Mica")];
 const QUICK_CONNECT: &[(&str, &str)] = &[("ssh", "SSH"), ("telnet", "Telnet"), ("tcp", "TCP"), ("serial", "Serial port")];
 const SSH_CLIENTS: &[(&str, &str)] = &[("native", "Built in"), ("system", "System OpenSSH")];
+#[cfg(windows)]
+const SSH_AGENTS: &[(&str, &str)] = &[("auto", "Automatic"), ("pageant", "Pageant"), ("named-pipe", "Named pipe")];
 const LANGUAGES: &[(&str, &str)] = &[("auto", "Automatic"), ("en", "English"), ("ru", "Russian")];
 const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
 const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
@@ -165,8 +168,15 @@ pub const SETTINGS: &[Setting] = &[
     item(SSH, "ssh.remember-passwords", "Offer to save passwords", "After a typed password or key passphrase works, offer to save it", Control::Toggle),
     item(SSH, "ssh.forward-agent", "Forward the SSH agent", "Let servers use your local SSH agent; ForwardAgent in ~/.ssh/config decides per host", Control::Toggle),
     item(SSH, "ssh.share-connections", "Share connections", "New tabs to a host that is already open reuse its login", Control::Toggle),
+    item(SSH, "ssh.warn-on-close", "Warn before closing active SSH connections", "Ask before closing a pane, tab or window with an SSH session", Control::Toggle),
+    item(SSH, "ssh.verify-host-keys", "Verify host keys", "Check server keys against known hosts in the built-in client", Control::Toggle),
+    #[cfg(windows)]
+    item(SSH, "ssh.windows-agent", "SSH agent type", "Select the local agent used by the built-in SSH client on Windows", Control::Choice(SSH_AGENTS)),
+    #[cfg(windows)]
+    item(SSH, "ssh.agent-pipe", "SSH agent pipe path", "Leave empty to use the default named pipe", Control::Text),
     item(SSH, "ssh.clear-after-connect", "Clear after login", "Clear connection messages before the remote shell starts", Control::Toggle),
     item(SSH, "ssh.x11-display", "Local X11 display", "For X11 forwarding. Leave empty to use DISPLAY", Control::Text),
+    item(SSH, "info.ssh-profiles", "Connection profiles", "Hosts, authentication, port forwards and algorithms", Control::ReadOnly(Info::SshProfiles)),
     item(SYSTEM, "action.whats-new", "What's new", "Read the notes for this version", Control::Run(&Action::WhatsNew)),
     item(SYSTEM, "action.check-for-updates", "Check for updates", "Look for a new version now", Control::Run(&Action::CheckForUpdates)),
     item(SYSTEM, "updates.check-automatically", "Check for updates automatically", "Look for a new version each time Aster starts", Control::Toggle),
@@ -1091,6 +1101,7 @@ impl App {
                 None if self.config_path.is_none() => t("Config folder unavailable"),
                 None => t("Checking the config file…"),
             }.to_owned(),
+            Control::ReadOnly(Info::SshProfiles) => return t("Configure individual connections in Profiles and connections.").into(),
             _ => {}
         }
         let value = get(&self.config, setting.key);

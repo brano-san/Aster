@@ -1,4 +1,4 @@
-use aster_proto::ssh::Algorithms;
+use aster_proto::ssh::{AlgorithmCatalog, Algorithms};
 use russh::{cipher, compression, kex, mac, Preferred};
 use std::borrow::Cow;
 
@@ -47,6 +47,31 @@ pub(crate) fn preferred(options: &Algorithms) -> (Result<Preferred, String>, Vec
         p.kex.to_mut().extend([kex::EXTENSION_SUPPORT_AS_CLIENT, kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT]);
     }
     (Ok(p), warnings)
+}
+
+pub fn catalog() -> AlgorithmCatalog {
+    let p = Preferred::default();
+    AlgorithmCatalog {
+        supported: Algorithms {
+            kex: exchange_names(kex::ALL_KEX_ALGORITHMS.iter().copied()),
+            cipher: names(cipher::ALL_CIPHERS.iter().copied().filter(|n| **n != cipher::CLEAR && **n != cipher::NONE)),
+            mac: names(mac::ALL_MAC_ALGORITHMS.iter().copied().filter(|n| **n != mac::NONE)),
+            host_key: russh::keys::key::ALL_KEY_TYPES.iter().map(|key| key.as_str().into()).collect(),
+            compression: names(compression::ALL_COMPRESSION_ALGORITHMS.iter().copied()),
+        },
+        defaults: Algorithms {
+            kex: exchange_names(p.kex.iter()), cipher: names(p.cipher.iter()), mac: names(p.mac.iter()),
+            host_key: p.key.iter().map(|key| key.as_str().into()).collect(), compression: names(p.compression.iter()),
+        },
+    }
+}
+
+fn names<'a, T: AsRef<str> + 'a>(items: impl IntoIterator<Item = &'a T>) -> Vec<String> {
+    items.into_iter().map(|name| name.as_ref().into()).collect()
+}
+
+fn exchange_names<'a>(items: impl IntoIterator<Item = &'a kex::Name>) -> Vec<String> {
+    names(items.into_iter().filter(|name| **name != kex::NONE && !name.as_ref().starts_with("ext-info-") && !name.as_ref().starts_with("kex-strict-")))
 }
 
 #[cfg(test)]

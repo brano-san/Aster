@@ -83,6 +83,9 @@ impl App {
     fn open_profile_form(&mut self, profile: Profile, original: Option<String>, template: bool) {
         let ports = self.detected_serial_ports();
         let mut editor = ProfileEditor::profile(profile, original, &self.config, &self.scheme_names(), &ports);
+        editor.set_jump_profiles(&self.profiles);
+        editor.set_algorithm_catalog(self.ssh_algorithm_catalog.clone());
+        self.ssh_editor_request = self.ssh_editor_request.wrapping_add(1);
         if template { editor.select_tab(1); }
         if let Some(page) = &mut self.settings {
             page.defaults_kind = None;
@@ -123,7 +126,10 @@ impl App {
         let ports = self.detected_serial_ports();
         let Some(page) = self.settings.as_mut() else { return };
         let values = page.group_editor.as_ref().map_or(&self.config.profile_defaults, |g| &g.defaults);
-        page.editor = Some(ProfileEditor::defaults(kind, &values.get(kind).cloned().unwrap_or_default(), &self.config, &schemes, &ports));
+        let mut editor = ProfileEditor::defaults(kind, &values.get(kind).cloned().unwrap_or_default(), &self.config, &schemes, &ports);
+        editor.set_jump_profiles(&self.profiles);
+        editor.set_algorithm_catalog(self.ssh_algorithm_catalog.clone());
+        page.editor = Some(editor);
         page.defaults_kind = Some(kind);
         page.deleting = None;
     }
@@ -277,6 +283,8 @@ impl App {
         page.defaults_kind = None;
         page.notice = None;
         page.deleting = None;
+        self.vault_input_id = self.vault_input_id.wrapping_add(1);
+        self.ssh_editor_request = self.ssh_editor_request.wrapping_add(1);
     }
 
     fn save_profile_modal(&mut self) {
@@ -341,10 +349,20 @@ impl App {
     pub(crate) fn profile_modal_key(&mut self, key: Key, mods: Mods) {
         if key == Key::Escape { return self.close_profile_modal(); }
         if mods.ctrl && matches!(key, Key::Enter | Key::Char('S')) { return self.save_profile_modal(); }
-        if mods.ctrl && key == Key::Char('V') { return self.push(Effect::RequestPaste); }
+        if mods.ctrl && key == Key::Char('V') {
+            if self.settings.as_ref().and_then(|p| p.editor.as_ref()).is_some_and(ProfileEditor::password_focused) {
+                self.vault_input_id = self.vault_input_id.wrapping_add(1);
+                return self.push(Effect::RequestVaultPaste(self.vault_input_id));
+            }
+            return self.push(Effect::RequestPaste);
+        }
+        self.vault_input_id = self.vault_input_id.wrapping_add(1);
         let Some(page) = &mut self.settings else { return };
         if key != Key::Delete { page.deleting = None; page.notice = None; }
         if let Some(editor) = &mut page.editor {
+            if matches!(key, Key::Enter | Key::Space) {
+                if let Some(action) = editor.ssh_action(key == Key::Enter) { return self.ssh_editor_action(action); }
+            }
             editor.key(key, mods);
             return;
         }
@@ -378,6 +396,7 @@ impl App {
         } else { return false };
         page.notice = None;
         page.deleting = None;
+        self.vault_input_id = self.vault_input_id.wrapping_add(1);
         match layout.hit(x, y) {
             Some(EditorHit::Cancel) => self.close_profile_modal(),
             Some(EditorHit::Save) => self.save_profile_modal(),
@@ -386,7 +405,9 @@ impl App {
                 let step = layout.fields.iter().find(|(index, _)| *index == i).map_or(0, |(_, r)| choice_step(*r, s, x));
                 if let Some(e) = &mut page.editor {
                     e.focus = i;
-                    if step != 0 { e.key(if step < 0 { Key::Left } else { Key::Right }, Mods::NONE); }
+                    if let Some(action) = e.ssh_action(false) { self.ssh_editor_action(action); }
+                    else if e.tabs[e.tab].fields[i].is_button() { e.activate(i); }
+                    else if step != 0 { e.key(if step < 0 { Key::Left } else { Key::Right }, Mods::NONE); }
                     else { e.activate(i); }
                 } else if let Some(g) = &mut page.group_editor {
                     g.focus = i;
@@ -405,6 +426,7 @@ impl App {
             (&mut e.focus, e.tabs[e.tab].fields.len())
         } else if let Some(g) = &mut page.group_editor { (&mut g.focus, 8) } else { return false };
         *focus = (*focus as isize - dy.signum() as isize).clamp(0, count.saturating_sub(1) as isize) as usize;
+        self.vault_input_id = self.vault_input_id.wrapping_add(1);
         self.dirty = true;
         true
     }

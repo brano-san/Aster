@@ -97,6 +97,10 @@ fn discovery_includes_only_existing_keys_in_preferred_order() {
     assert_eq!(resolve("box", &cx).identity_files, [ssh_dir.join("id_ed25519"), ssh_dir.join("id_rsa")]);
     std::fs::write(ssh_dir.join("id_ecdsa"), []).unwrap();
     assert_eq!(resolve("box", &cx).identity_files, ["id_ed25519", "id_ecdsa", "id_rsa"].map(|name| ssh_dir.join(name)));
+    std::fs::write(ssh_dir.join("id_work"), []).unwrap();
+    std::fs::write(ssh_dir.join("id_work.pub"), []).unwrap();
+    std::fs::create_dir(ssh_dir.join("id_folder")).unwrap();
+    assert_eq!(resolve("box", &cx).identity_files, ["id_ed25519", "id_ecdsa", "id_rsa", "id_work"].map(|name| ssh_dir.join(name)));
     std::fs::remove_dir_all(home).unwrap();
 }
 
@@ -115,6 +119,27 @@ fn proxy_commands_expand_their_tokens() {
 }
 
 #[test]
+fn explicit_profile_proxy_overrides_config_and_uses_resolved_tokens() {
+    let config = "Host db\n HostName 10.1.2.3\n User ann\n Port 2022\n ProxyJump bastion\n";
+    let dir = Path::new("/home/u/.ssh");
+    let cx = Context { config, ssh_dir: dir, home: Path::new("/home/u"), read: &|_| None, default_user: "", default_term: "" };
+    let mut options = SshOptions { proxy: Some(SshProxy::Command { command: "tunnel %h %p %r %%".into() }), ..Default::default() };
+    let command = resolve_options("db", &cx, &options);
+    assert!(command.proxy_jump.is_empty());
+    assert_eq!(command.proxy_command_line().as_deref(), Some("tunnel 10.1.2.3 2022 ann %"));
+    options.proxy = Some(SshProxy::Direct);
+    let direct = resolve_options("db", &cx, &options);
+    assert!(direct.proxy_jump.is_empty() && direct.proxy_command_line().is_none());
+}
+
+#[test]
+fn explicitly_blank_user_requests_a_login_instead_of_inheriting_one() {
+    let cx = Context { config: "User ann", ssh_dir: Path::new("/home/.ssh"), home: Path::new("/home"), read: &|_| None, default_user: "fallback", default_term: "" };
+    let options = SshOptions { user: Some(String::new()), ..Default::default() };
+    assert!(resolve_options("legacy@host", &cx, &options).user.is_empty());
+}
+
+#[test]
 fn agent_forwarding_and_the_agent_socket_come_from_the_config() {
     let d = resolve_with("box", "Host box\n  ForwardAgent yes\n  IdentityAgent ~/.ssh/agent.sock\n");
     assert_eq!(d.forward_agent, Some(true));
@@ -122,4 +147,11 @@ fn agent_forwarding_and_the_agent_socket_come_from_the_config() {
     let d = resolve_with("other", "Host *\n  ForwardAgent no\n  IdentityAgent SSH_AUTH_SOCK\n");
     assert_eq!((d.forward_agent, d.agent), (Some(false), None));
     assert_eq!(resolve_with("plain", "").forward_agent, None);
+}
+
+#[test]
+fn explicit_profile_agent_forwarding_overrides_the_ssh_configuration() {
+    let cx = Context { config: "ForwardAgent yes", ssh_dir: Path::new("/home/.ssh"), home: Path::new("/home"), read: &|_| None, default_user: "", default_term: "" };
+    let options = SshOptions { forward_agent: Some(false), ..Default::default() };
+    assert_eq!(resolve_options("host", &cx, &options).forward_agent, Some(false));
 }

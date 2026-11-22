@@ -5,6 +5,7 @@ use crate::settings::{found, ProfileRow};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod actions;
+mod ssh_actions;
 pub(crate) use actions::profile_templates;
 pub(crate) mod editor;
 pub(crate) mod layout;

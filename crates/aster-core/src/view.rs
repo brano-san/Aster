@@ -19,6 +19,7 @@ const G_RESTORE: &str = "\u{E923}";
 #[derive(Clone, Copy)]
 enum ProfileFieldControl {
     Text,
+    ReadOnly,
     Choice { editable: bool },
     Switch(bool),
 }
@@ -268,6 +269,7 @@ impl App {
                 g.dl.rect(*rect, theme.foreground.alpha(0x2C));
             }
             self.draw_pane_header(g, *id, *rect, focus == Some(*id));
+            if let Some(panel) = self.ssh_auth.get(id) { self.draw_ssh_auth(g, self.pane_terminal_rect(*id, *rect), panel, focus == Some(*id)); }
         }
         for sp in &layout.splitters {
             g.dl.rect(sp.rect, theme.divider);
@@ -684,7 +686,7 @@ impl App {
                 t.set_cell_pixels(m.w as u16, m.h as u16);
             }
             pane.size = size;
-            if pane.profile.exit_decision(None) == crate::profile::ExitDecision::Reconnect {
+            if pane.profile.ssh.is_some() || pane.profile.exit_decision(None) == crate::profile::ExitDecision::Reconnect {
                 pane.retry_launch = Some(Box::new(launch.clone()));
             }
             self.effects.push(Effect::Spawn { pane: id, launch, terminal: pane.terminal.clone(), reconnecting: false });
@@ -939,7 +941,9 @@ impl App {
         let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
         let line = (1.0 * s).round().max(1.0);
-        let field = header.inset((5.0 * s).round(), (2.0 * s).round());
+        let toolbar = self.ssh_toolbar(id, rect);
+        let right = toolbar.as_ref().map_or(header.right(), |toolbar| toolbar.buttons[0].x);
+        let field = Rect::new(header.x, header.y, right - header.x, header.h).inset((5.0 * s).round(), (2.0 * s).round());
         let x = field.x + (4.0 * s).round();
         let y = baseline(g, header, ui);
         g.dl.set_clip(Some(header));
@@ -966,7 +970,10 @@ impl App {
             self.set_ime_area(caret);
         } else {
             let title = pane.name.as_deref().or(pane.title.as_deref()).unwrap_or(&pane.profile.name);
-            g.text(x, y, title, ui, if focused { theme.text } else { theme.text_dim }, (header.right() - x - 8.0 * s).max(0.0));
+            g.text(x, y, title, ui, if focused { theme.text } else { theme.text_dim }, (right - x - 8.0 * s).max(0.0));
+        }
+        if let Some(toolbar) = toolbar {
+            self.draw_ssh_toolbar(g, id, &toolbar);
         }
         g.dl.set_clip(None);
     }
@@ -1112,6 +1119,88 @@ impl App {
         }
     }
 
+    fn draw_ssh_toolbar<B: TextBackend>(&self, g: &mut Gfx<B>, pane: PaneId, toolbar: &crate::ssh_toolbar::Toolbar) {
+        let s = self.ui();
+        let theme = self.theme;
+        let ui = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), false);
+        let line = s.round().max(1.0);
+        let (mx, my) = self.mouse;
+        let names = [if toolbar.buttons[0].w >= 72.0 * s { t("Reconnect") } else { "↻" }, t("SFTP"), t("Ports")];
+        for ((button, label), enabled) in toolbar.buttons.iter().zip(names).zip(self.ssh_toolbar_buttons(pane)) {
+            let active = enabled && button.contains(mx, my);
+            g.dl.round_rect(*button, if active { theme.button_hover } else { theme.surface }, 4.0 * s);
+            g.dl.outline(*button, if active { theme.accent } else { theme.overlay_border }, 4.0 * s, line);
+            centered(g, *button, label, ui, if enabled { theme.text } else { theme.text_dim });
+        }
+    }
+
+    fn draw_ssh_auth<B: TextBackend>(&self, g: &mut Gfx<B>, pane: Rect, panel: &crate::ssh_auth::Panel, focused: bool) {
+        use crate::ssh_auth::Row;
+        let s = self.ui();
+        let theme = self.theme;
+        let geo = panel.geometry(pane, s);
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let heading = FontStyle::new(FontFamily::Ui, (15.0 * s).round(), true);
+        let line = s.round().max(1.0);
+        let radius = 7.0 * s;
+        let (mx, my) = self.mouse;
+        let first = g.dl.instances.len();
+        g.dl.rect(pane, theme.dim);
+        g.dl.round_rect(geo.frame, theme.overlay, radius);
+        g.dl.outline(geo.frame, theme.overlay_border, radius, line);
+        let y = baseline(g, geo.title, heading);
+        g.text(geo.title.x, y, t("SSH authentication"), heading, theme.text, geo.title.w);
+        for &(index, row) in &geo.entries {
+            let y = baseline(g, row, ui);
+            if panel.pending {
+                g.text(row.x, y, t("Waiting for the SSH server…"), ui, theme.text_dim, row.w);
+                continue;
+            }
+            match &panel.rows[index] {
+                Row::Text(text) => { g.text(row.x, y, text, ui, theme.text_dim, row.w); }
+                Row::Link(url) => {
+                    if row.contains(mx, my) { g.dl.round_rect(row, theme.button_hover, radius); }
+                    let w = g.measure(url, ui).min(row.w);
+                    g.text(row.x, y, url, ui, theme.accent, row.w);
+                    g.dl.rect(Rect::new(row.x, y + 2.0 * s, w, line), theme.accent);
+                }
+                Row::Prompt(index) => {
+                    let caption = row.w * 0.43;
+                    let label: String = panel.challenge.prompts[*index].label.chars().filter(|c| !c.is_control()).collect();
+                    g.text(row.x, y, &label, ui, theme.text, caption - 6.0 * s);
+                    let field = Rect::new(row.x + caption, row.y + 2.0 * s, row.w - caption, row.h - 4.0 * s);
+                    g.dl.round_rect(field, theme.surface, 4.0 * s);
+                    let active = focused && panel.focus == *index;
+                    g.dl.outline(field, if active { theme.accent } else { theme.overlay_border }, 4.0 * s, line);
+                    let value = panel.display(*index);
+                    let inner = field.inset(7.0 * s, 1.0 * s);
+                    let from = g.dl.instances.len();
+                    let width = g.measure(&value, ui);
+                    let x = inner.x.min(inner.right() - width - 3.0 * s);
+                    g.text(x, y, &value, ui, theme.text, width + 2.0 * s);
+                    if active { g.dl.rect(Rect::new(x + width + 2.0 * s, inner.y + 4.0 * s, line, inner.h - 8.0 * s), theme.accent); }
+                    g.dl.confine(from, inner);
+                }
+            }
+        }
+        if let Some(row) = geo.remember {
+            let check = Rect::new(row.x, row.y + 3.0 * s, 17.0 * s, 17.0 * s);
+            g.dl.round_rect(check, if panel.remember { theme.accent.alpha(0x48) } else { theme.surface }, 3.0 * s);
+            let active = focused && panel.focus == panel.challenge.prompts.len();
+            g.dl.outline(check, if active || panel.remember { theme.accent } else { theme.overlay_border }, 3.0 * s, line);
+            if panel.remember { centered(g, check, "✓", ui, theme.text); }
+            let y = baseline(g, row, ui);
+            g.text(check.right() + 8.0 * s, y, t("Remember password"), ui, theme.text, row.w - 25.0 * s);
+        }
+        for (button, label, primary) in [(geo.submit, t("Continue"), true), (geo.cancel, t("Cancel"), false)] {
+            if primary && panel.pending { continue; }
+            g.dl.round_rect(button, if button.contains(mx, my) { theme.button_hover } else if primary { theme.accent.alpha(0x42) } else { theme.surface }, 5.0 * s);
+            g.dl.outline(button, if primary { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
+            centered(g, button, label, ui, theme.text);
+        }
+        g.dl.confine(first, pane);
+    }
+
     fn draw_close<B: TextBackend>(&mut self, g: &mut Gfx<B>) {
         use crate::close::{CloseTarget, BUTTONS, LISTED};
         let Some(geo) = self.close_geometry() else { return };
@@ -1126,6 +1215,7 @@ impl App {
         g.dl.outline(geo.frame, theme.overlay_border, radius, line);
         let title = FontStyle::new(FontFamily::Ui, (14.0 * s).round(), true);
         let heading = match confirm.target {
+            _ if confirm.ssh => t("Close with active SSH connections?"),
             CloseTarget::Pane(_) => t("Close the pane? These programs are still running:"),
             CloseTarget::PaneProfile(..) => t("Change the profile and stop the current session?"),
             CloseTarget::Tabs(_) if confirm.programs.is_empty() => t("Close the pinned tab?"),
@@ -1655,12 +1745,31 @@ impl App {
             }
             for &(i, slot) in &layout.fields {
                 let field = &editor.tabs[editor.tab].fields[i];
+                if let Some(checked) = field.checked() {
+                    let r = Rect::new(slot.x, slot.y + 13.0 * s, 19.0 * s, 19.0 * s).snap();
+                    g.dl.round_rect(r, if checked { theme.accent.alpha(0x48) } else { theme.surface }, 4.0 * s);
+                    g.dl.outline(r, if i == editor.focus || checked { theme.accent } else { theme.overlay_border }, 4.0 * s, line);
+                    if checked { centered(g, r, "✓", ui, theme.text); }
+                    let label = Rect::new(r.right() + 9.0 * s, r.y, (slot.right() - r.right() - 9.0 * s).max(0.0), r.h);
+                    let y = baseline(g, label, ui);
+                    g.text(label.x, y, &field.label, ui, theme.text, label.w);
+                    continue;
+                }
+                if field.is_button() {
+                    let r = Rect::new(slot.x, slot.y + 21.0 * s, slot.w, 31.0 * s).snap();
+                    g.dl.round_rect(r, if slot.contains(mx, my) { theme.button_hover } else { theme.surface }, 5.0 * s);
+                    g.dl.outline(r, if i == editor.focus { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
+                    centered(g, r, &field.label, ui, theme.text);
+                    continue;
+                }
                 let control = match field.switch() {
                     Some(value) => ProfileFieldControl::Switch(value),
                     None if !field.choices.is_empty() => ProfileFieldControl::Choice { editable: field.editable },
+                    None if !field.editable => ProfileFieldControl::ReadOnly,
                     None => ProfileFieldControl::Text,
                 };
-                self.draw_editor_field(g, slot, (&field.label, field.display()), control, i == editor.focus);
+                let masked = field.masked();
+                self.draw_editor_field(g, slot, (&field.label, masked.as_deref().unwrap_or_else(|| field.display())), control, i == editor.focus);
             }
             if let Some(preview) = layout.scheme_preview {
                 let palette = editor.preview_scheme(&self.config).and_then(|name| self.scheme(&name)).unwrap_or(self.palette);
@@ -2363,7 +2472,11 @@ impl App {
         g.dl.rect(Rect::new(geo.frame.x, geo.input.bottom(), geo.frame.w, (1.0 * s).round().max(1.0)), theme.overlay_border);
         if o.shown.is_empty() {
             let r = Rect::new(geo.frame.x, geo.input.bottom(), geo.frame.w, geo.frame.bottom() - geo.input.bottom());
-            let message = if matches!(o.kind, OverlayKind::SerialSpeed(_)) { t("Enter a speed from 50 to 4000000 baud") } else { t("No matches") };
+            let message = match o.kind {
+                OverlayKind::SerialSpeed(_) => t("Enter a speed from 50 to 4000000 baud"),
+                OverlayKind::SshPorts(pane) if !self.ssh_forwards.get(&pane).is_some_and(|items| !items.is_empty()) => t("No SSH port forwards"),
+                _ => t("No matches"),
+            };
             centered(g, r, message, ui, theme.text_dim);
             return;
         }

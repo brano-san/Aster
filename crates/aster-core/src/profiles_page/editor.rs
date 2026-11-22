@@ -4,8 +4,17 @@ use crate::input::{Key, Mods};
 use crate::profile::{group_path, LoginStep, OnExit, Profile, ProfileDefaults, SshOptions, Stream};
 use crate::settings::{join_args, split_args};
 use aster_proto::serial::{self, Defaults as SerialDefaults};
+use aster_proto::ssh::{AlgorithmCatalog, AlgorithmOptions};
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::BTreeMap;
+
+#[path = "ssh.rs"]
+mod ssh;
+#[path = "forwards.rs"]
+mod forwards;
+#[path = "algorithms.rs"]
+mod algorithms;
+pub(super) use ssh::SshEditorAction;
 
 type Choices = Vec<(String, String)>;
 
@@ -14,6 +23,10 @@ enum Field {
     Name, Group, Color, Scheme, Exit, Hidden, Command, Cwd, Admin, Env, Destination, User, Port,
     Identity, Keepalive, Count, Timeout, Banner, Remember, X11, Term, Device, Speed, Bits, Parity,
     Stop, Flow, Slow, Address, Input, Output, InLines, OutLines, Backspace, Expect, Send, Regex, Optional,
+    ProxyMethod, ProxyTarget, Auth, Password, SetPassword, ForgetPassword, BrowseKey, ImportKey, VaultKey,
+    ForwardType, ForwardListen, ForwardDestination, ForwardDescription, AddForward,
+    ForwardAgent, ReuseSession,
+    AlgorithmCategory, AlgorithmCheck,
 }
 
 impl Field {
@@ -32,6 +45,14 @@ impl Field {
             Self::Input => t("Input mode"), Self::Output => t("Output mode"), Self::InLines => t("Newlines in"),
             Self::OutLines => t("Newlines out"), Self::Backspace => t("Backspace"), Self::Expect => t("Login script · Expect"),
             Self::Send => t("Send"), Self::Regex => t("Regular expressions"), Self::Optional => t("Optional"),
+            Self::ProxyMethod => t("Connection method"), Self::ProxyTarget => "", Self::Auth => t("Authentication"),
+            Self::Password => t("Password"), Self::SetPassword => t("Set password"), Self::ForgetPassword => t("Forget password"),
+            Self::BrowseKey => t("Choose private key file"), Self::ImportKey => t("Import a key into the vault"), Self::VaultKey => t("Choose a vault key"),
+            Self::ForwardType => t("Forward type"), Self::ForwardListen => t("Listening address"),
+            Self::ForwardDestination => t("Forward to"), Self::ForwardDescription => t("Forward description"),
+            Self::AddForward => t("Add port forward"),
+            Self::ForwardAgent => t("Forward the SSH agent"), Self::ReuseSession => t("Reuse SSH connection"),
+            Self::AlgorithmCategory => t("Algorithm category"), Self::AlgorithmCheck => "",
         }
     }
 
@@ -50,7 +71,7 @@ impl Field {
     fn is_step(self) -> bool { matches!(self, Self::Expect | Self::Send | Self::Regex | Self::Optional) }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EditorField {
     id: Field,
     pub label: String,
@@ -59,12 +80,25 @@ pub struct EditorField {
     pub editable: bool,
 }
 
+impl std::fmt::Debug for EditorField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = if self.id == Field::Password { "•••" } else { &self.value };
+        f.debug_struct("EditorField").field("id", &self.id).field("value", &value).finish()
+    }
+}
+
 impl EditorField {
     pub fn list_hint(&self) -> Option<&'static str> {
         if self.id.is_step() {
             Some(t("Enter add step  ·  Del remove step  ·  Ctrl+Enter save"))
         } else if matches!(self.id, Field::Env | Field::Identity) {
             Some(t("Enter add row  ·  Del remove row  ·  Ctrl+Enter save"))
+        } else if self.id == Field::User {
+            Some(t("Leave the user empty to ask when connecting"))
+        } else if self.id.is_forward() {
+            Some(t("Del remove this port forward"))
+        } else if self.id == Field::AlgorithmCheck {
+            Some(t("Keep at least one algorithm in each category"))
         } else { None }
     }
 
@@ -73,6 +107,7 @@ impl EditorField {
     }
 
     pub fn display(&self) -> &str {
+        if self.id == Field::ForwardDestination && !self.editable { return ""; }
         self.choices.iter().find(|(k, _)| k == &self.value).map_or(&self.value, |(_, v)| v)
     }
 
@@ -108,6 +143,10 @@ pub struct ProfileEditor {
     kind: &'static str,
     groups: Vec<crate::profile::ProfileGroup>,
     global: BTreeMap<String, ProfileDefaults>,
+    jump_choices: Choices,
+    proxy_arguments: BTreeMap<String, String>,
+    algorithm_catalog: AlgorithmCatalog,
+    algorithm_options: AlgorithmOptions,
 }
 
 fn options(items: &[(&str, &str)], inherit: bool) -> Choices {
@@ -188,20 +227,24 @@ impl ProfileEditor {
         let mut tabs = vec![EditorTab::new("General", fields)];
         match kind {
             "local" => tabs.push(command_tab(&p, is_defaults)),
-            "ssh" => tabs.push(ssh_tab(&p)),
+            "ssh" => tabs.extend([ssh::tab(&p, is_defaults), forwards::tab(&p), ssh::advanced_tab(&p), algorithms::tab()]),
             "serial" => tabs.push(serial_tab(&p, defaults.as_ref(), ports)),
             "socket" => tabs.push(EditorTab::new("Network", vec![Field::Address.text(optional(p.socket.as_ref()))])),
             _ => {}
         }
         if matches!(kind, "ssh" | "serial" | "socket") { tabs.push(stream_tab(p.stream.as_ref())); }
         tabs.push(EditorTab::new("Colors", vec![scheme]));
-        Self { original, error: None, tab: 0, focus: 0, tabs, source: p, defaults, kind, groups: config.groups.clone(), global: config.profile_defaults.clone() }
+        let algorithm_options = p.ssh_options.as_ref().and_then(|s| s.algorithms.clone()).unwrap_or_default();
+        let mut editor = Self { original, error: None, tab: 0, focus: 0, tabs, source: p, defaults, kind, groups: config.groups.clone(), global: config.profile_defaults.clone(), jump_choices: Vec::new(), proxy_arguments: BTreeMap::new(), algorithm_catalog: Default::default(), algorithm_options };
+        editor.set_jump_profiles(&config.profiles);
+        editor
     }
 
     pub(crate) fn global_environment(env: &BTreeMap<String, String>) -> Self {
         Self {
             original: None, error: None, tab: 0, focus: 0, tabs: vec![EditorTab::new("Environment variables", env_fields(env).collect())],
             source: Profile::default(), defaults: None, kind: "environment", groups: Vec::new(), global: BTreeMap::new(),
+            jump_choices: Vec::new(), proxy_arguments: BTreeMap::new(), algorithm_catalog: Default::default(), algorithm_options: Default::default(),
         }
     }
 
@@ -246,7 +289,8 @@ impl ProfileEditor {
     pub fn activate(&mut self, index: usize) {
         if let Some(field) = self.tabs[self.tab].fields.get_mut(index) {
             self.focus = index;
-            if !field.editable { field.cycle(false); }
+            if field.id == Field::AddForward { self.add_forward(); }
+            else if !field.editable { self.cycle_field(false); }
         }
     }
 
@@ -267,8 +311,9 @@ impl ProfileEditor {
         let len = fields.len();
         let field = &mut fields[self.focus];
         match key {
-            Key::Left | Key::Right => field.cycle(key == Key::Left),
-            Key::Space if !field.editable => field.cycle(false),
+            Key::Left | Key::Right => self.cycle_field(key == Key::Left),
+            Key::Enter | Key::Space if field.id == Field::AddForward => self.add_forward(),
+            Key::Space if !field.editable => self.cycle_field(false),
             Key::Tab => self.focus = (self.focus + if mods.shift { len - 1 } else { 1 }) % len,
             Key::Up => self.focus = self.focus.saturating_sub(1),
             Key::Down => self.focus = (self.focus + 1).min(len - 1),
@@ -288,6 +333,7 @@ impl ProfileEditor {
                 if fields.iter().all(|f| f.id != Field::Expect) { fields.extend(step_fields(&LoginStep::default())); }
                 self.focus = start.min(fields.len() - 1);
             }
+            Key::Delete if field.id.is_forward() => self.remove_forward(),
             Key::Delete if matches!(field.id, Field::Env | Field::Identity) => {
                 let id = field.id;
                 if fields.iter().filter(|f| f.id == id).count() == 1 {
@@ -297,7 +343,8 @@ impl ProfileEditor {
                     self.focus = self.focus.min(fields.len() - 1);
                 }
             }
-            Key::Enter if !field.choices.is_empty() => field.cycle(false),
+            Key::Enter if !field.choices.is_empty() => self.cycle_field(false),
+            Key::Enter if field.id == Field::AlgorithmCheck => self.cycle_field(false),
             Key::Enter => self.focus = (self.focus + 1) % len,
             Key::Backspace if field.editable => {
                 if mods.ctrl { field.value.clear(); } else { field.value.pop(); }
@@ -336,22 +383,6 @@ fn command_tab(p: &Profile, defaults: bool) -> EditorTab {
     if cfg!(windows) { fields.push(Field::Admin.toggle(p.admin.or(p.elevated.then_some(true)), true)); }
     fields.extend(env_fields(&p.env));
     EditorTab::new("Command", fields)
-}
-
-fn ssh_tab(p: &Profile) -> EditorTab {
-    let s = p.ssh_options.clone().unwrap_or_default();
-    let mut fields = vec![
-        Field::Destination.text(optional(p.ssh.as_ref())), Field::User.text(optional(s.user)),
-        Field::Port.text(optional(s.port)),
-    ];
-    fields.extend(s.identity_files.unwrap_or_default().into_iter().map(|f| Field::Identity.text(f)));
-    fields.push(Field::Identity.text(""));
-    fields.extend([
-        Field::Keepalive.text(optional(s.keepalive_ms)), Field::Count.text(optional(s.keepalive_count)),
-        Field::Timeout.text(optional(s.ready_timeout_ms)), Field::Banner.toggle(s.skip_banner, true),
-        Field::Remember.toggle(s.remember_cwd, true), Field::X11.toggle(s.x11, true), Field::Term.text(optional(s.term)),
-    ]);
-    EditorTab::new("SSH", fields)
 }
 
 fn step_fields(step: &LoginStep) -> [EditorField; 4] {
@@ -440,10 +471,13 @@ impl ProfileEditor {
         let port = self.number(Field::Port)?;
         if port == Some(0) { return Err(t("SSH port must be between 1 and 65535").into()); }
         let options = SshOptions {
-            user: self.opt(Field::User), port, identity_files, keepalive_ms: self.number(Field::Keepalive)?,
+            user: self.ssh_user(), port, identity_files, keepalive_ms: self.number(Field::Keepalive)?,
+            proxy: self.ssh_proxy()?, auth: enum_value(self.value(Field::Auth)),
+            forwards: self.ssh_forwards()?,
+            forward_agent: self.flag(Field::ForwardAgent), reuse_session: self.flag(Field::ReuseSession),
             keepalive_count: self.number(Field::Count)?, ready_timeout_ms: self.number(Field::Timeout)?,
             skip_banner: self.flag(Field::Banner), remember_cwd: self.flag(Field::Remember), x11: self.flag(Field::X11),
-            term: self.opt(Field::Term), ..old.cloned().unwrap_or_default()
+            term: self.opt(Field::Term), algorithms: self.ssh_algorithm_options(),
         };
         Ok((options != SshOptions::default()).then_some(options))
     }

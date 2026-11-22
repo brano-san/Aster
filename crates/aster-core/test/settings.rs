@@ -628,6 +628,29 @@ fn a_new_ssh_profile_needs_only_a_name_and_a_destination() {
     let config = saved(&mut a).expect("saved");
     let p = config.profiles.iter().find(|p| p.name == "Prod").unwrap();
     assert_eq!((p.ssh.as_deref(), p.command.as_str(), p.args.as_slice()), (Some("deploy@prod"), "ssh", &["deploy@prod".to_owned()][..]));
+    assert!(p.ssh_options.as_ref().and_then(|options| options.user.as_ref()).is_none());
+}
+
+#[test]
+fn ssh_profile_password_actions_use_the_secret_store_and_do_not_save_config() {
+    let mut a = app();
+    choose_template(&mut a, "SSH connection");
+    focus_field(&mut a, "SSH", "SSH destination");
+    typed(&mut a, "host");
+    focus_field(&mut a, "SSH", "User");
+    typed(&mut a, "ann");
+    focus_field(&mut a, "SSH", "Password");
+    typed(&mut a, "example-secret");
+    let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
+    assert!(!format!("{editor:?}").contains("example-secret"));
+    key(&mut a, Key::Enter);
+    let effects = a.take_effects();
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::SshPassword { destination, options, value: Some(value), .. }
+        if destination == "host" && options.user.as_deref() == Some("ann") && value == "example-secret")));
+    assert!(effects.iter().all(|effect| !matches!(effect, Effect::SaveConfig(_))));
+    focus_field(&mut a, "SSH", "Forget password");
+    key(&mut a, Key::Enter);
+    assert!(a.take_effects().iter().any(|effect| matches!(effect, Effect::SshPassword { destination, value: None, .. } if destination == "host")));
 }
 
 #[test]

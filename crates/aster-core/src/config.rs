@@ -1,6 +1,7 @@
 use crate::profile::{Profile, ProfileDefaults, ProfileGroup};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+pub use aster_proto::ssh::WindowsAgent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -71,13 +72,18 @@ pub struct Ssh {
     pub share_connections: bool,
     pub remember_passwords: bool,
     pub forward_agent: bool,
+    pub warn_on_close: bool,
+    pub verify_host_keys: bool,
+    pub windows_agent: WindowsAgent,
+    pub agent_pipe: String,
     pub clear_after_connect: bool,
     pub x11_display: String,
 }
 
 impl Default for Ssh {
     fn default() -> Self {
-        Self { client: SshClient::Native, share_connections: true, remember_passwords: true, forward_agent: false, clear_after_connect: true, x11_display: String::new() }
+        Self { client: SshClient::Native, share_connections: true, remember_passwords: true, forward_agent: false, warn_on_close: true,
+            verify_host_keys: true, windows_agent: WindowsAgent::Auto, agent_pipe: String::new(), clear_after_connect: true, x11_display: String::new() }
     }
 }
 

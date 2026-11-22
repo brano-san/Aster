@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PUMP_QUEUE: usize = 64;
@@ -152,13 +153,14 @@ enum Pump {
     Disconnect,
 }
 
-pub type Exit = (WindowId, PaneId, Option<u32>);
-pub type TransferNote = (WindowId, PaneId, Note);
+pub type Exit = (WindowId, PaneId, u64, Option<u32>);
+pub type TransferNote = (WindowId, PaneId, u64, Note);
 
 #[derive(Clone)]
 struct Ctx {
     window: WindowId,
     pane: PaneId,
+    id: u64,
     terminal: Shared,
     transfer: Arc<Mutex<Transfer>>,
     writer: Sender<Out>,
@@ -193,7 +195,7 @@ impl Ctx {
             let _ = self.writer.send(Out::Transfer(bytes));
         }
         if let Some(note) = out.note {
-            let _ = self.notes.send((self.window, self.pane, note));
+            let _ = self.notes.send((self.window, self.pane, self.id, note));
             (self.flow.wake)();
         }
         if out.pump {
@@ -214,12 +216,14 @@ pub struct Start {
 
 impl Session {
     pub fn start(start: Start, spawned: Spawned, terminal: Shared) -> Session {
+        static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let Start { window, pane, downloads, exits, notes, flow, raw_output } = start;
         let wake = flow.wake.clone();
         let Spawned { pty, mut reader, mut writer, mut raw, wait } = spawned;
         let (tx, rx) = unbounded::<Out>();
         let (pump_tx, pump_rx) = unbounded();
-        let ctx = Ctx { window, pane, terminal, transfer: Arc::new(Mutex::new(Transfer::new(downloads))), writer: tx.clone(), pump: pump_tx, notes, flow, raw_output };
+        let ctx = Ctx { window, pane, id, terminal, transfer: Arc::new(Mutex::new(Transfer::new(downloads))), writer: tx.clone(), pump: pump_tx, notes, flow, raw_output };
         let reading = ctx.clone();
         std::thread::Builder::new()
             .name(format!("aster-pty-read-{pane}"))
@@ -282,12 +286,14 @@ impl Session {
             .name(format!("aster-pty-wait-{pane}"))
             .spawn(move || {
                 let code = wait();
-                let _ = exits.send((window, pane, code));
+                let _ = exits.send((window, pane, id, code));
                 wake();
             })
             .expect("pty wait thread");
         Session { pty, writer: tx, ctx }
     }
+
+    pub fn id(&self) -> u64 { self.ctx.id }
 
     pub fn write(&self, bytes: Vec<u8>) {
         let _ = self.writer.send(Out::Keys(bytes));

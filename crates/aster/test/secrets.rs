@@ -88,6 +88,25 @@ fn an_unconfigured_store_delegates_every_operation_to_the_os() {
 }
 
 #[test]
+fn imported_private_keys_exist_only_in_the_unlocked_vault() {
+    let h = Harness::start(String::new());
+    h.command(VaultCommand::Create("master".into()));
+    let route = WindowSecrets::new(h.secrets.clone(), |_, _| panic!("unlocked vault requested a master passphrase"));
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../aster-ssh/test/keys/client");
+    let id = route.wait(SecretUse::ImportSshIdentity(path)).unwrap().unwrap();
+    let entries = h.update().view.entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, aster_ssh::secrets::PRIVATE_KEY_KIND);
+    assert_eq!(entries[0].key, key_file_key(&id));
+    let contents = route.private_key(&id).unwrap();
+    let saved = h.sealed.lock().unwrap().clone();
+    assert_eq!(Vault::open(&saved, "master").unwrap().key_file(&id), Some(contents.as_str()));
+    h.command(VaultCommand::Lock);
+    assert!(route.private_key(&id).is_none());
+    assert_eq!(h.os.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn locked_writes_and_deletes_are_applied_only_after_successful_unlock() {
     let mut initial = Vault::default();
     initial.set("password", "key:a", "old");
