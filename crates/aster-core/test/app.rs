@@ -191,6 +191,7 @@ fn moving_over_a_palette_row_starts_the_hover_transition() {
     a.config.appearance.animations = true;
     a.open_default_tab();
     a.open_overlay(OverlayKind::Commands);
+    a.overlay.as_mut().unwrap().opened_at -= std::time::Duration::from_secs(1);
     a.frame(&mut gfx, false);
     assert!(!a.needs_redraw());
     let geo = crate::view::overlay_geometry(&a, a.overlay.as_ref().unwrap());
