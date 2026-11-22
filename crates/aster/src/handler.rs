@@ -51,6 +51,7 @@ enum StoreEvent {
     Config(u64, Option<SystemTime>, Result<Option<String>, ()>, Result<Box<Config>, String>),
     ConfigStatus(u64, Option<String>),
     StartMenuShortcut(Option<WindowId>, Result<bool, aster_platform::PlatformError>),
+    InstallationError(WindowId, std::io::Error),
     RawConfigSaved(WindowId, Result<(String, Box<Config>), String>),
     RestartReady(WindowId, Result<PathBuf, String>),
     RestartSessionSaved(WindowId, Result<PathBuf, String>),
@@ -133,6 +134,7 @@ pub struct Handler<P: Platform> {
     applied: Option<(String, Option<DockSpec>)>,
     window_prefs_dirty: bool,
     requests: Option<std::sync::mpsc::Receiver<String>>,
+    deferred_requests: Vec<String>,
     startup: Option<crate::cli::Request>,
     last_focused: Option<WindowId>,
     recent: Vec<String>,
@@ -142,6 +144,8 @@ pub struct Handler<P: Platform> {
     update_window: Option<WindowId>,
     shell_integration: crate::shell_integration::ShellIntegration,
     start_menu_shortcut: bool,
+    installation: aster_core::installation::State,
+    installation_quit: bool,
     restarting: bool,
     restart_preparing: bool,
 }
@@ -209,7 +213,7 @@ fn serve_request(app: &mut App, request: crate::cli::Request) -> bool {
     use crate::cli::Command;
     match request.command {
         Command::Window => return false,
-        Command::Hidden => return true,
+        Command::Hidden | Command::InstallationQuit => return true,
         Command::Open { dir } => {
             if let Some(profile) = app.default_profile() {
                 app.open_tab_at(profile, Some(dir));
@@ -307,7 +311,7 @@ impl<P: Platform> Handler<P> {
         let extension_events = store_events.clone();
         let root = config_path.as_deref().and_then(std::path::Path::parent).map(|path| path.join("extensions"));
         let (extensions, extension_worker) = crate::extensions::Host::start::<P>(root, move |event| extension_events.post(StoreEvent::Extensions(event)))?;
-        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, sync, sync_view: Default::default(), sync_requested: None, updates, update_window: None, restarting: false, restart_preparing: false };
+        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, shell_integration, start_menu_shortcut: false, installation: P::installation_state(), installation_quit: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, deferred_requests: Vec::new(), startup: None, last_focused: None, recent, recent_folders, jump_list: None, sync, sync_view: Default::default(), sync_requested: None, updates, update_window: None, restarting: false, restart_preparing: false };
         if !encrypted {
             handler.scan_extensions(&handler.config);
             handler.update_launcher(&handler.config, None);
@@ -331,10 +335,21 @@ impl<P: Platform> Handler<P> {
     }
 
     fn drain_requests(&mut self, window: &Win<P>) {
-        if self.config_startup == ConfigStartup::Prompt || self.request_target() != Some(window.id()) {
+        if self.request_target() != Some(window.id()) {
             return;
         }
-        let incoming: Vec<String> = self.requests.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        let mut incoming = std::mem::take(&mut self.deferred_requests);
+        if let Some(requests) = &self.requests {
+            incoming.extend(requests.try_iter());
+        }
+        if incoming.iter().any(|text| text == aster_platform::INSTALLATION_QUIT) {
+            self.quit_for_installation();
+            return;
+        }
+        if self.config_startup == ConfigStartup::Prompt {
+            self.deferred_requests = incoming;
+            return;
+        }
         for text in incoming {
             let Some(request) = crate::cli::Request::decode(&text).filter(|r| r.command != crate::cli::Command::Hidden) else { continue };
             let handled = self.windows.get_mut(&window.id()).is_some_and(|s| serve_request(&mut s.app, request));
@@ -345,6 +360,15 @@ impl<P: Platform> Handler<P> {
             self.quake_visibility(window, true);
             window.request_redraw();
         }
+    }
+
+    fn quit_for_installation(&mut self) {
+        if !self.session_saved && !self.windows.is_empty() {
+            self.save_session();
+        }
+        self.session_saved = true;
+        self.installation_quit = true;
+        self.waker.wake();
     }
 
     fn save_config(&mut self, text: String) {
@@ -881,6 +905,14 @@ impl<P: Platform> Handler<P> {
             Effect::StartMenuShortcut(create) => {
                 let events = self.store_events.clone();
                 self.shell_integration.shortcut(Some(create), move |result| events.post(StoreEvent::StartMenuShortcut(Some(id), result)));
+            }
+            Effect::InstallForUser => {
+                let events = self.store_events.clone();
+                self.desktop.send(move || {
+                    if let Err(error) = P::start_user_install() {
+                        events.post(StoreEvent::InstallationError(id, error));
+                    }
+                });
             }
             Effect::RevealConfigFile => {
                 if let Some(path) = self.config_path.clone() {
@@ -1454,6 +1486,11 @@ impl<P: Platform> Handler<P> {
                         }
                     }
                 },
+                StoreEvent::InstallationError(id, error) => {
+                    if let Some(state) = self.windows.get_mut(&id) {
+                        state.app.installation_error(&error.to_string());
+                    }
+                }
                 StoreEvent::ConfigStatus(revision, error) => {
                     if self.settings_revision == revision {
                         self.reload_config(true);
@@ -1692,7 +1729,7 @@ impl<P: Platform> Handler<P> {
 
 impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     fn tray_enabled(&self) -> bool {
-        self.config.appearance.tray && !self.restarting
+        self.config.appearance.tray && !self.restarting && !self.installation_quit
     }
 
     fn confirming_close(&self, window: &Win<P>) -> bool {
@@ -1710,7 +1747,13 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         self.drain_exits();
         self.drain_store();
         self.drain_updates();
-        queue_background_request(&mut self.startup, self.requests.as_ref())
+        let pending = queue_background_request(&mut self.startup, self.requests.as_ref());
+        if self.startup.as_ref().is_some_and(|request| request.command == crate::cli::Command::InstallationQuit) {
+            self.startup = None;
+            self.quit_for_installation();
+            return false;
+        }
+        pending
     }
 
     fn created(&mut self, window: &Win<P>) {
@@ -1741,6 +1784,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             app.set_launcher_installed(installed);
         }
         app.set_start_menu_shortcut(self.start_menu_shortcut);
+        app.set_installation(self.installation);
         app.set_system_language(&P::ui_language());
         app.warn_read_only_config();
         app.vault_state(self.vault_view.clone());
@@ -1873,6 +1917,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     }
 
     fn woken(&mut self, window: &Win<P>) {
+        if self.installation_quit {
+            return window.close();
+        }
         self.drain_updates();
         if self.restarting {
             return self.close_for_restart(window);
@@ -1889,6 +1936,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
             self.apply_window_prefs(window);
         }
         self.drain_requests(window);
+        if self.installation_quit {
+            return window.close();
+        }
         self.drain_exits();
         if let Some(s) = self.windows.get_mut(&window.id()) {
             s.app.woken();

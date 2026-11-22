@@ -88,6 +88,7 @@ pub enum Action {
     NotifyCommand,
     OpenLog,
     StartMenuShortcut,
+    InstallForUser,
     EditEnvironment,
     OpenConfigFile,
     OpenConfigFolder,
@@ -193,6 +194,8 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::EditEnvironment, "edit-environment", "Edit environment variables"),
     #[cfg(windows)]
     (Action::StartMenuShortcut, "start-menu-shortcut", "Toggle Start menu shortcut"),
+    #[cfg(windows)]
+    (Action::InstallForUser, "install-for-user", "Install for this user"),
     (Action::OpenConfigFile, "open-config-file", "Open the config file in an editor"),
     (Action::OpenConfigFolder, "open-config-folder", "Open the config folder"),
     (Action::ShowDefaultConfig, "show-default-config", "Show the defaults"),

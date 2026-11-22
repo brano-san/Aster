@@ -31,7 +31,7 @@ fn target(link: &IShellLinkW) -> windows::core::Result<PathBuf> {
     Ok(PathBuf::from(OsString::from_wide(&buffer[..end])))
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
 }
 
@@ -67,11 +67,15 @@ fn update(path: &Path, exe: &Path, change: Option<bool>) -> Result<bool, Platfor
 }
 
 pub fn apply(change: Option<bool>) -> Result<bool, PlatformError> {
+    let exe = std::env::current_exe().map_err(io_error)?;
+    apply_for(change, &exe)
+}
+
+pub(crate) fn apply_for(change: Option<bool>, exe: &Path) -> Result<bool, PlatformError> {
     let appdata = std::env::var_os("APPDATA").ok_or_else(|| PlatformError::new(0, "APPDATA unavailable"))?;
     let path = PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs\Aster.lnk");
-    let exe = std::env::current_exe().map_err(io_error)?;
     let _com = Apartment::enter().map_err(crate::err)?;
-    update(&path, &exe, change)
+    update(&path, exe, change)
 }
 
 #[cfg(test)]

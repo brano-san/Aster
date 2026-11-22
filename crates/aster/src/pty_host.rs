@@ -94,6 +94,19 @@ pub fn kill_detached<P: Platform>(id: u64) {
     }
 }
 
+#[cfg(windows)]
+pub fn close_for_uninstall<P: Platform>() -> io::Result<()> {
+    let mut client = match connect::<P>(false) {
+        Ok(client) => client,
+        Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for session in client.list()? {
+        client.kill(session.id)?;
+    }
+    Ok(())
+}
+
 fn match_sessions(saved: &[Option<u64>], live: Vec<SessionInfo>) -> (Vec<Option<SessionInfo>>, Vec<u64>) {
     let mut live: HashMap<_, _> = live.into_iter().map(|info| (info.id, info)).collect();
     let mut panes = Vec::with_capacity(saved.len());

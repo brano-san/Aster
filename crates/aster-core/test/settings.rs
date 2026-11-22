@@ -369,6 +369,7 @@ fn numbers_print_without_float_noise() {
 fn the_query_filters_by_every_word_across_label_hint_and_section() {
     let mut page = SettingsPage::new();
     page.vault.configured = true;
+    page.installation = crate::installation::State::Available;
     let mut listed = std::collections::BTreeSet::new();
     use crate::sync::Backend;
     for (installed, backend) in [(None, Backend::Off), (Some(false), Backend::Folder), (Some(true), Backend::Git)] {
@@ -404,6 +405,19 @@ fn the_query_filters_by_every_word_across_label_hint_and_section() {
     page.refilter();
     let keys: Vec<_> = page.shown.iter().map(|&i| SETTINGS[i].key).collect();
     assert_eq!(keys, ["appearance.dock-always-on-top"]);
+}
+
+#[cfg(windows)]
+#[test]
+fn install_action_is_visible_only_for_an_unpacked_nonportable_copy() {
+    use crate::installation::State;
+    let setting = SETTINGS.iter().position(|setting| setting.key == "action.install-for-user").unwrap();
+    let mut page = SettingsPage::new();
+    for state in [State::Unavailable, State::Installed, State::Available] {
+        page.installation = state;
+        page.refilter();
+        assert_eq!(page.shown.contains(&setting), state == State::Available);
+    }
 }
 
 #[test]

@@ -2776,7 +2776,11 @@ impl App {
                     let y = baseline(g, r, section);
                     g.text(r.x, y, t(name), section, theme.accent, r.w);
                     if name == crate::settings::SYSTEM && !page.searching() {
-                        let version = tf("Aster {version}", &[("version", env!("CARGO_PKG_VERSION"))]);
+                        let version = if self.installation == crate::installation::State::Installed {
+                            tf("Aster {version} · Installed for this user", &[("version", env!("CARGO_PKG_VERSION"))])
+                        } else {
+                            tf("Aster {version}", &[("version", env!("CARGO_PKG_VERSION"))])
+                        };
                         g.text(r.x, y + (20.0 * s).round(), &version, ui, theme.text, r.w);
                     }
                 }
@@ -2939,6 +2943,7 @@ impl App {
                                 crate::keymap::Action::ApplicationsMenu(true) => t("Add"),
                                 crate::keymap::Action::ApplicationsMenu(false) => t("Remove"),
                                 crate::keymap::Action::StartMenuShortcut => if self.start_menu_shortcut { t("Remove shortcut") } else { t("Create shortcut") },
+                                crate::keymap::Action::InstallForUser => t("Install"),
                                 crate::keymap::Action::EditEnvironment => t("Edit"),
                                 _ => t("Open"),
                             };

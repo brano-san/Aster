@@ -96,6 +96,7 @@ pub enum Effect {
     Open(String),
     OpenLog,
     StartMenuShortcut(bool),
+    InstallForUser,
     SaveOutput { pane: PaneId },
     ExportBuffer { pane: PaneId, text: String },
     RecentProfiles(Vec<String>),
@@ -266,6 +267,7 @@ pub struct App {
     pub(crate) config_status: Option<Result<(), String>>,
     pub(crate) launcher_installed: Option<bool>,
     pub(crate) start_menu_shortcut: bool,
+    pub(crate) installation: crate::installation::State,
     pub(crate) config_encrypted: bool,
     pub(crate) vault_prompt: Option<crate::vault_settings::VaultDialog>,
     pub(crate) config_editor: crate::config_editor::ConfigEditor,
@@ -402,6 +404,7 @@ impl App {
             config_status: None,
             launcher_installed: None,
             start_menu_shortcut: false,
+            installation: Default::default(),
             config_encrypted: false,
             vault_prompt: None,
             config_editor: crate::config_editor::ConfigEditor::default(),
@@ -1479,6 +1482,11 @@ impl App {
             OpenLog => self.effects.push(Effect::OpenLog),
             EditEnvironment => self.edit_environment(),
             StartMenuShortcut => self.effects.push(Effect::StartMenuShortcut(!self.start_menu_shortcut)),
+            InstallForUser => {
+                if self.installation == crate::installation::State::Available {
+                    self.effects.push(Effect::InstallForUser);
+                }
+            }
             OpenConfigFile => self.effects.push(Effect::OpenConfigFile),
             OpenConfigFolder => self.effects.push(Effect::OpenConfigFolder),
             ShowDefaultConfig => self.effects.push(Effect::ShowDefaultConfig),

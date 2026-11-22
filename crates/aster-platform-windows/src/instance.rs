@@ -1,12 +1,16 @@
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::os::windows::io::FromRawHandle;
+use std::io::{self, Read, Write};
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
-use windows::core::HSTRING;
-use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE};
+use std::time::{Duration, Instant};
+use windows::core::{HSTRING, PWSTR};
+use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_PIPE_BUSY, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND};
-use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
+use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject};
 
 const LIMIT: u64 = 1 << 20;
 
@@ -71,6 +75,43 @@ pub fn send(message: &str) -> bool {
         }
     }
     false
+}
+
+fn process_path(process: HANDLE) -> windows::core::Result<PathBuf> {
+    let mut name = vec![0u16; 32768];
+    let mut len = name.len() as u32;
+    unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(name.as_mut_ptr()), &mut len)? };
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&name[..len as usize])))
+}
+
+pub fn stop_for_installation(installed: &Path, source: Option<&Path>) -> io::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut pipe = loop {
+        match OpenOptions::new().write(true).open(name()) {
+            Ok(pipe) => break pipe,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let mut pid = 0;
+    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut pid) }.map_err(io::Error::other)?;
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) }.map_err(io::Error::other)?;
+    let owned = unsafe { OwnedHandle::from_raw_handle(process.0) };
+    let image = process_path(HANDLE(owned.as_raw_handle())).map_err(io::Error::other)?;
+    if !crate::shortcut::same_path(&image, installed) && !source.is_some_and(|source| crate::shortcut::same_path(&image, source)) {
+        return Ok(());
+    }
+    pipe.write_all(aster_platform::INSTALLATION_QUIT.as_bytes())?;
+    drop(pipe);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match unsafe { WaitForSingleObject(HANDLE(owned.as_raw_handle()), remaining.as_millis() as u32) } {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err(io::Error::new(io::ErrorKind::TimedOut, aster_core::installation::quit_timeout())),
+        _ => Err(io::Error::last_os_error()),
+    }
 }
 
 #[cfg(test)]

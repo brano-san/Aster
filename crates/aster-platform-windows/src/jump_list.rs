@@ -89,3 +89,13 @@ pub fn apply(model: &JumpList) -> std::result::Result<(), PlatformError> {
     let exe = std::env::current_exe().map_err(|error| PlatformError::new(error.raw_os_error().unwrap_or_default().into(), error.to_string()))?;
     replace(&exe, model).map_err(crate::err)
 }
+
+pub fn remove() -> std::result::Result<(), PlatformError> {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+    let _com = Apartment::enter().map_err(crate::err)?;
+    let list: ICustomDestinationList = unsafe { CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER) }.map_err(crate::err)?;
+    match unsafe { list.DeleteList(APP_ID) } {
+        Err(error) if [ERROR_FILE_NOT_FOUND.to_hresult(), ERROR_PATH_NOT_FOUND.to_hresult()].contains(&error.code()) => Ok(()),
+        result => result.map_err(crate::err),
+    }
+}

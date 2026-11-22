@@ -9,6 +9,7 @@ mod explorer;
 pub mod config_lock;
 mod reveal;
 mod instance;
+pub mod installer;
 mod jump_list;
 mod monitors;
 mod notifications;
@@ -146,6 +147,18 @@ impl Platform for Windows {
 
     fn start_menu_shortcut(change: Option<bool>) -> Result<bool, PlatformError> {
         shortcut::apply(change)
+    }
+
+    fn installation_state() -> aster_core::installation::State {
+        installer::state()
+    }
+
+    fn start_user_install() -> std::io::Result<()> {
+        std::process::Command::new(std::env::current_exe()?).arg("--install").spawn().map(|_| ())
+    }
+
+    fn update_install_registration(path: &std::path::Path, version: &str) -> std::io::Result<()> {
+        installer::refresh(path, version)
     }
 
     fn set_explorer_paste_menu(label: &str, enabled: bool) -> bool {

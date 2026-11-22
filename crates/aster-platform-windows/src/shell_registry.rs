@@ -1,6 +1,36 @@
+use std::ffi::OsString;
+use std::io;
+use std::os::windows::ffi::OsStrExt;
 use windows::core::HSTRING;
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS};
-use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ};
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
+use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetKeyValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Value {
+    Text(OsString),
+    Dword(u32),
+}
+
+impl Value {
+    pub fn text(value: impl Into<OsString>) -> Self { Self::Text(value.into()) }
+}
+
+fn status(error: WIN32_ERROR) -> io::Result<()> {
+    error.ok().map_err(|_| io::Error::from_raw_os_error(error.0 as i32))
+}
+
+pub fn write(path: &str, values: &[(&str, Value)]) -> io::Result<()> {
+    let path = HSTRING::from(path);
+    for (name, value) in values {
+        let name = HSTRING::from(*name);
+        let (kind, bytes) = match value {
+            Value::Text(value) => (REG_SZ, value.encode_wide().chain([0]).flat_map(u16::to_le_bytes).collect::<Vec<_>>()),
+            Value::Dword(value) => (REG_DWORD, value.to_le_bytes().to_vec()),
+        };
+        status(unsafe { RegSetKeyValueW(HKEY_CURRENT_USER, &path, &name, kind.0, Some(bytes.as_ptr().cast()), bytes.len() as u32) })?;
+    }
+    Ok(())
+}
 
 fn set_value(key: HKEY, name: Option<&str>, value: &str) -> bool {
     let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
@@ -23,6 +53,12 @@ pub fn set(path: &str, values: &[(Option<&str>, &str)]) -> bool {
 }
 
 pub fn remove(path: &str) -> bool {
-    let result = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(path)) };
-    matches!(result, ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND)
+    delete(path).is_ok()
+}
+
+pub fn delete(path: &str) -> io::Result<()> {
+    match unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(path)) } {
+        ERROR_SUCCESS | ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Ok(()),
+        error => status(error),
+    }
 }

@@ -6,6 +6,7 @@ use std::path::Path;
 pub enum Command {
     Window,
     Hidden,
+    InstallationQuit,
     Open { dir: String },
     Run {
         command: Vec<String>,
@@ -115,6 +116,9 @@ impl Request {
     }
 
     pub fn decode(text: &str) -> Option<Request> {
+        if cfg!(windows) && text == aster_platform::INSTALLATION_QUIT {
+            return Some(Self { cwd: None, command: Command::InstallationQuit });
+        }
         serde_json::from_str(text).ok()
     }
 }

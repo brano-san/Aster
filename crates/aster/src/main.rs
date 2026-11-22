@@ -172,6 +172,20 @@ fn main() {
         let code = update::install_from_command_line::<aster_platform_linux::Linux>(args.get(2), args.get(3));
         std::process::exit(code);
     }
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(action) = aster_platform_windows::installer::parse(&args[1..], Some(&exe)) {
+            use aster_platform_windows::Windows;
+            let config = config_path::<Windows>().and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| Config::parse(&text).ok());
+            let language = config.as_ref().map_or("auto", |config| config.appearance.language.as_str());
+            aster_core::i18n::set_language(aster_core::i18n::resolve(language, &Windows::ui_language()));
+            let Ok(action) = action else {
+                say(aster_core::installation::usage());
+                std::process::exit(2);
+            };
+            std::process::exit(aster_platform_windows::installer::run(action, &exe, env!("CARGO_PKG_VERSION"), pty_host::close_for_uninstall::<Windows>));
+        }
+    }
     let cwd = std::env::current_dir().ok();
     let command = match cli::parse(&args[1..], cwd.as_deref()) {
         cli::Parsed::Request(command) => command,

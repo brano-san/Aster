@@ -16,6 +16,7 @@ pub mod fuzzy;
 mod hover;
 pub mod i18n;
 pub mod input;
+pub mod installation;
 pub mod jump_list;
 pub mod keymap;
 pub mod keys;

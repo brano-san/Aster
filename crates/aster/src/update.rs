@@ -334,6 +334,9 @@ fn run<P: Platform>(jobs: Receiver<UpdateRequest>, tx: Sender<Reply>, wake: Wake
         };
         match result {
             Ok(exe) => {
+                if let Err(error) = P::update_install_registration(&exe, &release.version) {
+                    tracing::warn!("could not refresh Windows installation registration: {error}");
+                }
                 tracing::info!("installed Aster {} into {}, restarting", release.version, exe.display());
                 schedule_relaunch(exe);
                 send(Reply::Restart);

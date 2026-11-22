@@ -226,6 +226,8 @@ pub struct Spawned {
     pub wait: Box<dyn FnOnce() -> Option<u32> + Send>,
 }
 
+pub const INSTALLATION_QUIT: &str = "aster-installation-quit";
+
 pub trait Platform: 'static {
     type Windows: WindowSystem;
     type Renderer: Renderer<Window = <Self::Windows as WindowSystem>::Window>;
@@ -254,6 +256,9 @@ pub trait Platform: 'static {
     fn set_autostart(enabled: bool, args: &[&str]) -> std::io::Result<()>;
     fn set_explorer_paste_menu(_label: &str, _enabled: bool) -> bool { true }
     fn start_menu_shortcut(_change: Option<bool>) -> Result<bool, PlatformError> { Ok(false) }
+    fn installation_state() -> aster_core::installation::State { Default::default() }
+    fn start_user_install() -> std::io::Result<()> { Err(std::io::ErrorKind::Unsupported.into()) }
+    fn update_install_registration(_path: &std::path::Path, _version: &str) -> std::io::Result<()> { Ok(()) }
     fn set_url_scheme(_enabled: bool) -> bool { true }
     fn set_jump_list(_list: &aster_core::jump_list::JumpList) -> Result<(), PlatformError> { Ok(()) }
     fn beep() -> bool;
