@@ -222,6 +222,7 @@ impl App {
     }
 
     fn save_scheme_editor(&mut self) {
+        if self.config.read_only() { return self.warn_read_only_config(); }
         let Some(page) = self.settings.as_ref() else { return };
         let Some(editor) = page.scheme_editor.as_ref() else { return };
         let tab = page.scheme_tab;

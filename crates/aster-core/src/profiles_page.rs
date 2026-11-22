@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod actions;
 mod ssh_actions;
-pub(crate) use actions::profile_templates;
+pub(crate) use actions::{profile_creation, profile_icons, profile_templates};
 pub(crate) mod editor;
 pub(crate) mod layout;
 
@@ -175,7 +175,7 @@ pub(crate) fn tree(groups: &[ProfileGroup], profiles: &[ProfileRow], collapsed: 
                     format!("shell {} {} {} {}", p.name, p.id, p.detail, p.group.as_deref().unwrap_or_default())
                 }
                 TreeKind::NewGroup => format!("New group {}", t("New group")),
-                TreeKind::NewProfile => format!("New profile add create {}", t("New profile")),
+                TreeKind::NewProfile => format!("New profile add create {} {}", t("New profile"), t("Create")),
                 TreeKind::DefaultsHeader => format!("Defaults for each type {}", t("Defaults for each type")),
                 TreeKind::Defaults(kind) => format!("{kind} {} {}", kind_label(kind), t("Defaults for each type")),
             };

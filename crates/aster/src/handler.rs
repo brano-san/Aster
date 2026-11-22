@@ -3,10 +3,10 @@ use crate::session::{Exit, Session};
 use crate::secrets::{Secrets, Reply, SecretUse, System, VaultCommand, VaultUpdate, VaultWorker, WindowSecrets};
 use aster_core::app::{App, Effect};
 use aster_core::config::Config;
-use aster_core::input::{Event, HitArea};
+use aster_core::input::{Event, HitArea, PasteTarget};
 use aster_core::panes::PaneId;
 use aster_core::profile::Profile;
-use aster_core::settings::{VaultIssue, VaultView};
+use aster_core::settings::{RestartSettings, VaultIssue, VaultView};
 use aster_core::vault_settings::VaultReply;
 use aster_core::session::{SessionState, WindowState};
 use aster_gfx::text::{Gfx, TextBackend};
@@ -45,9 +45,12 @@ enum StoreEvent {
     VaultAccess(WindowId, AccessPrompt),
     ConfigEncryption(bool),
     ConfigOpened(WindowId, u64, Result<Box<Config>, VaultIssue>),
-    Config(u64, Option<SystemTime>, Result<Box<Config>, String>),
+    Config(u64, Option<SystemTime>, Result<Option<String>, ()>, Result<Box<Config>, String>),
     ConfigStatus(u64, Option<String>),
     StartMenuShortcut(Option<WindowId>, Result<bool, aster_platform::PlatformError>),
+    RawConfigSaved(WindowId, Result<(String, Box<Config>), String>),
+    RestartReady(WindowId, Result<PathBuf, String>),
+    RestartSessionSaved(WindowId, Result<PathBuf, String>),
     DefaultConfig(WindowId, std::io::Result<PathBuf>),
     SshPassword(WindowId, u64, aster_core::ssh::PasswordUpdate),
     SshKeys(WindowId, u64, bool, Option<crate::remote::KeyFiles>),
@@ -88,6 +91,7 @@ pub struct Handler<P: Platform> {
     launcher_installed: Option<bool>,
     font_families: Option<(Vec<String>, Vec<String>)>,
     config: Config,
+    restart_baseline: RestartSettings,
     profiles: Vec<Profile>,
     waker: <P::Windows as WindowSystem>::Waker,
     device: Option<Device<P>>,
@@ -108,6 +112,7 @@ pub struct Handler<P: Platform> {
     startup_config: Option<(WindowId, Box<Config>)>,
     config_stamp: Option<SystemTime>,
     settings_revision: u64,
+    raw_save_pending: bool,
     secrets: Secrets,
     vault_view: VaultView,
     vault_access: HashMap<WindowId, VecDeque<AccessPrompt>>,
@@ -129,6 +134,7 @@ pub struct Handler<P: Platform> {
     shell_integration: crate::shell_integration::ShellIntegration,
     start_menu_shortcut: bool,
     restarting: bool,
+    restart_preparing: bool,
 }
 
 fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
@@ -141,6 +147,30 @@ fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
 
 fn capturing() -> bool {
     std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_CAPTURE_SESSION").is_none()
+}
+
+fn persist_session(path: &std::path::Path, state: SessionState) -> std::io::Result<()> {
+    let nonce = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let temp = path.with_extension(format!("json.{}.{nonce}.tmp", std::process::id()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+    let result = (|| {
+        std::io::Write::write_all(&mut file, state.to_text().as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(temp); }
+    result
+}
+
+fn clear_on_connect(terminal: &aster_core::app::Shared, enabled: bool, waker: impl Waker) -> impl FnOnce() + Send + 'static {
+    let screen = enabled.then(|| terminal.clone());
+    move || {
+        if let Some(screen) = screen {
+            screen.lock().feed(b"\x1b[H\x1b[2J");
+            waker.wake();
+        }
+    }
 }
 
 fn queue_background_request(startup: &mut Option<crate::cli::Request>, requests: Option<&std::sync::mpsc::Receiver<String>>) -> bool {
@@ -252,6 +282,7 @@ impl<P: Platform> Handler<P> {
         let pending = if encrypted || config.terminal.recover_tabs || crate::update::restarted() { saved.windows } else { Vec::new() };
         let update_waker = waker.clone();
         let updates = crate::update::UpdateWorker::start::<P>(Arc::new(move || update_waker.wake()))?;
+        let restart_baseline = RestartSettings::from_config(&config);
         let desktop = crate::desktop::Worker::start()?;
         let launcher_installed = cfg!(target_os = "linux").then_some(false);
         let shell_integration = crate::shell_integration::ShellIntegration::start::<P>()?;
@@ -259,7 +290,7 @@ impl<P: Platform> Handler<P> {
             let events = store_events.clone();
             shell_integration.shortcut(None, move |result| events.post(StoreEvent::StartMenuShortcut(None, result)));
         }
-        let handler = Self { desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false };
+        let handler = Self { desktop, launcher_installed, shell_integration, start_menu_shortcut: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, applied: None, window_prefs_dirty: false, requests: None, startup: None, last_focused: None, recent, recent_folders, jump_list: None, updates, update_window: None, restarting: false, restart_preparing: false };
         if !encrypted {
             handler.update_launcher(&handler.config, None);
             handler.apply_autostart(&handler.config);
@@ -295,7 +326,13 @@ impl<P: Platform> Handler<P> {
     }
 
     fn save_config(&mut self, text: String) {
+        if self.raw_save_pending {
+            self.apply_config(self.config.clone());
+            self.show_config_status(Some(aster_core::i18n::t("Saving configuration…").into()));
+            return;
+        }
         let Ok(mut config) = Config::parse(&text) else { return };
+        if self.config.read_only() || config.read_only() { return; }
         config.vault.sealed.clone_from(&self.config.vault.sealed);
         config.vault.encrypt_config = self.config.vault.encrypt_config;
         self.settings_revision += 1;
@@ -383,8 +420,13 @@ impl<P: Platform> Handler<P> {
             let minutes = config.vault.remember_minutes;
             self.show_vault(VaultView { configured: !sealed.is_empty(), ..VaultView::default() });
             self.secrets.sync_config(move |_| Some((sealed, minutes)));
+            self.restart_baseline = RestartSettings::from_config(&config);
+            for state in self.windows.values_mut() {
+                state.app.set_restart_baseline(self.restart_baseline.clone());
+            }
             self.apply_config(config);
             self.config_startup = ConfigStartup::Ready;
+            self.reload_config(true);
         } else {
             self.config_startup = ConfigStartup::Skipped;
             self.pending.clear();
@@ -404,9 +446,75 @@ impl<P: Platform> Handler<P> {
         }
     }
 
+    fn save_raw_config(&mut self, id: WindowId, text: String, expected: Option<String>) {
+        let unavailable = if self.raw_save_pending {
+            Some(aster_core::i18n::t("Saving configuration…").into())
+        } else if self.config.read_only() {
+            Some(self.config.read_only_message())
+        } else if self.config_path.is_none() {
+            Some(aster_core::i18n::t("Config folder unavailable").into())
+        } else {
+            None
+        };
+        if let Some(error) = unavailable {
+            if let Some(state) = self.windows.get_mut(&id) { state.app.config_editor_failed(error); }
+            return;
+        }
+        let path = self.config_path.clone().unwrap();
+        self.settings_revision += 1;
+        self.raw_save_pending = self.secrets.sync_config({
+            let events = self.store_events.clone();
+            let access = self.config_access.clone();
+            move |_| match access.lock().expect("config access").save_raw(&path, expected.as_deref(), &text) {
+                Ok(config) => {
+                    let vault = (config.vault.sealed.clone(), config.vault.remember_minutes);
+                    events.post(StoreEvent::RawConfigSaved(id, Ok((text, Box::new(config)))));
+                    Some(vault)
+                }
+                Err(error) => {
+                    let message = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        aster_core::i18n::t("The config file changed on disk").into()
+                    } else {
+                        error.to_string()
+                    };
+                    events.post(StoreEvent::RawConfigSaved(id, Err(message)));
+                    None
+                }
+            }
+        });
+        if !self.raw_save_pending {
+            if let Some(state) = self.windows.get_mut(&id) {
+                state.app.config_editor_failed(aster_core::i18n::t("The config file could not be read").into());
+            }
+        }
+    }
+
     fn show_config_status(&mut self, error: Option<String>) {
         for state in self.windows.values_mut() {
             state.app.set_config_status(error.clone());
+        }
+    }
+
+    fn request_restart(&mut self, id: WindowId) {
+        if self.restarting || self.restart_preparing { return; }
+        let path = self.config_path.clone();
+        let expected = RestartSettings::from_config(&self.config);
+        let access = self.config_access.clone();
+        let events = self.store_events.clone();
+        self.restart_preparing = self.secrets.sync_config(move |_| {
+            let result = (|| {
+                let path = path.ok_or_else(|| aster_core::i18n::t("Config folder unavailable").to_owned())?;
+                let saved = access.lock().expect("config access").load(&path).map_err(|e| e.to_string())?;
+                if RestartSettings::from_config(&saved) != expected {
+                    return Err(aster_core::settings::restart_unsaved().into());
+                }
+                crate::update::running_exe()
+            })();
+            events.post(StoreEvent::RestartReady(id, result));
+            None
+        });
+        if !self.restart_preparing {
+            self.restart_error(id, aster_core::settings::restart_unsaved());
         }
     }
 
@@ -501,15 +609,16 @@ impl<P: Platform> Handler<P> {
             if !force && stamp.is_some() && stamp == previous {
                 return None;
             }
-            match access.lock().expect("config access").load(&path) {
-                Ok(config) => {
-                    let vault = (config.vault.sealed.clone(), config.vault.remember_minutes);
-                    events.post(StoreEvent::Config(revision, stamp, Ok(Box::new(config))));
-                    Some(vault)
+            match access.lock().expect("config access").load_document(&path) {
+                Ok((text, config)) => {
+                    let vault = config.as_ref().ok().map(|config| (config.vault.sealed.clone(), config.vault.remember_minutes));
+                    events.post(StoreEvent::Config(revision, stamp, Ok(Some(text)), config.map(Box::new)));
+                    vault
                 }
                 Err(e) => {
                     tracing::error!("could not load {}: {}", path.display(), e.kind());
-                    events.post(StoreEvent::Config(revision, stamp, Err(e.to_string())));
+                    let source = if e.kind() == std::io::ErrorKind::NotFound { Ok(None) } else { Err(()) };
+                    events.post(StoreEvent::Config(revision, stamp, source, Err(e.to_string())));
                     None
                 }
             }
@@ -566,7 +675,8 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::Spawn { pane, launch, terminal, .. } if launch.socket.is_some() => {
-                let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), launch.stream.as_ref().is_none_or(|s| s.input_mode() == aster_core::profile::InputMode::Normal));
+                let connected = clear_on_connect(&terminal, launch.clear_after_connect == Some(true), self.waker.clone());
+                let spawned = crate::net::connect(launch.socket.as_deref().unwrap_or_default(), launch.cols, launch.rows, launch.env.get("TERM").map(String::as_str), launch.stream.as_ref().is_none_or(|s| s.input_mode() == aster_core::profile::InputMode::Normal), connected);
                 let session = Session::start(self.session_start(id, pane), crate::stream::wrap(spawned, launch.stream.as_ref()), terminal);
                 self.sessions.insert((id, pane), session);
             }
@@ -583,7 +693,7 @@ impl<P: Platform> Handler<P> {
                 let options = crate::remote::Options {
                     profile, jump_profiles,
                     cwd: launch.cwd,
-                    clear_after_connect: self.config.ssh.clear_after_connect && !reconnecting,
+                    clear_after_connect: launch.clear_after_connect.unwrap_or(self.config.ssh.clear_after_connect && !reconnecting),
                     x11_display: self.config.ssh.x11_display.clone(),
                     share: self.config.ssh.share_connections,
                     forward_agent: self.config.ssh.forward_agent,
@@ -621,6 +731,7 @@ impl<P: Platform> Handler<P> {
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal, .. } => {
+                let clear = launch.ssh.is_none() && launch.clear_after_connect == Some(true);
                 let req = SpawnRequest {
                     command: launch.command,
                     args: launch.args,
@@ -630,7 +741,7 @@ impl<P: Platform> Handler<P> {
                     cols: launch.cols,
                     rows: launch.rows,
                 };
-                let request = crate::local_spawn::Request { key: (id, pane), request: req, terminal, stream: launch.stream, elevated: launch.elevated };
+                let request = crate::local_spawn::Request { key: (id, pane), request: req, terminal, stream: launch.stream, elevated: launch.elevated, clear };
                 let waker = self.waker.clone();
                 if let Err(error) = self.local_spawns.launch::<P>(request, move || waker.wake()) {
                     tracing::error!("local spawn worker: {error}");
@@ -699,13 +810,16 @@ impl<P: Platform> Handler<P> {
                 }
             }
             Effect::RequestPaste => self.request_paste(window, None),
-            Effect::RequestVaultPaste(input) => self.request_paste(window, Some(input)),
+            Effect::RequestVaultPaste(input) => self.request_paste(window, Some(PasteTarget::Vault(input))),
+            Effect::RequestConfigPaste(request) => self.request_paste(window, Some(PasteTarget::ConfigEditor(request))),
             Effect::SaveConfig(text) => {
                 self.save_config(text);
                 if self.windows.keys().min() == Some(&id) {
                     self.apply_window_prefs(window);
                 }
             }
+            Effect::SaveRawConfig { text, expected } => self.save_raw_config(id, text, expected),
+            Effect::Restart => self.request_restart(id),
             Effect::Open(target) => P::open(&target),
             Effect::RecentProfiles(recent) => {
                 for s in self.windows.values_mut() {
@@ -722,6 +836,13 @@ impl<P: Platform> Handler<P> {
             Effect::StartMenuShortcut(create) => {
                 let events = self.store_events.clone();
                 self.shell_integration.shortcut(Some(create), move |result| events.post(StoreEvent::StartMenuShortcut(Some(id), result)));
+            }
+            Effect::RevealConfigFile => {
+                if let Some(path) = self.config_path.clone() {
+                    if let Err(error) = std::thread::Builder::new().name("aster-reveal-config".into()).spawn(move || P::reveal_file(&path)) {
+                        tracing::error!("reveal config file: {error}");
+                    }
+                }
             }
             Effect::OpenLog | Effect::OpenConfigFolder => {
                 if let Some(dir) = self.config_path.as_deref().and_then(|p| p.parent()) {
@@ -898,10 +1019,10 @@ impl<P: Platform> Handler<P> {
         }
     }
 
-    fn request_paste(&mut self, window: &Win<P>, input: Option<u64>) {
-        if let (Some(text), Some(s)) = (window.clipboard_text(input), self.windows.get_mut(&window.id())) {
-            match input {
-                Some(input) => s.app.paste_vault(input, text),
+    fn request_paste(&mut self, window: &Win<P>, target: Option<PasteTarget>) {
+        if let (Some(text), Some(s)) = (window.clipboard_text(target), self.windows.get_mut(&window.id())) {
+            match target {
+                Some(target) => s.app.on_event(target.event(text)),
                 None => s.app.paste(text),
             }
         }
@@ -973,14 +1094,16 @@ impl<P: Platform> Handler<P> {
         }
     }
 
+    fn session_state(&self) -> SessionState {
+        SessionState { windows: self.windows.values().map(|s| s.app.session_snapshot()).filter(|w| !w.tabs.is_empty()).collect(), recent: self.recent.clone(), recent_folders: self.recent_folders.clone() }
+    }
+
     fn save_session(&self) {
         if capturing() || self.config_startup != ConfigStartup::Ready {
             return;
         }
         let Some(path) = crate::session_path::<P>() else { return };
-        let state = SessionState { windows: self.windows.values().map(|s| s.app.session_snapshot()).filter(|w| !w.tabs.is_empty()).collect(), recent: self.recent.clone(), recent_folders: self.recent_folders.clone() };
-        let tmp = path.with_extension("tmp");
-        if let Err(e) = std::fs::write(&tmp, state.to_text()).and_then(|_| std::fs::rename(&tmp, &path)) {
+        if let Err(e) = persist_session(&path, self.session_state()) {
             tracing::warn!("{}: {e}", path.display());
         }
     }
@@ -989,8 +1112,9 @@ impl<P: Platform> Handler<P> {
         let start = self.session_start(window, pane);
         let wake = start.flow.wake.clone();
         let screen = terminal.clone();
+        let connected = clear_on_connect(&terminal, self.windows.get(&window).is_some_and(|state| state.app.pane_clears_after_connect(pane)), self.waker.clone());
         let serial = self.serials.get_mut(&(window, pane)).expect("serial session");
-        let spawned = serial.connect(move |message| {
+        let spawned = serial.connect(connected, move |message| {
             let clean: String = message.chars().filter(|c| !c.is_control()).collect();
             screen.lock().feed(format!("\r\n\x1b[2m[{clean}]\x1b[0m\r\n").as_bytes());
             wake();
@@ -1061,6 +1185,7 @@ impl<P: Platform> Handler<P> {
                         let mut config = self.config.clone();
                         config.vault.encrypt_config = encrypted;
                         self.apply_config(config);
+                        self.reload_config(true);
                     }
                     for state in self.windows.values_mut() {
                         state.app.set_config_encrypted(encrypted);
@@ -1099,10 +1224,11 @@ impl<P: Platform> Handler<P> {
                     }
                 }
                 StoreEvent::Vault(update) => {
-                    if let Some(sealed) = update.sealed {
+                    if let Some(sealed) = update.sealed.filter(|sealed| sealed != &self.config.vault.sealed) {
                         let mut config = self.config.clone();
                         config.vault.sealed = sealed;
                         self.apply_config(config);
+                        self.reload_config(true);
                     }
                     self.show_vault(update.view);
                 }
@@ -1112,7 +1238,7 @@ impl<P: Platform> Handler<P> {
                     }
                     self.font_families = Some((monospace, all));
                 }
-                StoreEvent::Config(revision, stamp, config) => {
+                StoreEvent::Config(revision, stamp, source, config) => {
                     if self.settings_revision == revision {
                         self.config_stamp = stamp;
                         self.show_config_status(config.as_ref().err().cloned());
@@ -1120,6 +1246,9 @@ impl<P: Platform> Handler<P> {
                             if *config != self.config {
                                 self.apply_config(*config);
                             }
+                        }
+                        for state in self.windows.values_mut() {
+                            state.app.set_config_editor_source(source.clone());
                         }
                     }
                 }
@@ -1133,15 +1262,50 @@ impl<P: Platform> Handler<P> {
                     Err(error) => {
                         tracing::warn!("Start menu shortcut: {error}");
                         if let Some(state) = window.and_then(|id| self.windows.get_mut(&id)) {
-                            state.app.start_menu_shortcut_error(&error.to_string());
+                            state.app.start_menu_shortcut_error(&error.localized());
                         }
                     }
                 },
                 StoreEvent::ConfigStatus(revision, error) => {
                     if self.settings_revision == revision {
+                        self.reload_config(true);
                         self.show_config_status(error);
                     }
                 }
+                StoreEvent::RawConfigSaved(id, result) => {
+                    self.raw_save_pending = false;
+                    match result {
+                        Ok((text, config)) => {
+                            self.config_stamp = None;
+                            self.apply_config(*config);
+                            self.show_config_status(None);
+                            for (&window, state) in &mut self.windows {
+                                if id == window {
+                                    state.app.config_editor_saved(text.clone());
+                                } else {
+                                    state.app.set_config_editor_source(Ok(Some(text.clone())));
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(state) = self.windows.get_mut(&id) {
+                                state.app.config_editor_failed(error);
+                            }
+                            self.reload_config(true);
+                        }
+                    }
+                }
+                StoreEvent::RestartReady(id, result) => match result {
+                    Ok(exe) => self.prepare_restart_session(id, exe),
+                    Err(error) => self.restart_error(id, &error),
+                },
+                StoreEvent::RestartSessionSaved(id, result) => match result {
+                    Ok(exe) => {
+                        crate::update::schedule_relaunch(exe);
+                        self.finish_restart();
+                    }
+                    Err(error) => self.restart_error(id, &error),
+                },
                 StoreEvent::DefaultConfig(window, result) => match result {
                     Ok(path) => P::open(&path.to_string_lossy()),
                     Err(e) => {
@@ -1194,16 +1358,49 @@ impl<P: Platform> Handler<P> {
                         state.app.on_update(event);
                     }
                 }
-                crate::update::Reply::Restart => {
-                    if !self.session_saved {
-                        self.save_session();
-                    }
-                    self.session_saved = true;
-                    self.restarting = true;
-                    self.waker.wake();
-                }
+                crate::update::Reply::Restart => self.begin_restart(),
             }
         }
+    }
+
+    fn begin_restart(&mut self) {
+        if !self.session_saved {
+            self.save_session();
+        }
+        self.finish_restart();
+    }
+
+    fn restart_error(&mut self, id: WindowId, error: &str) {
+        self.restart_preparing = false;
+        if let Some(state) = self.windows.get_mut(&id) { state.app.restart_failed(error); }
+    }
+
+    fn prepare_restart_session(&mut self, id: WindowId, exe: PathBuf) {
+        if self.restarting { return; }
+        if capturing() {
+            crate::update::schedule_relaunch(exe);
+            self.finish_restart();
+            return;
+        }
+        let Some(path) = crate::session_path::<P>() else {
+            return self.restart_error(id, aster_core::i18n::t("Config folder unavailable"));
+        };
+        let state = self.session_state();
+        let events = self.store_events.clone();
+        if !self.secrets.sync_config(move |_| {
+            let result = persist_session(&path, state).map(|()| exe).map_err(|error| error.to_string());
+            events.post(StoreEvent::RestartSessionSaved(id, result));
+            None
+        }) {
+            self.restart_error(id, aster_core::settings::restart_unsaved());
+        }
+    }
+
+    fn finish_restart(&mut self) {
+        self.restart_preparing = false;
+        self.session_saved = true;
+        self.restarting = true;
+        self.waker.wake();
     }
 
     fn close_for_restart(&mut self, window: &Win<P>) {
@@ -1230,6 +1427,7 @@ impl<P: Platform> Handler<P> {
                     if let Some((cols, rows)) = pending.size {
                         spawned.pty.resize(cols, rows);
                     }
+                    clear_on_connect(&ready.terminal, ready.clear, self.waker.clone())();
                     let session = Session::start(self.session_start(id, pane), spawned, ready.terminal.clone());
                     for input in std::mem::take(&mut pending.input) {
                         session.write(input);
@@ -1238,7 +1436,7 @@ impl<P: Platform> Handler<P> {
                 }
                 Err(error) => {
                     tracing::error!("local shell: {error}");
-                    state.app.spawn_failed(pane, &error.message);
+                    state.app.spawn_failed(pane, &error.localized());
                 }
             }
         }
@@ -1329,6 +1527,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         text.set_font_waker(flow.wake.clone());
         let mut app = App::new(self.config.clone(), self.profiles.clone(), window.is_dark_mode(), home, flow.wake.clone());
         app.set_ssh_algorithm_catalog(aster_ssh::algorithm_catalog());
+        app.set_restart_baseline(self.restart_baseline.clone());
         if let Some((monospace, all)) = &self.font_families {
             app.set_font_families(monospace.clone(), all.clone());
         }
@@ -1341,6 +1540,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         }
         app.set_start_menu_shortcut(self.start_menu_shortcut);
         app.set_system_language(&P::ui_language());
+        app.warn_read_only_config();
         app.vault_state(self.vault_view.clone());
         app.set_config_encrypted(self.config.vault.encrypt_config || self.config_startup != ConfigStartup::Ready);
         app.set_cwd_probe(Arc::new(P::process_cwd));

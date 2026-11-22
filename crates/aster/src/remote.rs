@@ -82,7 +82,7 @@ pub fn file_reply(reply: sftp::Reply) -> FileReply {
         sftp::Reply::Changed { dir } => FileReply::Changed { dir },
         sftp::Reply::Editing { id, local } => FileReply::Editing { id, local },
         sftp::Reply::Saved { id, remote } => FileReply::Saved { id, remote },
-        sftp::Reply::Failed { id, error } => FileReply::Failed { id, error },
+        sftp::Reply::Failed { id, error } => FileReply::Failed { id, error: aster_core::i18n::ssh_error(&error) },
     }
 }
 
@@ -164,7 +164,7 @@ pub fn connect(destination: &str, cols: u16, rows: u16, env_term: Option<&str>, 
         agent_pipe: options.agent_pipe,
         interactive_panel: true,
     };
-    let conn = client::start(req);
+    let conn = client::start_with_error_formatter(req, aster_core::i18n::ssh_error);
     let exit = conn.exit;
     let spawned = Spawned {
         pty: Box::new(Channel(conn.input.clone())),

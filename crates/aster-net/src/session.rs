@@ -50,6 +50,10 @@ impl Shared {
 }
 
 pub fn open(address: Address, options: Options) -> Connection {
+    open_with(address, options, || {})
+}
+
+pub fn open_with(address: Address, options: Options, connected: impl FnOnce() + Send + 'static) -> Connection {
     let (output_tx, output) = unbounded();
     let (input, input_rx) = unbounded();
     let (exit_tx, exit) = bounded(1);
@@ -63,7 +67,10 @@ pub fn open(address: Address, options: Options) -> Connection {
             output: output_tx,
         });
         let code = match connect(&address) {
-            Ok(stream) => run(stream, &shared, &input_rx),
+            Ok(stream) => {
+                connected();
+                run(stream, &shared, &input_rx)
+            }
             Err(error) => {
                 shared.print(format!("Cannot connect to {}: {error}\r\n", address.authority()));
                 1

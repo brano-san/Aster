@@ -104,7 +104,6 @@ pub fn badge(p: &Profile) -> (String, u32) {
         ("$", 0x3C7A3C)
     };
     let (text, color) = match p.icon.as_deref() {
-        _ if p.layout.is_some() => ("▦", 0x5A6B7D),
         Some("powershell") => ("PS", 0x2671BE),
         Some("cmd") => ("C:", 0x4D4D4D),
         Some("linux") => ("WSL", 0xE95420),
@@ -114,6 +113,7 @@ pub fn badge(p: &Profile) -> (String, u32) {
         Some("vs") => ("VS", 0x68217A),
         Some("ssh") => ("SSH", 0x2F8F83),
         Some(icon) if !icon.is_empty() => (icon, fallback.1),
+        _ if p.layout.is_some() => ("▦", 0x5A6B7D),
         _ => fallback,
     };
     let tint = p.color.as_deref().and_then(aster_vt::schemes::parse_hex).map(|c| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b)).unwrap_or(color);
@@ -164,7 +164,7 @@ impl App {
     }
 
     pub(crate) fn filtered_profile_picks(&self, filter: ProfileFilter<'_>) -> Vec<Pick> {
-        let visible = |p: &Profile| !self.config.profile_hidden(p) && filter.includes(p, &self.config);
+        let visible = |p: &Profile| self.config.profile_in_picker(p) && filter.includes(p, &self.config);
         let mut picks = Vec::new();
         let recent: Vec<&Profile> = self.recent.iter().filter_map(|id| self.profiles.iter().find(|p| &p.id == id && visible(p))).take(self.config.terminal.recent_profiles).collect();
         for p in &recent {
@@ -206,7 +206,7 @@ impl App {
     pub(crate) fn note_recent(&mut self, id: &str) {
         self.recent.retain(|r| r != id);
         self.recent.insert(0, id.to_owned());
-        self.recent.truncate(self.config.terminal.recent_profiles.max(1) * 3);
+        self.recent.truncate(self.config.terminal.recent_profiles.max(1).saturating_mul(3));
         self.effects.push(Effect::RecentProfiles(self.recent.clone()));
     }
 

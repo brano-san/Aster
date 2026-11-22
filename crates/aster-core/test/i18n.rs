@@ -117,6 +117,8 @@ fn literals(text: &str) -> Vec<(String, String)> {
                 "tf"
             } else if head.ends_with("t(") && (i < 3 || !ident(chars[i - 3])) {
                 "t"
+            } else if head.ends_with("tn(") && (head.len() < 4 || !ident(chars[i - 4])) {
+                "tn"
             } else {
                 ""
             };
@@ -238,6 +240,31 @@ fn t_follows_the_current_language_and_tf_fills_placeholders() {
     assert_eq!(Action::Tab(3).source_label(), "Switch to tab 3");
     set_language("de");
     assert_eq!(language(), "en");
+}
+
+#[test]
+fn plural_forms_handle_zero_teens_and_the_final_digit() {
+    let key = "Paste {n} line?|Paste {n} lines?";
+    set_language("en");
+    assert_eq!(tn(key, 1), "Paste 1 line?");
+    assert_eq!(tn(key, 11), "Paste 11 lines?");
+    set_language("ru");
+    for (n, form) in [(0, "строк"), (1, "строку"), (2, "строки"), (4, "строки"), (5, "строк"), (11, "строк"), (12, "строк"), (14, "строк"), (21, "строку"), (24, "строки"), (114, "строк")] {
+        assert_eq!(tn(key, n), format!("Вставить {n} {form}?"));
+    }
+    set_language("en");
+}
+
+#[test]
+fn localized_diagnostics_preserve_targets_and_driver_details() {
+    set_language("ru");
+    assert_eq!(ssh_error("deploy@prod: permission denied"), "deploy@prod: доступ запрещён");
+    assert_eq!(ssh_error("SSH handshake with host:2222 timed out after 800 ms"), "Истекло время установки SSH-соединения с host:2222 (800 мс)");
+    assert_eq!(ssh_error("Cannot check the host key of node:2222: driver message"), "Не удалось проверить ключ узла node:2222: driver message");
+    assert_eq!(ssh_error("unclassified detail"), "unclassified detail");
+    assert_eq!(platform_error(std::io::ErrorKind::PermissionDenied, "detail 17"), "Доступ запрещён: detail 17");
+    assert_eq!(platform_error(std::io::ErrorKind::Other, "The administrator request was declined"), "Запрос прав администратора отклонён");
+    set_language("en");
 }
 
 #[test]

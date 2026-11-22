@@ -5,6 +5,8 @@ pub enum Parity {
     None,
     Odd,
     Even,
+    Mark,
+    Space,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -14,6 +16,55 @@ pub enum Flow {
     None,
     Software,
     Hardware,
+    Xany,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StopBits {
+    #[default]
+    One,
+    OneAndHalf,
+    Two,
+}
+
+impl std::fmt::Display for StopBits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self { Self::One => "1", Self::OneAndHalf => "1.5", Self::Two => "2" })
+    }
+}
+
+impl std::str::FromStr for StopBits {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "1" => Ok(Self::One),
+            "1.5" => Ok(Self::OneAndHalf),
+            "2" => Ok(Self::Two),
+            _ => Err(()),
+        }
+    }
+}
+
+impl serde::Serialize for StopBits {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::One => serializer.serialize_u8(1),
+            Self::OneAndHalf => serializer.serialize_f64(1.5),
+            Self::Two => serializer.serialize_u8(2),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StopBits {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match <f64 as serde::Deserialize>::deserialize(deserializer)? {
+            1.0 => Ok(Self::One),
+            1.5 => Ok(Self::OneAndHalf),
+            2.0 => Ok(Self::Two),
+            _ => Err(serde::de::Error::custom("Expected 1, 1.5 or 2 stop bits.")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,7 +74,7 @@ pub struct Settings {
     pub ask_baud: bool,
     pub data_bits: u8,
     pub parity: Parity,
-    pub stop_bits: u8,
+    pub stop_bits: StopBits,
     pub flow: Flow,
     pub slow: bool,
 }
@@ -36,7 +87,7 @@ impl Default for Settings {
             ask_baud: false,
             data_bits: 8,
             parity: Parity::None,
-            stop_bits: 1,
+            stop_bits: StopBits::One,
             flow: Flow::None,
             slow: false,
         }
@@ -96,7 +147,7 @@ pub fn parse(spec: &str) -> Result<Settings, String> {
             continue;
         }
         settings.flow = parse_flow(part).ok_or_else(|| {
-            format!("Unknown flow control \"{part}\": expected none, xonxoff, software, rtscts or hardware.")
+            format!("Unknown flow control \"{part}\": expected none, xonxoff, xany or rtscts.")
         })?;
         flow_seen = true;
     }
@@ -108,16 +159,23 @@ fn parity_code(parity: Parity) -> char {
         Parity::None => 'N',
         Parity::Odd => 'O',
         Parity::Even => 'E',
+        Parity::Mark => 'M',
+        Parity::Space => 'S',
+    }
+}
+
+fn flow_code(flow: Flow) -> &'static str {
+    match flow {
+        Flow::None => ",none",
+        Flow::Software => ",xonxoff",
+        Flow::Hardware => ",rtscts",
+        Flow::Xany => ",xany",
     }
 }
 
 pub fn format(settings: &Settings) -> String {
     let parity = parity_code(settings.parity);
-    let flow = match settings.flow {
-        Flow::None => "",
-        Flow::Software => ",xonxoff",
-        Flow::Hardware => ",rtscts",
-    };
+    let flow = if settings.flow == Flow::None { "" } else { flow_code(settings.flow) };
     let baud = if settings.ask_baud { "?".to_owned() } else { settings.baud.to_string() };
     let slow = if settings.slow { ",slow" } else { "" };
     format!("{}:{baud},{}{parity}{}{flow}{slow}", settings.port, settings.data_bits, settings.stop_bits)
@@ -147,10 +205,10 @@ fn parse_baud(text: &str) -> Result<u32, String> {
 
 fn parse_frame(text: &str) -> Result<Defaults, String> {
     let error = || {
-        format!("Invalid frame \"{text}\": expected data bits 5-8, parity N, O or E and stop bits 1 or 2, like 8N1.")
+        format!("Invalid frame \"{text}\": expected data bits 5-8, parity N, O, E, M or S and stop bits 1, 1.5 or 2, like 8N1.")
     };
     let bytes = text.as_bytes();
-    if bytes.len() != 3 {
+    if bytes.len() < 3 {
         return Err(error());
     }
     let data_bits = match bytes[0] {
@@ -163,13 +221,13 @@ fn parse_frame(text: &str) -> Result<Defaults, String> {
         b'N' => Some(Parity::None),
         b'O' => Some(Parity::Odd),
         b'E' => Some(Parity::Even),
+        b'M' => Some(Parity::Mark),
+        b'S' => Some(Parity::Space),
         _ => return Err(error()),
     };
-    let stop_bits = match bytes[2] {
-        b'?' => None,
-        b'1' => Some(1),
-        b'2' => Some(2),
-        _ => return Err(error()),
+    let stop_bits = match &text[2..] {
+        "?" => None,
+        value => Some(value.parse().map_err(|_| error())?),
     };
     Ok(Defaults { data_bits, parity, stop_bits, ..Defaults::default() })
 }
@@ -178,6 +236,7 @@ fn parse_flow(text: &str) -> Option<Flow> {
     match text.to_ascii_lowercase().as_str() {
         "none" => Some(Flow::None),
         "xonxoff" | "software" => Some(Flow::Software),
+        "xany" => Some(Flow::Xany),
         "rtscts" | "hardware" => Some(Flow::Hardware),
         _ => None,
     }
@@ -190,7 +249,7 @@ pub struct Defaults {
     pub speed: Option<String>,
     pub data_bits: Option<u8>,
     pub parity: Option<Parity>,
-    pub stop_bits: Option<u8>,
+    pub stop_bits: Option<StopBits>,
     pub flow: Option<Flow>,
     pub slow: Option<bool>,
 }
@@ -239,12 +298,16 @@ impl Defaults {
             spec.push(',');
             spec.push_str(&digit(self.data_bits));
             spec.push(self.parity.map_or('?', parity_code));
-            spec.push_str(&digit(self.stop_bits));
+            spec.push_str(&self.stop_bits.map_or_else(|| "?".into(), |stop| stop.to_string()));
         }
         if let Some(flow) = self.flow {
-            spec.push_str(match flow { Flow::None => ",none", Flow::Software => ",xonxoff", Flow::Hardware => ",rtscts" });
+            spec.push_str(flow_code(flow));
         }
         if let Some(slow) = self.slow { spec.push_str(if slow { ",slow" } else { ",fast" }); }
         spec
     }
 }
+
+#[cfg(test)]
+#[path = "../test/serial.rs"]
+mod tests;

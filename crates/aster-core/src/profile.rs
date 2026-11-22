@@ -29,6 +29,8 @@ pub struct ProfileDefaults {
     pub cwd: Option<String>,
     pub scheme: Option<String>,
     pub color: Option<String>,
+    pub keep_tab_title: Option<bool>,
+    pub clear_after_connect: Option<bool>,
     pub stream: Option<Stream>,
     pub on_exit: Option<OnExit>,
     pub ssh_options: Option<SshOptions>,
@@ -166,6 +168,10 @@ pub struct Profile {
     pub env: BTreeMap<String, String>,
     pub icon: Option<String>,
     pub color: Option<String>,
+    #[serde(rename = "keep-tab-title", skip_serializing_if = "Option::is_none")]
+    pub keep_tab_title: Option<bool>,
+    #[serde(rename = "clear-after-connect", skip_serializing_if = "Option::is_none")]
+    pub clear_after_connect: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -237,6 +243,8 @@ impl Profile {
         fill(&mut self.cwd, &defaults.cwd);
         fill(&mut self.scheme, &defaults.scheme);
         fill(&mut self.color, &defaults.color);
+        fill(&mut self.keep_tab_title, &defaults.keep_tab_title);
+        fill(&mut self.clear_after_connect, &defaults.clear_after_connect);
         if let Some(stream) = &defaults.stream {
             self.stream.get_or_insert_default().inherit(stream);
         }

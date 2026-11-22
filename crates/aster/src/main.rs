@@ -90,6 +90,8 @@ fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::Pla
     let log = log::open(log_path::<P>().as_deref());
     tracing_subscriber::fmt().with_ansi(false).with_writer(move || log.clone()).with_max_level(tracing::Level::INFO).init();
     tracing::info!("Aster {} on {} {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    let system_language = P::ui_language();
+    aster_core::i18n::set_language(aster_core::i18n::resolve("auto", &system_language));
     update::on_start::<P>();
     let windows = P::Windows::new()?;
     let waker = windows.waker();
@@ -100,6 +102,7 @@ fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::Pla
         return Ok(());
     }
     let (config, encrypted) = load_config::<P>();
+    aster_core::i18n::set_language(aster_core::i18n::resolve(&config.appearance.language, &system_language));
     let hidden = !encrypted && starts_hidden(&config, &request.command) && std::env::var_os("ASTER_CAPTURE").is_none() && (cfg!(windows) || requests.is_some());
     if !hidden && request.command == cli::Command::Hidden {
         request.command = cli::Command::Window;
@@ -110,7 +113,7 @@ fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::Pla
         .map_err(|e| aster_platform::PlatformError::new(0, format!("vault worker: {e}")))?;
     handler.set_instance(requests, (!hidden || cfg!(windows)).then_some(request));
     let result = windows.run(WindowOptions { title: "Aster".into(), placement, dark, visible: !hidden }, handler);
-    update::relaunch_if_installed();
+    update::relaunch_if_requested();
     result
 }
 
@@ -175,7 +178,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     let result = run::<aster_platform_linux::Linux>(request);
     if let Err(e) = result {
-        tracing::error!("{e}");
+        tracing::error!("{} (0x{:08X})", e.localized(), e.code as u32);
         std::process::exit(1);
     }
 }

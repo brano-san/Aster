@@ -106,6 +106,35 @@ fn trailing_newlines_alone_do_not_make_text_multiline() {
 }
 
 #[test]
+fn mixed_line_endings_are_shown_and_joined_in_the_confirmation() {
+    let mut a = app();
+    a.paste("first\rsecond\r\nthird\nfourth".into());
+    assert_eq!(a.paste_confirm().unwrap().lines(), ["first", "second", "third", "fourth"]);
+    key(&mut a, Key::Right);
+    key(&mut a, Key::Enter);
+    assert_eq!(writes(&mut a), [b"first second third fourth".to_vec()]);
+}
+
+#[test]
+fn paste_normalizes_crlf_even_when_trimming_is_disabled() {
+    let mut a = app();
+    a.set_config(Config::parse("[terminal]\ntrim-whitespace-on-paste = false\nwarn-on-multiline-paste = false").unwrap());
+    a.paste(" a\r\nb\r\n".into());
+    assert_eq!(writes(&mut a), [b" a\rb\r".to_vec()]);
+}
+
+#[test]
+fn disabling_bracketed_paste_restores_the_multiline_warning() {
+    let mut a = app();
+    a.set_config(Config::parse("[terminal]\nbracketed-paste = false").unwrap());
+    a.focused_terminal().unwrap().lock().feed(b"\x1b[?2004h");
+    a.paste("a\rb".into());
+    assert!(a.paste_confirm().is_some());
+    key(&mut a, Key::Enter);
+    assert_eq!(writes(&mut a), [b"a\rb".to_vec()]);
+}
+
+#[test]
 fn audible_bell_with_animations_off_requests_attention_if_sound_is_unavailable() {
     let mut a = app();
     a.set_config(Config::parse("[appearance]\nanimations = false\n[terminal]\nbell = 'audible'").unwrap());

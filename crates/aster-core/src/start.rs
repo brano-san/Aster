@@ -31,8 +31,8 @@ impl StartPage {
 impl App {
     pub(crate) fn start_page(&self) -> StartPage {
         let mut entries = vec![Entry::NewTab];
-        let recents = self.recent.iter().filter_map(|id| self.profiles.iter().position(|p| &p.id == id && !self.config.profile_hidden(p)));
-        entries.extend(recents.take(5).map(Entry::Recent));
+        let recents = self.recent.iter().filter_map(|id| self.profiles.iter().position(|p| &p.id == id && self.config.profile_in_picker(p)));
+        entries.extend(recents.take(self.config.terminal.recent_profiles.min(5)).map(Entry::Recent));
         entries.extend([Entry::AllProfiles, Entry::Settings]);
         let s = self.ui();
         let area = self.chrome.content;

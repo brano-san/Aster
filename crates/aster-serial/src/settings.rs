@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-pub use aster_proto::serial::{format, parse, Flow, Parity, Settings, BAUDS};
+pub use aster_proto::serial::{format, parse, Flow, Parity, Settings, StopBits, BAUDS};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortInfo {

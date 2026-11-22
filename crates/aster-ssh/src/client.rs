@@ -69,12 +69,16 @@ pub struct Connection {
 }
 
 pub fn start(req: Request) -> Connection {
+    start_with_error_formatter(req, str::to_owned)
+}
+
+pub fn start_with_error_formatter(req: Request, format_error: fn(&str) -> String) -> Connection {
     let (out_tx, output) = crossbeam_channel::unbounded();
     let (input, in_rx) = tokio::sync::mpsc::unbounded_channel();
     let (exit_tx, exit) = crossbeam_channel::bounded(1);
     let (files_tx, files) = crossbeam_channel::unbounded();
     let (event_tx, events) = crossbeam_channel::unbounded();
-    let mut console = Console::new(out_tx, in_rx, (req.cols, req.rows));
+    let mut console = Console::new(out_tx, in_rx, (req.cols, req.rows)).with_error_formatter(format_error);
     console.interactive = req.interactive_panel.then_some(event_tx);
     match runtime() {
         Some(rt) => {
@@ -368,22 +372,26 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
     if forwards_agent(dest, req) {
         let _ = tx.agent_forward(false).await;
     }
-    if let Some(command) = login_shell_in(req.cwd.as_deref()) {
+    let command = login_shell_in(req.cwd.as_deref());
+    let remembered = command.is_some();
+    if let Some(command) = command {
         tx.exec(true, command).await
     } else {
-        tx.request_shell(false).await
+        tx.request_shell(req.clear_after_connect).await
     }.map_err(|e| e.to_string())?;
     let mut code = None;
     let mut files: Option<crate::sftp::Files> = None;
     let mut con = console.lock().await;
-    if req.clear_after_connect {
-        con.write(b"\x1b[H\x1b[2J".to_vec());
-    }
+    let mut clear = req.clear_after_connect;
     loop {
         tokio::select! {
             msg = rx.wait() => match msg {
-                Some(ChannelMsg::Failure) => return Err("The server refused to start the remote shell in the remembered folder.".into()),
-                Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => con.write(data.to_vec()),
+                Some(ChannelMsg::Failure) => return Err(if remembered { "The server refused to start the remote shell in the remembered folder." } else { "The server refused to start the remote shell." }.into()),
+                Some(ChannelMsg::Success) if std::mem::take(&mut clear) => con.write(b"\x1b[H\x1b[2J".to_vec()),
+                Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    if std::mem::take(&mut clear) { con.write(b"\x1b[H\x1b[2J".to_vec()); }
+                    con.write(data.to_vec());
+                }
                 Some(ChannelMsg::ExitStatus { exit_status }) => code = Some(exit_status),
                 Some(ChannelMsg::ExitSignal { .. }) => code = code.or(Some(FAILED)),
                 Some(ChannelMsg::Close) | None => break,

@@ -419,7 +419,7 @@ impl App {
         self.effects.push(Effect::Update(UpdateRequest::Check { manual: true }));
     }
 
-    fn toast(&mut self, text: String, lasting: Duration) {
+    pub(crate) fn toast(&mut self, text: String, lasting: Duration) {
         self.tab_toast = Some((text, Instant::now() + lasting));
         self.dirty = true;
         self.schedule_timer();

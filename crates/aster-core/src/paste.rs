@@ -14,16 +14,28 @@ pub struct PasteConfirm {
 
 impl PasteConfirm {
     pub fn lines(&self) -> Vec<&str> {
-        self.text.trim_end_matches(['\r', '\n', ' ', '\t']).lines().collect()
+        paste_lines(self.text.trim_end_matches(['\r', '\n', ' ', '\t'])).collect()
     }
 }
 
 pub fn line_count(text: &str) -> usize {
-    text.trim_end_matches(['\r', '\n', ' ', '\t']).lines().count()
+    paste_lines(text.trim_end_matches(['\r', '\n', ' ', '\t'])).count()
 }
 
 pub fn one_line(text: &str) -> String {
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+    paste_lines(text).map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+fn paste_lines(mut rest: &str) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let Some(end) = rest.find(['\r', '\n']) else { return Some(std::mem::take(&mut rest)) };
+        let (line, separator) = rest.split_at(end);
+        rest = separator.strip_prefix("\r\n").unwrap_or(&separator[1..]);
+        Some(line)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]

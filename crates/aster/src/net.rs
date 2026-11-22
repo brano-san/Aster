@@ -60,7 +60,7 @@ impl Pty for Link {
     }
 }
 
-pub fn connect(spec: &str, cols: u16, rows: u16, term: Option<&str>, echo: bool) -> Spawned {
+pub fn connect(spec: &str, cols: u16, rows: u16, term: Option<&str>, echo: bool, connected: impl FnOnce() + Send + 'static) -> Spawned {
     let address = match aster_proto::address::parse(spec) {
         Ok(address) => address,
         Err(message) => {
@@ -73,7 +73,7 @@ pub fn connect(spec: &str, cols: u16, rows: u16, term: Option<&str>, echo: bool)
         }
     };
     let options = Options { term: term.unwrap_or("xterm-256color").to_owned(), cols, rows, echo };
-    spawned(session::open(address, options))
+    spawned(session::open_with(address, options, connected))
 }
 
 fn spawned(connection: session::Connection) -> Spawned {

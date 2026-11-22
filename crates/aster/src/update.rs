@@ -247,7 +247,7 @@ fn elevated<P: Platform>(archive: &[u8], signature: &str) -> Result<bool, String
         Ok(0) => Ok(true),
         Ok(code) => Err(reason.unwrap_or_else(|| format!("the installer stopped with code {code}"))),
         Err(e) if e.code == CANCELLED => Ok(false),
-        Err(e) => Err(e.message),
+        Err(e) => Err(e.localized()),
     }
 }
 
@@ -274,7 +274,7 @@ fn fetch<P: Platform>(url: &str, progress: &mut dyn FnMut(u64, Option<u64>) -> b
         return read_local(Path::new(path), progress);
     }
     let mut out = Vec::new();
-    P::download(url, &mut out, progress).map_err(|e: PlatformError| e.message)?;
+    P::download(url, &mut out, progress).map_err(|e: PlatformError| e.localized())?;
     Ok(out)
 }
 
@@ -335,7 +335,7 @@ fn run<P: Platform>(jobs: Receiver<UpdateRequest>, tx: Sender<Reply>, wake: Wake
         match result {
             Ok(exe) => {
                 tracing::info!("installed Aster {} into {}, restarting", release.version, exe.display());
-                let _ = RELAUNCH.set(exe);
+                schedule_relaunch(exe);
                 send(Reply::Restart);
             }
             Err(Failure::ReadOnly(dir)) => send(Reply::Ui(UpdateEvent::ReadOnly(dir))),
@@ -388,10 +388,14 @@ pub fn restarted() -> bool {
     RESTARTED.load(Ordering::Acquire)
 }
 
-pub fn relaunch_if_installed() {
+pub fn schedule_relaunch(exe: PathBuf) {
+    let _ = RELAUNCH.set(exe);
+}
+
+pub fn relaunch_if_requested() {
     let Some(exe) = RELAUNCH.get() else { return };
     if let Err(e) = std::process::Command::new(exe).env(RESTARTED_FROM, std::process::id().to_string()).spawn() {
-        tracing::error!("cannot start the updated Aster {}: {e}", exe.display());
+        tracing::error!("cannot restart Aster {}: {e}", exe.display());
     }
 }
 

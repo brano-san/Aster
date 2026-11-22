@@ -203,6 +203,31 @@ fn set_field(editor: &mut editor::ProfileEditor, label: &str, value: &str) {
 }
 
 #[test]
+fn unnamed_profiles_are_named_from_the_effective_connection() {
+    for (profile, name) in [
+        (Profile { command: "build".into(), args: vec!["all".into()], ..Profile::default() }, "build all"),
+        (Profile { ssh: Some("alex@host:2222".into()), ..Profile::default() }, "alex@host:2222"),
+        (Profile { socket: Some("tcp://host:8080".into()), ..Profile::default() }, "host:8080"),
+        (Profile { serial: Some("COM7:9600,8N1".into()), ..Profile::default() }, "COM7"),
+    ] {
+        assert_eq!(model(profile).profile_result().unwrap().name, name);
+    }
+}
+
+#[test]
+fn profile_general_options_persist_icon_color_title_and_clear_overrides() {
+    let mut editor = model(Profile { command: "build".into(), ..Profile::default() });
+    editor.set_icon("★".into());
+    set_field(&mut editor, "Color", "#192A3B");
+    set_field(&mut editor, "Ignore tab titles from terminal output", "true");
+    set_field(&mut editor, "Clear the terminal after connecting", "false");
+    let profile = editor.profile_result().unwrap();
+    assert_eq!((profile.icon.as_deref(), profile.color.as_deref(), profile.keep_tab_title, profile.clear_after_connect), (Some("★"), Some("#192A3B"), Some(true), Some(false)));
+    let config = Config { profiles: vec![profile], ..Config::default() };
+    assert_eq!(Config::parse(&config.to_text()).unwrap(), config);
+}
+
+#[test]
 fn editor_tabs_follow_the_connection_and_keep_keyboard_focus_inside_the_tab() {
     use crate::input::{Key, Mods};
     let local = Profile::new("id", "Shell", "cmd", &[]);

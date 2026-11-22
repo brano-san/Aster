@@ -1,5 +1,5 @@
 use crate::err;
-use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Preedit};
+use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, PasteTarget, Preedit};
 use aster_core::notifications::Notification;
 use aster_gfx::render::Rect;
 use aster_platform::{DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
@@ -364,7 +364,7 @@ impl Window for Win32Window {
         Placement { x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top, maximized: wp.showCmd == SW_SHOWMAXIMIZED.0 as u32 }
     }
 
-    fn clipboard_text(&self, _vault_input: Option<u64>) -> Option<String> {
+    fn clipboard_text(&self, _target: Option<PasteTarget>) -> Option<String> {
         unsafe {
             if !open_clipboard(self.hwnd()) {
                 return None;

@@ -15,11 +15,13 @@ pub struct Request {
     pub terminal: Shared,
     pub stream: Option<Stream>,
     pub elevated: bool,
+    pub clear: bool,
 }
 
 pub struct Ready {
     pub key: Key,
     pub terminal: Shared,
+    pub clear: bool,
     result: Option<Result<Spawned, PlatformError>>,
 }
 
@@ -72,7 +74,7 @@ impl LocalSpawns {
     }
 
     pub fn launch<P: Platform>(&mut self, request: Request, wake: impl FnOnce() + Send + 'static) -> std::io::Result<()> {
-        let Request { key, request, terminal, stream, elevated } = request;
+        let Request { key, request, terminal, stream, elevated, clear } = request;
         let pending = Pending::default();
         let cancelled = pending.cancelled.clone();
         let sender = self.sender.clone();
@@ -85,7 +87,7 @@ impl LocalSpawns {
             } else {
                 P::spawn(&request).map(|spawned| crate::stream::wrap(spawned, stream.as_ref()))
             };
-            let ready = Ready { key, terminal, result: Some(result) };
+            let ready = Ready { key, terminal, clear, result: Some(result) };
             if sender.send(ready).is_ok() {
                 wake();
             }

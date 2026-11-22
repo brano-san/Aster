@@ -18,6 +18,20 @@ pub(crate) fn profile_templates() -> Vec<Pick> {
     templates().into_iter().map(|(id, name)| Pick { value: id.into(), label: name.into(), ..Default::default() }).collect()
 }
 
+pub(crate) fn profile_creation() -> Vec<Pick> {
+    [("profile", t("New profile")), ("group", t("New group"))].into_iter()
+        .map(|(value, label)| Pick { label: label.into(), value: value.into(), ..Default::default() }).collect()
+}
+
+pub(crate) fn profile_icons() -> Vec<Pick> {
+    [
+        ("", t("Automatic")), ("$", t("Terminal")), ("↗", t("SSH connection")), ("#", t("Serial port")),
+        ("⌁", t("Network")), ("▣", t("Folder")), ("★", t("Star")), ("◆", t("Diamond")), ("●", t("Circle")),
+    ].into_iter().map(|(icon, label)| Pick {
+        label: label.into(), value: icon.into(), badge: icon.into(), ..Default::default()
+    }).collect()
+}
+
 impl SettingsPage {
     fn select_tree(&mut self, kind: &TreeKind) {
         if let Some(at) = self.shown.iter().position(|&i| self.tree_at(i).is_some_and(|r| &r.kind == kind)) {
@@ -104,7 +118,7 @@ impl App {
     }
 
     pub(crate) fn edit_profile_template(&mut self, id: &str) {
-        let Some((_, name)) = templates().into_iter().find(|(key, _)| *key == id) else { return };
+        if !templates().iter().any(|(key, _)| *key == id) { return; }
         let mut profile = Profile::default();
         match id {
             "local" => {
@@ -117,8 +131,22 @@ impl App {
             "telnet" | "tcp" => profile.socket = Some(format!("{id}://")),
             _ => return,
         }
-        profile.name = name.into();
+        profile.name.clear();
         self.open_profile_form(profile, None, true);
+    }
+
+    pub(crate) fn create_profile_item(&mut self, item: &str) {
+        match item {
+            "profile" => self.open_overlay(OverlayKind::ProfileTemplates),
+            "group" => self.edit_group(None),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn set_profile_icon(&mut self, icon: String) {
+        if let Some(editor) = self.settings.as_mut().and_then(|page| page.editor.as_mut()) {
+            editor.set_icon(icon);
+        }
     }
 
     fn open_defaults(&mut self, kind: &'static str) {
@@ -168,13 +196,14 @@ impl App {
                 }
             }
             TreeKind::NewGroup => self.edit_group(None),
-            TreeKind::NewProfile => self.open_overlay(OverlayKind::ProfileTemplates),
+            TreeKind::NewProfile => self.open_overlay(OverlayKind::ProfileCreate),
             TreeKind::Defaults(kind) => self.open_defaults(kind),
             TreeKind::DefaultsHeader => {}
         }
     }
 
     fn persist_profiles(&mut self, config: Config) {
+        if self.config.read_only() { return self.warn_read_only_config(); }
         self.set_config(config);
         self.push_save_config();
         self.reveal_selected();
@@ -288,6 +317,7 @@ impl App {
     }
 
     fn save_profile_modal(&mut self) {
+        if self.config.read_only() { return self.warn_read_only_config(); }
         let Some(page) = self.settings.as_mut() else { return };
         let mut config = self.config.clone();
         if let Some(editor) = &mut page.editor {
@@ -362,6 +392,7 @@ impl App {
         if let Some(editor) = &mut page.editor {
             if matches!(key, Key::Enter | Key::Space) {
                 if let Some(action) = editor.ssh_action(key == Key::Enter) { return self.ssh_editor_action(action); }
+                if editor.focuses_icon() { return self.open_overlay(OverlayKind::ProfileIcons); }
             }
             editor.key(key, mods);
             return;
@@ -406,6 +437,7 @@ impl App {
                 if let Some(e) = &mut page.editor {
                     e.focus = i;
                     if let Some(action) = e.ssh_action(false) { self.ssh_editor_action(action); }
+                    else if e.focuses_icon() { self.open_overlay(OverlayKind::ProfileIcons); }
                     else if e.tabs[e.tab].fields[i].is_button() { e.activate(i); }
                     else if step != 0 { e.key(if step < 0 { Key::Left } else { Key::Right }, Mods::NONE); }
                     else { e.activate(i); }

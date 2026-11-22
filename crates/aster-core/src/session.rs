@@ -138,6 +138,7 @@ impl App {
     }
 
     pub(crate) fn save_as_profile(&mut self, layout: bool) {
+        if self.config.read_only() { return self.warn_read_only_config(); }
         let Some(tab) = self.tabs.get(self.active) else { return };
         let Some(pane) = self.panes.get(&tab.focus) else { return };
         let name = crate::i18n::tf("{title} (saved)", &[("title", &self.tab_title(self.active))]);

@@ -18,6 +18,7 @@ pub struct Console {
     pub size: (u16, u16),
     pub closed: bool,
     pub(crate) interactive: Option<Sender<SshEvent>>,
+    format_error: fn(&str) -> String,
 }
 
 pub fn crlf(text: &str) -> String {
@@ -26,7 +27,12 @@ pub fn crlf(text: &str) -> String {
 
 impl Console {
     pub fn new(out: Sender<Vec<u8>>, input: UnboundedReceiver<Input>, size: (u16, u16)) -> Self {
-        Self { out, input, size, closed: false, interactive: None }
+        Self { out, input, size, closed: false, interactive: None, format_error: str::to_owned }
+    }
+
+    pub fn with_error_formatter(mut self, format_error: fn(&str) -> String) -> Self {
+        self.format_error = format_error;
+        self
     }
 
     pub fn print(&self, text: &str) {
@@ -38,7 +44,11 @@ impl Console {
         for line in text.lines() {
             use std::fmt::Write;
             let _ = write!(output, "\x1b[{color}m");
-            output.extend(line.chars().filter(|c| !c.is_control()));
+            if color == 2 {
+                output.extend(line.chars().filter(|c| !c.is_control()));
+            } else {
+                output.extend((self.format_error)(line).chars().filter(|c| !c.is_control()));
+            }
             output.push_str("\x1b[0m\r\n");
         }
         self.write(output.into_bytes());

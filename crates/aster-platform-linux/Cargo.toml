@@ -10,6 +10,7 @@ license.workspace = true
 aster-core.workspace = true
 aster-gfx.workspace = true
 aster-platform.workspace = true
+aster-proto.workspace = true
 tracing.workspace = true
 libc = "0.2"
 glutin = { version = "0.32", default-features = false, features = ["egl", "wayland", "x11"] }

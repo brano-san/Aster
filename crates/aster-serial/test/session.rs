@@ -6,6 +6,23 @@ use std::time::Instant;
 
 const WAIT: Duration = Duration::from_secs(5);
 
+#[test]
+fn unavailable_frame_modes_are_reported_before_opening_the_port() {
+    let cases = if cfg!(windows) {
+        &[("absent,8N1,xany", "XANY flow control is unavailable on this platform.")][..]
+    } else {
+        &[
+            ("absent,8M1", "Mark and space parity are unavailable on this platform."),
+            ("absent,8N1.5", "1.5 stop bits are unavailable on this platform."),
+        ][..]
+    };
+    for &(spec, expected) in cases {
+        let settings = crate::settings::parse(spec).unwrap();
+        let result = open(&settings, |_, _| panic!("unsupported mode reached the driver"));
+        assert_eq!(result.err().as_deref(), Some(expected));
+    }
+}
+
 #[derive(Default)]
 struct State {
     to_host: VecDeque<u8>,
@@ -210,7 +227,7 @@ fn close_interrupts_a_slow_send() {
 #[test]
 fn opening_requires_the_requested_baud_to_be_resolved() {
     let settings = crate::settings::parse("COM3:?").unwrap();
-    assert!(open(&settings).err().unwrap().contains("baud rate"));
+    assert!(open(&settings, |_, _| Ok(())).err().unwrap().contains("baud rate"));
 }
 
 #[test]
@@ -319,26 +336,18 @@ fn opening_a_missing_port_reports_its_name() {
         port: "aster-test-missing-port".to_owned(),
         ..Settings::default()
     };
-    let error = open(&settings).err().expect("a missing port must not open");
+    let error = open(&settings, |_, _| Ok(())).err().expect("a missing port must not open");
     assert!(error.contains("aster-test-missing-port"), "{error}");
 }
 
 #[test]
-fn opening_with_unsupported_frame_values_is_refused_before_touching_the_port() {
+fn opening_with_unsupported_data_bits_is_refused_before_touching_the_port() {
     let error = open(&Settings {
         port: "P".to_owned(),
         data_bits: 9,
         ..Settings::default()
-    })
+    }, |_, _| Ok(()))
     .err()
     .unwrap();
     assert!(error.contains("data bits"), "{error}");
-    let error = open(&Settings {
-        port: "P".to_owned(),
-        stop_bits: 3,
-        ..Settings::default()
-    })
-    .err()
-    .unwrap();
-    assert!(error.contains("stop bits"), "{error}");
 }

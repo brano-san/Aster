@@ -1,5 +1,5 @@
 use crate::vault_settings::{AfterUnlock, DialogKind, VaultDialog};
-use crate::app::{App, Effect};
+use crate::app::{App, Drag, Effect};
 use crate::config::Config;
 use crate::i18n::{t, tf};
 use crate::input::{Key, Mods};
@@ -19,6 +19,8 @@ pub enum Control {
     Schemes,
     Profiles,
     Number { min: f64, max: f64, step: f64 },
+    Slider { min: f64, max: f64, step: f64 },
+    Color,
     Text,
     StringList,
     Font { monospace: bool },
@@ -40,10 +42,45 @@ pub struct Setting {
     pub label: &'static str,
     pub hint: &'static str,
     pub control: Control,
+    pub restart: bool,
 }
 
 const fn item(section: &'static str, key: &'static str, label: &'static str, hint: &'static str, control: Control) -> Setting {
-    Setting { section, key, label, hint, control }
+    Setting { section, key, label, hint, control, restart: false }
+}
+
+const fn restart(setting: Setting) -> Setting {
+    Setting { restart: true, ..setting }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct RestartSettings(Vec<Option<Value>>);
+
+impl RestartSettings {
+    pub fn from_config(config: &Config) -> Self {
+        Self(SETTINGS.iter().filter(|s| s.restart).map(|s| get(config, s.key)).collect())
+    }
+}
+
+impl Control {
+    pub(crate) fn number(self) -> Option<(f64, f64, f64)> {
+        match self {
+            Self::Number { min, max, step } | Self::Slider { min, max, step } => Some((min, max, step)),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn slider_track(rect: Rect, scale: f32) -> Rect {
+    Rect::new(rect.x + 7.0 * scale, rect.y + (rect.h - 4.0 * scale) / 2.0, (rect.w - 61.0 * scale).max(1.0), 4.0 * scale)
+}
+
+pub(crate) fn color_value(text: &str) -> Option<aster_gfx::render::Color> {
+    let text = text.trim().strip_prefix('#')?;
+    if text.len() != 6 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u32::from_str_radix(text, 16).ok().map(aster_gfx::render::Color::rgb)
 }
 
 const TERMINAL: &str = "Terminal";
@@ -56,7 +93,7 @@ const DOCK: &str = "Docked window";
 const VAULT: &str = "Vault";
 const SSH: &str = "SSH";
 pub(crate) const SYSTEM: &str = "Application";
-const CONFIG_FILE: &str = "Config file";
+pub(crate) const CONFIG_FILE: &str = "Config file";
 
 const CURSORS: &[(&str, &str)] = &[("block", "Block"), ("beam", "Beam"), ("underline", "Underline")];
 const LINK_MODIFIERS: &[(&str, &str)] = &[("none", "None"), ("ctrl", "Ctrl"), ("shift", "Shift")];
@@ -75,11 +112,13 @@ const SSH_CLIENTS: &[(&str, &str)] = &[("native", "Built in"), ("system", "Syste
 const SSH_AGENTS: &[(&str, &str)] = &[("auto", "Automatic"), ("pageant", "Pageant"), ("named-pipe", "Named pipe")];
 const LANGUAGES: &[(&str, &str)] = &[("auto", "Automatic"), ("en", "English"), ("ru", "Russian")];
 const EDGES: &[(&str, &str)] = &[("off", "Off"), ("top", "Top"), ("bottom", "Bottom"), ("left", "Left"), ("right", "Right")];
-const SHARE: Control = Control::Number { min: 0.1, max: 1.0, step: 0.05 };
+const SHARE: Control = Control::Slider { min: 0.1, max: 1.0, step: 0.05 };
 
 pub const SETTINGS: &[Setting] = &[
     item(SHORTCUTS, "palette.hidden-commands", "Hidden palette commands", "Comma-separated action IDs to hide from the command palette", Control::StringList),
     item(PROFILES, "terminal.profile", "Default profile for new tabs", "Shell for new tabs and windows", Control::Profiles),
+    item(PROFILES, "terminal.recent-profiles", "Recent profiles", "Number of recent profiles to show; zero hides the list", Control::Number { min: 0.0, max: 100.0, step: 1.0 }),
+    item(PROFILES, "picker.show-builtin-profiles", "Show built-in profiles", "Include built-in shells in the profile picker", Control::Toggle),
     item(PROFILES, "picker.quick-connect", "Default quick connect provider", "Protocol used when an address has no prefix", Control::Choice(QUICK_CONNECT)),
     item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
     item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
@@ -94,7 +133,7 @@ pub const SETTINGS: &[Setting] = &[
     item(TERMINAL, "terminal.bell", "Bell", "What happens when a program rings the bell", Control::Segments(BELLS)),
     item(TERMINAL, "terminal.alt-is-meta", "Alt sends Meta", "Prefix letters typed with Alt with Escape", Control::Toggle),
     item(TERMINAL, "terminal.bell-attention", "Request attention on bell", "Flash the taskbar when an unfocused window rings", Control::Toggle),
-    item(TERMINAL, "terminal.open-on-start", "Open a terminal on start", "Open the default profile when no session is restored", Control::Toggle),
+    restart(item(TERMINAL, "terminal.open-on-start", "Open a terminal on start", "Open the default profile when no session is restored", Control::Toggle)),
     item(TERMINAL, "terminal.scroll-on-input", "Scroll on input", "Typing scrolls back to the bottom", Control::Toggle),
     item(INPUT, "terminal.copy-on-select", "Copy on select", "Selected text goes to the clipboard", Control::Toggle),
     item(INPUT, "terminal.copy-as-html", "Copy as HTML", "Include text colors and bold weight when copying a selection", Control::Toggle),
@@ -126,7 +165,7 @@ pub const SETTINGS: &[Setting] = &[
     item(APPEARANCE, "appearance.background-image", "Background image", "Path to a PNG or JPEG image", Control::Text),
     item(APPEARANCE, "appearance.background-image-opacity", "Background image opacity", "Blend the image with the terminal background", Control::Number { min: 0.0, max: 1.0, step: 0.01 }),
     item(APPEARANCE, "appearance.background-image-fit", "Background image fit", "Choose how the image fills each pane", Control::Choice(BACKGROUND_FITS)),
-    item(WINDOW, "appearance.opacity", "Opacity", "Background opacity of the terminal", Control::Number { min: 0.2, max: 1.0, step: 0.05 }),
+    item(WINDOW, "appearance.opacity", "Opacity", "Background opacity of the terminal", Control::Slider { min: 0.2, max: 1.0, step: 0.05 }),
     item(WINDOW, "appearance.backdrop", "Backdrop", "System material behind the window on Windows 11", Control::Choice(BACKDROPS)),
     item(WINDOW, "appearance.density", "Interface density", "Scale tabs, menus, settings and padding", Control::Number { min: 0.6, max: 1.4, step: 0.1 }),
     item(WINDOW, "appearance.tab-bar", "Tab bar", "Ctrl+Shift+B shows or hides tabs and window buttons", Control::Segments(TAB_BARS)),
@@ -212,6 +251,7 @@ pub fn get(config: &Config, key: &str) -> Option<Value> {
 }
 
 pub fn set(config: &Config, key: &str, value: Value) -> Result<Config, String> {
+    if config.read_only() { return Err(config.read_only_message()); }
     let mut root = Value::try_from(config).map_err(|e| e.to_string())?;
     let mut at = &mut root;
     for part in key.split('.') {
@@ -237,7 +277,7 @@ pub(crate) fn found(hay: &str, query: &str) -> bool {
 
 pub const SHORTCUTS: &str = "Keyboard shortcuts";
 pub const PROFILES: &str = "Profiles";
-pub const PAGES: [&str; 13] = [SYSTEM, APPEARANCE, COLORS, WINDOW, PROFILES, TERMINAL, INPUT, SEARCH, DOCK, SHORTCUTS, VAULT, SSH, CONFIG_FILE];
+pub const PAGES: [&str; 13] = [SYSTEM, APPEARANCE, PROFILES, TERMINAL, INPUT, COLORS, DOCK, SHORTCUTS, SEARCH, SSH, VAULT, WINDOW, CONFIG_FILE];
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProfileRow {
     pub group: Option<String>,
@@ -438,7 +478,14 @@ fn item_matches(item: usize, query: &str) -> bool {
         Some(a) => found(&format!("{SHORTCUTS} {} hotkey {} {} {}", t(SHORTCUTS), a.source_label(), a.label(), a.id()), query),
         None => {
             let s = &SETTINGS[item];
-            found(&format!("{} {} {} {} {} {} {}", s.section, t(s.section), s.label, t(s.label), s.hint, t(s.hint), s.key), query)
+            let aliases = if s.key == "picker.quick-connect" {
+                let label = "Default quick connection";
+                let hint = "Connection type used for addresses without a protocol";
+                format!(" {label} {} {hint} {}", t(label), t(hint))
+            } else {
+                String::new()
+            };
+            found(&format!("{} {} {} {} {} {} {}{aliases}", s.section, t(s.section), s.label, t(s.label), s.hint, t(s.hint), s.key), query)
         }
     }
 }
@@ -476,6 +523,8 @@ pub struct SettingsPage {
     tree: Vec<TreeRow>,
     pub deleting: Option<String>,
     pub page: usize,
+    pub(crate) profiles_advanced: bool,
+    pub(crate) restart_pending: bool,
 }
 
 impl SettingsPage {
@@ -529,7 +578,16 @@ impl SettingsPage {
             shown.into_iter().filter(|i| matches!(self.vault_at(*i), Some(VaultRow::Entry(_)))).collect()
         } else if colors_page || self.query.trim().is_empty() {
             let page = PAGES[self.page.min(PAGES.len() - 1)];
-            shown.into_iter().filter(|&i| if self.profile_action(i).is_some() { page == SHORTCUTS } else { self.section(i) == page }).collect()
+            shown.into_iter().filter(|&i| {
+                if self.profile_action(i).is_some() { return page == SHORTCUTS; }
+                if self.section(i) != page { return false; }
+                if page != PROFILES { return true; }
+                if let Some(row) = self.tree_at(i) {
+                    !matches!(row.kind, TreeKind::NewGroup) && (matches!(row.kind, TreeKind::DefaultsHeader | TreeKind::Defaults(_)) == self.profiles_advanced)
+                } else {
+                    (SETTINGS[i].key != "terminal.profile") == self.profiles_advanced
+                }
+            }).collect()
         } else {
             shown
         };
@@ -673,10 +731,10 @@ impl SettingsPage {
     }
 
     fn step(&mut self, delta: isize) {
-        if self.shown.is_empty() {
+        if self.shown.is_empty() && !self.restart_pending {
             return;
         }
-        let last = self.shown.len() as isize - 1;
+        let last = self.shown.len() as isize - 1 + isize::from(self.restart_pending);
         self.selected = (self.selected as isize + delta).clamp(0, last) as usize;
         if self.current_item().and_then(|i| self.tree_at(i)).is_some_and(|r| r.kind == TreeKind::DefaultsHeader) {
             self.selected = (self.selected as isize + delta.signum()).clamp(0, last) as usize;
@@ -707,6 +765,8 @@ pub struct SettingsGeometry {
     pub rows: Vec<Row>,
     pub pages: Vec<Rect>,
     pub suggestions: Vec<(usize, Rect)>,
+    pub restart: Option<Rect>,
+    pub profile_tabs: Option<[Rect; 2]>,
     pub height: f32,
     pub(crate) scheme_bar: Option<SchemeBar>,
     pub(crate) font_sample: Option<Rect>,
@@ -724,8 +784,9 @@ pub fn control_width(control: Control) -> f32 {
         Control::Segments(_) => 360.0,
         Control::Toggle => 40.0,
         Control::Number { .. } => 132.0,
+        Control::Slider { .. } => 220.0,
         Control::Choice(_) | Control::Schemes | Control::Profiles => 220.0,
-        Control::Text | Control::StringList | Control::Font { .. } => 260.0,
+        Control::Text | Control::Color | Control::StringList | Control::Font { .. } => 260.0,
         Control::Run(_) => 120.0,
         Control::ReadOnly(_) => 0.0,
     }
@@ -807,13 +868,28 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
     let field = Rect::new(close.x - field_w - (8.0 * s).round(), top, field_w, header_h);
     let title = Rect::new(x0, top, (field.x - x0 - 8.0 * s).max(0.0), header_h);
     let list_top = top + header_h + (14.0 * s).round();
+    let bottom = content.bottom() - 12.0 * s;
+    let restart = (page.restart_pending && bottom >= list_top + 38.0 * s).then(|| {
+        let w = (242.0 * s).min(width);
+        Rect::new(x + width - w, bottom - 34.0 * s, w, 34.0 * s)
+    });
+    let profile_tabs = (!page.searching() && PAGES.get(page.page) == Some(&PROFILES)).then(|| {
+        let w = (142.0 * s).min((width - 6.0 * s) * 0.5);
+        [Rect::new(x, list_top, w, 30.0 * s), Rect::new(x + w + 6.0 * s, list_top, w, 30.0 * s)]
+    });
     let scheme_bar = page.colors_page().then(|| SchemeBar::new(Rect::new(x, list_top, width, 0.0), s));
-    let sample_height = (84.0 * s).min((content.bottom() - list_top).max(0.0) * 0.35).round();
+    let list_bottom = restart.map_or(bottom, |r| r.y - 8.0 * s);
+    let sample_height = (84.0 * s).min((list_bottom - list_top).max(0.0) * 0.35).round();
     let font_sample = (!page.searching() && PAGES[page.page.min(PAGES.len() - 1)] == APPEARANCE)
         .then(|| Rect::new(x, list_top, width, sample_height));
-    let rows_top = scheme_bar.map_or_else(|| font_sample.map_or(list_top, |sample| sample.bottom() + 6.0 * s), |bar| bar.current.bottom() + (6.0 * s).round());
-    let list = Rect::new(x, rows_top, width, (content.bottom() - rows_top - 12.0 * s).max(0.0));
-    let page_h = (34.0 * s).min((content.bottom() - list_top - 12.0 * s).max(0.0) / PAGES.len() as f32).floor().max(1.0);
+    let rows_top = match (scheme_bar, font_sample, profile_tabs) {
+        (Some(bar), _, _) => bar.current.bottom() + (6.0 * s).round(),
+        (_, Some(sample), _) => sample.bottom() + 6.0 * s,
+        (_, _, Some(tabs)) => tabs[0].bottom() + 4.0 * s,
+        _ => list_top,
+    };
+    let list = Rect::new(x, rows_top, width, (list_bottom - rows_top).max(0.0));
+    let page_h = (34.0 * s).min((bottom - list_top).max(0.0) / PAGES.len() as f32).floor().max(1.0);
     let pages = if side_w > 0.0 { (0..PAGES.len()).map(|k| Rect::new(x0, list_top + k as f32 * page_h, side_w, page_h - (2.0 * s).round())).collect() } else { Vec::new() };
     let section_h = (38.0 * s).round();
     let item_h = (58.0 * s).round();
@@ -824,9 +900,11 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
     for (n, &i) in page.shown.iter().enumerate() {
         if page.section(i) != section {
             section = page.section(i);
-            let section_h = section_h + if section == SYSTEM && !page.searching() { (20.0 * s).round() } else { 0.0 };
-            rows.push(Row { kind: RowKind::Section(section), rect: Rect::new(x, y, width, section_h), control: Rect::default() });
-            y += section_h;
+            if section != PROFILES || profile_tabs.is_none() {
+                let section_h = section_h + if section == SYSTEM && !page.searching() { (20.0 * s).round() } else { 0.0 };
+                rows.push(Row { kind: RowKind::Section(section), rect: Rect::new(x, y, width, section_h), control: Rect::default() });
+                y += section_h;
+            }
         }
         let item_h = match page.tree_at(i).map(|r| &r.kind) {
             Some(TreeKind::Profile(_)) => (50.0 * s).round(),
@@ -866,7 +944,7 @@ pub fn geometry(content: Rect, s: f32, page: &SettingsPage) -> SettingsGeometry 
             }
         }
     }
-    SettingsGeometry { page: content, title, field, close, list, rows, pages, suggestions, height, scheme_bar, font_sample }
+    SettingsGeometry { page: content, title, field, close, list, rows, pages, suggestions, height, scheme_bar, font_sample, restart, profile_tabs }
 }
 
 pub fn part_at(control: Control, r: Rect, s: f32, x: f32) -> Part {
@@ -946,6 +1024,7 @@ impl App {
             page.defaults_kind = None;
             page.capture = None;
             page.deleting = None;
+            page.profiles_advanced = false;
             page.show_page(PAGES.iter().position(|p| *p == PROFILES).unwrap_or(0));
             if let Some(at) = page.shown.iter().position(|&i| match select {
                 Some(id) => page.profile_at(i).is_some_and(|p| p.id == id),
@@ -959,19 +1038,30 @@ impl App {
     }
 
     pub(crate) fn fresh_settings_page(&self) -> SettingsPage {
-        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.profile_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes: self.scheme_rows(), vault: self.vault.clone(), launcher_installed: self.launcher_installed, ..SettingsPage::default() };
+        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.profile_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes: self.scheme_rows(), vault: self.vault.clone(), launcher_installed: self.launcher_installed, restart_pending: self.restart_pending(), ..SettingsPage::default() };
         page.refilter();
         page
     }
 
     fn show_settings_page(&mut self, k: usize) {
         let tab = self.active_scheme_tab();
+        self.config_editor.focus = None;
+        self.config_editor.cancel_paste();
         let Some(page) = self.settings.as_mut() else { return };
         page.show_page(k);
         if page.colors_page() {
             self.select_scheme_tab(tab);
         }
         self.reveal_selected();
+    }
+
+    fn show_profiles_tab(&mut self, advanced: bool) {
+        self.commit_edit();
+        if let Some(page) = self.settings.as_mut() {
+            page.profiles_advanced = advanced;
+            page.refilter();
+        }
+        self.dirty = true;
     }
 
     pub(crate) fn restore_settings_page(&mut self) {
@@ -1065,6 +1155,7 @@ impl App {
     }
 
     pub(crate) fn close_settings(&mut self) {
+        self.config_editor.cancel_paste();
         self.commit_edit();
         self.settings = None;
         self.settings_stash = None;
@@ -1122,6 +1213,51 @@ impl App {
         matches!(get(&self.config, setting.key), Some(Value::Boolean(true)))
     }
 
+    pub fn set_restart_baseline(&mut self, baseline: RestartSettings) {
+        self.restart_baseline = baseline;
+        self.update_restart_pending();
+    }
+
+    fn restart_pending(&self) -> bool {
+        !self.config.read_only() && self.restart_baseline != RestartSettings::from_config(&self.config)
+    }
+
+    pub(crate) fn update_restart_pending(&mut self) {
+        let pending = self.restart_pending();
+        for page in [&mut self.settings, &mut self.settings_stash].into_iter().flatten() {
+            page.restart_pending = pending;
+            page.selected = page.selected.min(page.shown.len().saturating_sub(usize::from(!pending)));
+        }
+    }
+
+    pub fn restart_failed(&mut self, error: &str) {
+        self.toast(tf("Could not restart Aster: {error}", &[("error", error)]), std::time::Duration::from_secs(6));
+    }
+
+    pub(crate) fn slider_value(&self, setting: &Setting, fallback: f64) -> f64 {
+        if let Drag::SettingsSlider { item, track, x } = self.drag {
+            if SETTINGS.get(item) == Some(setting) {
+                return Self::slider_position(setting, track, x);
+            }
+        }
+        match get(&self.config, setting.key) {
+            Some(Value::Float(value)) if value.is_finite() => value,
+            Some(Value::Integer(value)) => value as f64,
+            _ => fallback,
+        }
+    }
+
+    fn slider_position(setting: &Setting, track: Rect, x: f32) -> f64 {
+        let (min, max, step) = setting.control.number().unwrap();
+        let ratio = ((x - track.x) / track.w).clamp(0.0, 1.0) as f64;
+        ((min + (max - min) * ratio) / step).round() * step
+    }
+
+    pub(crate) fn finish_settings_slider(&mut self, item: usize, track: Rect, x: f32) {
+        let setting = &SETTINGS[item];
+        self.set_number(setting, Self::slider_position(setting, track, x));
+    }
+
     pub fn shortcut_text(&self, action: Action) -> String {
         let all: Vec<String> = self.keymap.bindings_of(&action).map(format_binding).collect();
         if all.is_empty() {
@@ -1132,6 +1268,7 @@ impl App {
     }
 
     fn set_shortcuts(&mut self, action: Action, bindings: Option<Vec<String>>) {
+        if self.config.read_only() { return self.warn_read_only_config(); }
         let mut config = self.config.clone();
         match bindings {
             Some(b) => {
@@ -1148,6 +1285,10 @@ impl App {
     }
 
     fn assign_shortcut(&mut self, action: Action, chord: Chord, append: bool) {
+        if self.config.read_only() {
+            if let Some(page) = self.settings.as_mut() { page.capture = None; }
+            return self.warn_read_only_config();
+        }
         let text = chord.to_string();
         let mut taken = Vec::new();
         let mut config = self.config.clone();
@@ -1188,6 +1329,7 @@ impl App {
     }
 
     fn apply_setting(&mut self, key: &str, value: Value) {
+        if self.config.read_only() { return self.warn_read_only_config(); }
         if let Ok(config) = set(&self.config, key, value) {
             if config != self.config {
                 self.set_config(config);
@@ -1222,7 +1364,7 @@ impl App {
                 } as usize;
                 self.apply_setting(setting.key, Value::String(options[next].0.clone()));
             }
-            Control::Number { step, .. } => {
+            Control::Number { step, .. } | Control::Slider { step, .. } => {
                 if delta == 0 {
                     return self.begin_edit();
                 }
@@ -1233,14 +1375,15 @@ impl App {
                 };
                 self.set_number(setting, now + step * delta as f64);
             }
-            Control::Text | Control::StringList | Control::Font { .. } => self.begin_edit(),
+            Control::Text | Control::Color | Control::StringList | Control::Font { .. } => self.begin_edit(),
             Control::Run(action) => self.run(action.clone()),
             Control::ReadOnly(_) => {}
         }
     }
 
     fn set_number(&mut self, setting: &Setting, wanted: f64) {
-        let Control::Number { min, max, step } = setting.control else { return };
+        let Some((min, max, step)) = setting.control.number() else { return };
+        if !wanted.is_finite() { return; }
         let snapped = ((wanted / step).round() * step).clamp(min, max);
         let value = match get(&self.config, setting.key) {
             Some(Value::Integer(_)) => Value::Integer(snapped.round() as i64),
@@ -1252,7 +1395,8 @@ impl App {
     fn begin_edit(&mut self) {
         let Some(setting) = self.settings.as_ref().and_then(|p| p.current()) else { return };
         let text = match setting.control {
-            Control::Number { .. } | Control::Text | Control::StringList | Control::Font { .. } => self.setting_text(setting),
+            Control::Number { .. } | Control::Text | Control::Color | Control::StringList | Control::Font { .. } => self.setting_text(setting),
+            Control::Slider { min, .. } => number_text(self.slider_value(setting, min)),
             _ => return,
         };
         if let Some(p) = self.settings.as_mut() {
@@ -1305,7 +1449,15 @@ impl App {
                 let values = text.split(',').map(str::trim).filter(|value| !value.is_empty()).map(|value| Value::String(value.to_owned())).collect();
                 self.apply_setting(setting.key, Value::Array(values));
             }
-            Control::Number { .. } => {
+            Control::Color => {
+                let text = text.trim();
+                if text.is_empty() || color_value(text).is_some() {
+                    self.apply_setting(setting.key, Value::String(text.to_owned()));
+                } else if let Some(page) = self.settings.as_mut() {
+                    page.notice = Some(t("Enter a color as #RRGGBB").into());
+                }
+            }
+            Control::Number { .. } | Control::Slider { .. } => {
                 if let Ok(v) = text.trim().replace(',', ".").parse::<f64>() {
                     self.set_number(setting, v);
                 }
@@ -1349,6 +1501,10 @@ impl App {
     }
 
     pub(crate) fn settings_key(&mut self, key: Key, mods: Mods) {
+        if self.config_editor_key(key, mods) {
+            self.dirty = true;
+            return;
+        }
         let Some(page) = self.settings.as_mut() else { return };
         self.dirty = true;
         if page.capture.is_some() {
@@ -1463,12 +1619,17 @@ impl App {
                 page.refilter();
             }
             Key::Enter => {
-                if let Some(s) = current {
+                if page.restart_pending && page.selected == page.shown.len() {
+                    self.push(Effect::Restart);
+                } else if let Some(s) = current {
                     self.adjust_setting(s, 0);
                 } else if let Some(scheme) = page.current_item().and_then(|i| page.scheme_at(i)) {
                     let name = scheme.name.clone();
                     self.apply_settings_scheme(name);
                 }
+            }
+            Key::Left | Key::Right if mods.ctrl && !page.searching() && PAGES[page.page] == PROFILES => {
+                return self.show_profiles_tab(key == Key::Right);
             }
             Key::Left | Key::Right => {
                 if let Some(s) = current {
@@ -1483,12 +1644,14 @@ impl App {
 
     pub(crate) fn settings_text(&mut self, text: &str) {
         if self.vault_dialog_text(text) { return; }
-        let Some(page) = self.settings.as_mut() else { return };
+        let Some(page) = self.settings.as_ref() else { return };
         if page.vault_input_interrupted || page.deleting_scheme.is_some() { return; }
         let clean: String = text.chars().filter(|c| !c.is_control()).collect();
         if clean.is_empty() {
             return;
         }
+        if self.config_editor_text(&clean) { return; }
+        let Some(page) = self.settings.as_mut() else { return };
         if let Some(editor) = page.scheme_editor.as_mut() {
             editor.insert(&clean);
             self.dirty = true;
@@ -1538,15 +1701,26 @@ impl App {
             return self.close_settings();
         }
         if geo.field.contains(x, y) {
+            self.config_editor.focus = None;
+            self.config_editor.cancel_paste();
             return self.commit_edit();
+        }
+        if geo.restart.is_some_and(|r| r.contains(x, y)) {
+            self.commit_edit();
+            if self.restart_pending() { self.push(Effect::Restart); }
+            return;
         }
         if let Some(k) = geo.pages.iter().position(|r| r.contains(x, y)) {
             self.commit_edit();
             return self.show_settings_page(k);
         }
+        if let Some(k) = geo.profile_tabs.and_then(|tabs| tabs.iter().position(|r| r.contains(x, y))) {
+            return self.show_profiles_tab(k == 1);
+        }
         if !geo.list.contains(x, y) {
             return self.commit_edit();
         }
+        if self.config_editor_click(x, y) { return; }
         let Some(row) = geo.rows.iter().find(|r| r.rect.contains(x, y)).copied() else { return self.commit_edit() };
         let RowKind::Item(n) = row.kind else { return self.commit_edit() };
         let scale = self.ui();
@@ -1576,6 +1750,10 @@ impl App {
             return;
         }
         let setting = &SETTINGS[page.shown[n]];
+        if matches!(setting.control, Control::Slider { .. }) && row.control.contains(x, y) {
+            self.drag = Drag::SettingsSlider { item: page.shown[n], track: slider_track(row.control, scale), x };
+            return;
+        }
         if let Control::Segments(options) = setting.control {
             let segments = page.segments(options, row.control, scale);
             if let Some(index) = segments.iter().position(|rect| rect.contains(x, y)) {
@@ -1595,7 +1773,7 @@ impl App {
     }
 
     pub(crate) fn settings_wheel(&mut self, dy: f32) {
-        if self.vault_dialog_wheel(dy) || self.profile_modal_wheel(dy) { return; }
+        if self.vault_dialog_wheel(dy) || self.config_editor_wheel(dy) || self.profile_modal_wheel(dy) { return; }
         let Some(geo) = self.settings_geometry() else { return };
         if self.scheme_editor_wheel(geo.page, dy) { return; }
         let step = 60.0 * self.ui();
@@ -1614,6 +1792,10 @@ pub fn explorer_paste_label() -> &'static str {
 }
 
 pub(crate) const TRAY_MENU: [(&str, Action); 2] = [("New window", Action::NewWindow), ("Quit", Action::Quit)];
+
+pub fn restart_unsaved() -> &'static str {
+    t("Save the settings before restarting")
+}
 
 pub fn tray_menu_labels() -> [&'static str; 2] {
     TRAY_MENU.map(|(label, _)| t(label))

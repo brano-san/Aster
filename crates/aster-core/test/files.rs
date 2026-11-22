@@ -1,4 +1,13 @@
 use super::*;
+
+#[test]
+fn file_dates_follow_the_interface_language() {
+    crate::i18n::set_language("en");
+    assert_eq!(date(1_709_164_800), "2024-02-29");
+    crate::i18n::set_language("ru");
+    assert_eq!(date(1_709_164_800), "29.02.2024");
+    crate::i18n::set_language("en");
+}
 use crate::config::Config;
 use crate::input::{Event, MouseButton};
 use crate::keymap::Action;

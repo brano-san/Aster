@@ -100,6 +100,21 @@ impl Preedit {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteTarget {
+    Vault(u64),
+    ConfigEditor(u64),
+}
+
+impl PasteTarget {
+    pub fn event(self, text: String) -> Event {
+        match self {
+            Self::Vault(input) => Event::VaultPasted { input, text },
+            Self::ConfigEditor(request) => Event::ConfigEditorPasted { request, text },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Resized { width: u32, height: u32 },
@@ -115,6 +130,7 @@ pub enum Event {
     AltChar(char),
     Pasted(String),
     VaultPasted { input: u64, text: String },
+    ConfigEditorPasted { request: u64, text: String },
     Preedit(Preedit),
     Focus(bool),
     ThemeChanged { dark: bool },

@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+mod errors;
+pub use errors::{platform_error, ssh_error};
+
 const EN: u8 = 0;
 const RU: u8 = 1;
 
@@ -79,6 +82,21 @@ pub fn t(text: &str) -> &str {
         RU => russian().get(text).copied().unwrap_or(text),
         _ => text,
     }
+}
+
+pub fn tn(key: &str, n: u64) -> String {
+    let form = if current::get() == RU {
+        match (n % 10, n % 100) {
+            (1, last_two) if last_two != 11 => 0,
+            (2..=4, last_two) if !(12..=14).contains(&last_two) => 1,
+            _ => 2,
+        }
+    } else {
+        usize::from(n != 1)
+    };
+    let message = t(key);
+    let mut forms = message.split('|');
+    forms.nth(form).unwrap_or_else(|| message.rsplit('|').next().unwrap_or(message)).replace("{n}", &n.to_string())
 }
 
 pub fn serial_disconnected() -> &'static str {

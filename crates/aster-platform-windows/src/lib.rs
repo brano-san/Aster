@@ -7,12 +7,14 @@ mod elevate;
 mod environment;
 mod explorer;
 pub mod config_lock;
+mod reveal;
 mod instance;
 mod jump_list;
 mod monitors;
 mod notifications;
 mod process;
 mod secrets;
+pub mod serial;
 mod dwrite;
 mod shells;
 mod shell_link;
@@ -71,6 +73,14 @@ impl Platform for Windows {
     type Windows = Win32;
     type Renderer = D3dRenderer;
     type Text = DWriteText;
+
+    fn reveal_file(path: &std::path::Path) {
+        if !reveal::select(path) {
+            if let Some(parent) = path.parent() {
+                Self::open(&parent.to_string_lossy());
+            }
+        }
+    }
 
     fn text() -> Result<DWriteText, PlatformError> {
         DWriteText::new()

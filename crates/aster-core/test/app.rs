@@ -25,6 +25,21 @@ fn ssh_toolbar_reserves_its_header_and_reconnects_the_existing_pane() {
     a.on_down(header.x + 10.0, reconnect.y + 1.0, MouseButton::Left, 2);
     assert_eq!(a.pane_rename.as_ref().map(|edit| edit.pane), Some(pane));
 }
+
+#[test]
+fn profile_can_keep_its_title_when_the_terminal_issues_osc_title_changes() {
+    let (mut a, _) = app();
+    let mut profile = Profile::new("custom:fixed", "Fixed", "shell", &[]);
+    profile.keep_tab_title = Some(true);
+    profile.clear_after_connect = Some(true);
+    a.open_tab(profile);
+    let pane = a.focused_pane().unwrap();
+    assert!(a.pane_clears_after_connect(pane));
+    assert_eq!(a.panes[&pane].pending.as_ref().unwrap().clear_after_connect, Some(true));
+    a.focused_terminal().unwrap().lock().feed(b"\x1b]0;dynamic\x07");
+    a.woken();
+    assert_eq!(a.panes[&pane].title, None);
+}
 use crate::config::Config;
 use aster_gfx::text::{FontMetrics, FontStyle, GlyphBitmap, GlyphKey, Gfx, ShapedGlyph, ShapedText, TextBackend};
 

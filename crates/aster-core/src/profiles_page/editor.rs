@@ -20,7 +20,7 @@ type Choices = Vec<(String, String)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
-    Name, Group, Color, Scheme, Exit, Hidden, Command, Cwd, Admin, Env, Destination, User, Port,
+    Name, Group, Icon, Color, Scheme, Exit, Hidden, KeepTitle, ClearAfterConnect, Command, Cwd, Admin, Env, Destination, User, Port,
     Identity, Keepalive, Count, Timeout, Banner, Remember, X11, Term, Device, Speed, Bits, Parity,
     Stop, Flow, Slow, Address, Input, Output, InLines, OutLines, Backspace, Expect, Send, Regex, Optional,
     ProxyMethod, ProxyTarget, Auth, Password, SetPassword, ForgetPassword, BrowseKey, ImportKey, VaultKey,
@@ -33,6 +33,8 @@ impl Field {
     fn label(self) -> &'static str {
         match self {
             Self::Name => t("Name"), Self::Group => t("Group"), Self::Color => t("Color"),
+            Self::Icon => t("Icon"), Self::KeepTitle => t("Ignore tab titles from terminal output"),
+            Self::ClearAfterConnect => t("Clear the terminal after connecting"),
             Self::Scheme => t("Color scheme"), Self::Exit => t("When the session ends"), Self::Hidden => t("Hidden"),
             Self::Command => t("Command line"), Self::Cwd => t("Start folder"), Self::Admin => t("Run as administrator"),
             Self::Env => t("Environment (key=value)"), Self::Destination => t("SSH destination"), Self::User => t("User"),
@@ -88,6 +90,8 @@ impl std::fmt::Debug for EditorField {
 }
 
 impl EditorField {
+    pub fn is_icon(&self) -> bool { self.id == Field::Icon }
+
     pub fn list_hint(&self) -> Option<&'static str> {
         if self.id.is_step() {
             Some(t("Enter add step  ·  Del remove step  ·  Ctrl+Enter save"))
@@ -108,6 +112,8 @@ impl EditorField {
 
     pub fn display(&self) -> &str {
         if self.id == Field::ForwardDestination && !self.editable { return ""; }
+        if self.id == Field::Color { return &self.value; }
+        if self.is_icon() && self.value.is_empty() { return t("Automatic"); }
         self.choices.iter().find(|(k, _)| k == &self.value).map_or(&self.value, |(_, v)| v)
     }
 
@@ -178,7 +184,8 @@ const OUTPUTS: &[(&str, &str)] = &[("normal", "Normal"), ("hex", "Hex")];
 const NEWLINES: &[(&str, &str)] = &[("keep", "Keep"), ("strip", "Strip"), ("cr", "CR"), ("lf", "LF"), ("crlf", "CRLF"), ("implicit-cr", "Implicit CR"), ("implicit-lf", "Implicit LF")];
 const BACKSPACES: &[(&str, &str)] = &[("backspace", "Backspace"), ("ctrl-h", "Ctrl+H"), ("ctrl-?", "Ctrl+?"), ("delete", "Delete")];
 const PARITIES: &[(&str, &str)] = &[("none", "None"), ("odd", "Odd"), ("even", "Even")];
-const FLOWS: &[(&str, &str)] = &[("none", "None"), ("software", "Software"), ("hardware", "Hardware")];
+const WINDOWS_PARITIES: &[(&str, &str)] = &[("mark", "Mark"), ("space", "Space")];
+const FLOWS: &[(&str, &str)] = &[("none", "None"), ("software", "XON/XOFF"), ("hardware", "RTS/CTS"), ("xany", "XON/XOFF/XANY")];
 
 fn command_line(p: &Profile) -> String {
     if p.command.is_empty() && p.args.is_empty() { return String::new(); }
@@ -199,6 +206,7 @@ impl ProfileEditor {
         let kind = match kind { "ssh" => "ssh", "serial" => "serial", "socket" | "network" => "socket", _ => "local" };
         let p = Profile {
             env: d.env.clone(), cwd: d.cwd.clone(), color: d.color.clone(), scheme: d.scheme.clone(),
+            keep_tab_title: d.keep_tab_title, clear_after_connect: d.clear_after_connect,
             stream: d.stream.clone(), on_exit: d.on_exit.unwrap_or_default(), ssh_options: d.ssh_options.clone(),
             ssh: d.ssh.clone(), socket: d.socket.clone(), admin: d.admin, ..Profile::default()
         };
@@ -217,13 +225,17 @@ impl ProfileEditor {
             }
             groups.insert(0, (String::new(), t("Ungrouped").into()));
             fields.push(Field::Group.choice(optional(p.group.as_ref()), groups, false));
+            fields.push(Field::Icon.choice(optional(p.icon.as_ref()), Vec::new(), false));
         }
-        fields.push(Field::Color.text(optional(p.color.as_ref())));
+        let presets = crate::app::TAB_COLORS.iter().map(|&(label, color)| (color, label)).collect::<Vec<_>>();
+        fields.push(Field::Color.choice(optional(p.color.as_ref()), options(&presets, false), true));
         let mut schemes = names(schemes);
         schemes.insert(0, (String::new(), t("Window scheme").into()));
         let scheme = Field::Scheme.choice(optional(p.scheme.as_ref()), schemes, true);
         fields.push(Field::Exit.choice(enum_text((p.on_exit != OnExit::Inherit).then_some(p.on_exit)), options(EXITS, true), false));
         if !is_defaults { fields.push(Field::Hidden.toggle(Some(p.hidden), false)); }
+        fields.push(Field::KeepTitle.toggle(p.keep_tab_title, true));
+        fields.push(Field::ClearAfterConnect.toggle(p.clear_after_connect, true));
         let mut tabs = vec![EditorTab::new("General", fields)];
         match kind {
             "local" => tabs.push(command_tab(&p, is_defaults)),
@@ -284,6 +296,16 @@ impl ProfileEditor {
 
     pub fn select_tab(&mut self, index: usize) {
         if index < self.tabs.len() { self.tab = index; self.focus = 0; }
+    }
+
+    pub(crate) fn focuses_icon(&self) -> bool {
+        self.tabs[self.tab].fields[self.focus].is_icon()
+    }
+
+    pub(crate) fn set_icon(&mut self, icon: String) {
+        if let Some(field) = self.tabs[0].fields.iter_mut().find(|field| field.is_icon()) {
+            field.value = icon;
+        }
     }
 
     pub fn activate(&mut self, index: usize) {
@@ -418,6 +440,10 @@ fn serial_tab(p: &Profile, defaults: Option<&ProfileDefaults>, ports: &[String])
     speeds.extend(serial::BAUDS.iter().map(|baud| (baud.to_string(), baud.to_string())));
     let mut devices = options(&[], true);
     devices.extend(names(ports));
+    let mut parities = options(PARITIES, true);
+    if cfg!(windows) {
+        parities.extend(options(WINDOWS_PARITIES, false));
+    }
     let digits = |values: &[&str]| {
         let mut choices = options(&[], true);
         choices.extend(values.iter().map(|v| ((*v).into(), (*v).into())));
@@ -427,8 +453,8 @@ fn serial_tab(p: &Profile, defaults: Option<&ProfileDefaults>, ports: &[String])
         Field::Device.choice(optional(s.port), devices, true),
         Field::Speed.choice(optional(s.speed), speeds, true),
         Field::Bits.choice(optional(s.data_bits), digits(&["5", "6", "7", "8"]), false),
-        Field::Parity.choice(enum_text(s.parity), options(PARITIES, true), false),
-        Field::Stop.choice(optional(s.stop_bits), digits(&["1", "2"]), false),
+        Field::Parity.choice(enum_text(s.parity), parities, false),
+        Field::Stop.choice(optional(s.stop_bits), digits(&["1", "1.5", "2"]), false),
         Field::Flow.choice(enum_text(s.flow), options(FLOWS, true), false),
         Field::Slow.toggle(s.slow, true),
     ])
@@ -439,7 +465,7 @@ impl ProfileEditor {
         let invalid = || t("Enter a valid serial port and speed").to_owned();
         let options = SerialDefaults {
             port: self.opt(Field::Device), speed: self.opt(Field::Speed), data_bits: self.number(Field::Bits)?,
-            parity: enum_value(self.value(Field::Parity)), stop_bits: self.number(Field::Stop)?,
+            parity: enum_value(self.value(Field::Parity)), stop_bits: self.opt(Field::Stop).map(|text| text.parse().map_err(|_| invalid())).transpose()?,
             flow: enum_value(self.value(Field::Flow)), slow: self.flag(Field::Slow),
         };
         if options.port.as_ref().is_some_and(|p| p.contains(',')) || options.speed.as_ref().is_some_and(|s| s != "?" && s.parse::<u32>().map_or(true, |n| !(50..=4_000_000).contains(&n))) {
@@ -509,9 +535,11 @@ impl ProfileEditor {
                 .map(|(k, _)| k.clone()).ok_or_else(|| t("There is no color scheme with this name").to_owned())?)
         };
         d.color = self.opt(Field::Color);
-        if d.color != self.source.color && d.color.as_ref().is_some_and(|c| !c.strip_prefix('#').is_some_and(|s| s.len() == 6 && s.bytes().all(|b| b.is_ascii_hexdigit()))) {
+        if d.color != self.source.color && d.color.as_ref().is_some_and(|c| crate::settings::color_value(c).is_none()) {
             return Err(t("Enter a color as #RRGGBB").into());
         }
+        d.keep_tab_title = self.flag(Field::KeepTitle);
+        d.clear_after_connect = self.flag(Field::ClearAfterConnect);
         d.on_exit = enum_value(self.value(Field::Exit));
         match self.kind {
             "local" => {
@@ -543,10 +571,11 @@ impl ProfileEditor {
     pub fn defaults_result(&self) -> Result<ProfileDefaults, String> { self.attributes() }
 
     pub fn profile_result(&self) -> Result<Profile, String> {
-        let name = self.opt(Field::Name).ok_or_else(|| t("The profile needs a name").to_owned())?;
+        let name = self.opt(Field::Name).unwrap_or_default();
         let d = self.attributes()?;
         let mut p = Profile {
             name, group: self.opt(Field::Group), color: d.color, scheme: d.scheme, on_exit: d.on_exit.unwrap_or_default(),
+            icon: self.opt(Field::Icon), keep_tab_title: d.keep_tab_title, clear_after_connect: d.clear_after_connect,
             hidden: self.flag(Field::Hidden) == Some(true), builtin: false, elevated: false, admin: d.admin,
             cwd: d.cwd, env: d.env, stream: d.stream, ssh_options: d.ssh_options, ..self.source.clone()
         };
@@ -578,13 +607,27 @@ impl ProfileEditor {
             _ => true,
         };
         if !required { return Err(t("Give a command to run, an SSH destination, a serial port or a network address").into()); }
+        if p.name.is_empty() {
+            p.name = match self.kind {
+                "ssh" => resolved.ssh.as_deref().and_then(crate::ssh::parse_target).map(|mut target| {
+                    if let Some(options) = &resolved.ssh_options {
+                        target.user = options.user.clone().or(target.user);
+                        target.port = options.port.or(target.port);
+                    }
+                    target.display()
+                }).unwrap_or_default(),
+                "serial" => resolved.serial.as_deref().and_then(|spec| serial::parse(spec).ok()).map(|settings| settings.port).unwrap_or_default(),
+                "socket" => resolved.socket.as_deref().and_then(|address| aster_proto::address::parse(address).ok()).map(|address| address.authority()).unwrap_or_default(),
+                "layout" => t("Layout").into(),
+                _ => command_line(&resolved),
+            };
+        }
         if self.kind == "ssh" {
             let previous = self.source.ssh.as_deref().and_then(crate::ssh::parse_target);
             if p.command.is_empty() || previous.is_some_and(|t| t.args() == self.source.args) {
                 if p.command.is_empty() { p.command = "ssh".into(); }
                 p.args = p.ssh.as_deref().and_then(crate::ssh::parse_target).map(|target| target.args()).unwrap_or_default();
             }
-            if p.icon.is_none() && p.group.is_none() { p.icon = Some("ssh".into()); }
         }
         Ok(p)
     }

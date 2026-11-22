@@ -85,8 +85,16 @@ impl Serial {
         Ok(Self { settings, stream, input: None, applied_baud: Arc::default(), can_retry: false })
     }
 
-    pub fn connect(&mut self, report: impl Fn(String) + Send + 'static) -> Spawned {
-        self.connect_with(session::open, report)
+    pub fn connect(&mut self, connected: impl FnOnce() + Send + 'static, report: impl Fn(String) + Send + 'static) -> Spawned {
+        #[cfg(windows)]
+        use aster_platform_windows::serial::configure;
+        #[cfg(target_os = "linux")]
+        use aster_platform_linux::serial::configure;
+        self.connect_with(move |settings| {
+            let connection = session::open(settings, configure)?;
+            connected();
+            Ok(connection)
+        }, report)
     }
 
     fn connect_with(&mut self, open: impl FnOnce(&Settings) -> Result<session::Connection, String> + Send + 'static, report: impl Fn(String) + Send + 'static) -> Spawned {

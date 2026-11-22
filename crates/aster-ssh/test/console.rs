@@ -76,3 +76,14 @@ fn interactive_rounds_reject_stale_replies_and_keep_answers_out_of_the_terminal(
     assert_eq!(rx.try_recv().unwrap(), SshEvent::Finished);
     assert_eq!(shown(&out), "");
 }
+
+#[test]
+fn error_formatter_only_receives_service_errors_and_warnings() {
+    let (console, out, _) = console();
+    let console = console.with_error_formatter(|text| format!("translated {text}"));
+    console.note("note");
+    console.warn("warning");
+    console.error("failure\nsecond line");
+    console.write(b"server output".to_vec());
+    assert_eq!(shown(&out), "\x1b[2mnote\x1b[0m\r\n\x1b[33mtranslated warning\x1b[0m\r\n\x1b[31mtranslated failure\x1b[0m\r\n\x1b[31mtranslated second line\x1b[0m\r\nserver output");
+}

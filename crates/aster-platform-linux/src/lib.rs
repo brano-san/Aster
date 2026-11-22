@@ -10,6 +10,7 @@ mod instance;
 mod monitors;
 mod notifications;
 mod pty;
+pub mod serial;
 mod shells;
 mod text;
 mod thunar;

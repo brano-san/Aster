@@ -45,6 +45,7 @@ pub struct Launch {
     pub serial: Option<String>,
     pub socket: Option<String>,
     pub stream: Option<crate::profile::Stream>,
+    pub clear_after_connect: Option<bool>,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
@@ -87,7 +88,10 @@ pub enum Effect {
     SetClipboardHtml { text: String, html: String },
     RequestPaste,
     RequestVaultPaste(u64),
+    RequestConfigPaste(u64),
     SaveConfig(String),
+    SaveRawConfig { text: String, expected: Option<String> },
+    Restart,
     Open(String),
     OpenLog,
     StartMenuShortcut(bool),
@@ -95,6 +99,7 @@ pub enum Effect {
     ExportBuffer { pane: PaneId, text: String },
     RecentProfiles(Vec<String>),
     OpenConfigFile,
+    RevealConfigFile,
     CheckConfigFile,
     OpenConfigFolder,
     ShowDefaultConfig,
@@ -192,6 +197,7 @@ pub(crate) enum Drag {
     TabMenu,
     SidebarResize { width: f32 },
     Plus,
+    SettingsSlider { item: usize, track: Rect, x: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -204,6 +210,7 @@ pub(crate) struct Metrics {
 
 pub struct App {
     pub(crate) config: Config,
+    pub(crate) restart_baseline: crate::settings::RestartSettings,
     pub(crate) profiles: Vec<Profile>,
     detected: Vec<Profile>,
     schemes: Vec<Scheme>,
@@ -246,6 +253,7 @@ pub struct App {
     pub(crate) start_menu_shortcut: bool,
     pub(crate) config_encrypted: bool,
     pub(crate) vault_prompt: Option<crate::vault_settings::VaultDialog>,
+    pub(crate) config_editor: crate::config_editor::ConfigEditor,
     pub(crate) vault: crate::settings::VaultView,
     pub(crate) vault_input_id: u64,
     pub(crate) ssh_editor_request: u64,
@@ -322,6 +330,7 @@ impl App {
             ssh_forwards: BTreeMap::new(),
             ssh_auth_paste: None,
             ssh_algorithm_catalog: Default::default(),
+            restart_baseline: crate::settings::RestartSettings::from_config(&config),
             config,
             profiles,
             detected,
@@ -365,6 +374,7 @@ impl App {
             start_menu_shortcut: false,
             config_encrypted: false,
             vault_prompt: None,
+            config_editor: crate::config_editor::ConfigEditor::default(),
             menu: None,
             rename: None,
             pane_rename: None,
@@ -673,6 +683,9 @@ impl App {
     }
 
     pub(crate) fn apply_scheme(&mut self, name: String) {
+        if self.config.read_only() {
+            return self.warn_read_only_config();
+        }
         self.set_scheme_name(name);
         self.push_save_config();
     }
@@ -684,10 +697,11 @@ impl App {
     pub fn set_config(&mut self, config: Config) {
         let background_changed = self.config.appearance.background_image != config.appearance.background_image;
         let schemes_changed = self.config.color_schemes != config.color_schemes;
+        let changed_version = config.version != self.config.version;
         let mut profiles = self.detected.clone();
         profiles.extend(config.profiles.iter().cloned());
-        let profiles_changed = self.config.groups != config.groups || self.config.profiles != config.profiles || self.config.hidden_profiles != config.hidden_profiles || self.config.terminal.profile != config.terminal.profile;
-        let sidebar_changed = profiles_changed || self.config.profile_defaults != config.profile_defaults || self.config.appearance.profile_sidebar != config.appearance.profile_sidebar;
+        let profiles_changed = self.config.groups != config.groups || self.config.profiles != config.profiles || self.config.hidden_profiles != config.hidden_profiles || self.config.profile_defaults != config.profile_defaults || self.config.terminal.profile != config.terminal.profile;
+        let sidebar_changed = profiles_changed || self.config.appearance.profile_sidebar != config.appearance.profile_sidebar;
         let activity_changed = self.config.notifications.activity != config.notifications.activity
             || self.config.notifications.activity_silence_seconds != config.notifications.activity_silence_seconds;
         self.profiles = profiles;
@@ -698,6 +712,7 @@ impl App {
         }
         self.config = config;
         if background_changed { self.request_background_image(); }
+        self.update_restart_pending();
         if profiles_changed { self.sync_profile_page(); }
         if sidebar_changed { self.sync_profile_sidebar(); }
         if activity_changed { self.reset_activity_tracking(); }
@@ -708,6 +723,7 @@ impl App {
             self.reset_blink();
         }
         self.apply_language();
+        if changed_version { self.warn_read_only_config(); }
         let options = self.options();
         for p in self.panes.values() {
             p.terminal.lock().set_options(options.clone());
@@ -786,7 +802,7 @@ impl App {
         let local_environment = profile.is_local().then(|| Box::new(crate::environment::LocalEnvironment {
             global: self.config.terminal.environment.clone(), profile: profile.env.clone(), refresh: self.config.terminal.refresh_environment, set_comspec: self.config.terminal.set_comspec,
         }));
-        let launch = Launch { local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let launch = Launch { local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), clear_after_connect: profile.clear_after_connect, command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
         id
     }
@@ -1173,6 +1189,7 @@ impl App {
         if text.is_empty() {
             return;
         }
+        if self.config_editor_text(&text) { return; }
         let text = if self.config.terminal.paste_newlines_as_spaces && text.contains(['\r', '\n']) {
             text.replace("\r\n", " ").replace(['\r', '\n'], " ")
         } else {
@@ -1534,7 +1551,9 @@ impl App {
             OverlayKind::Commands => self.command_picks(),
             OverlayKind::Profiles => self.profile_picks(),
             OverlayKind::PaneProfile(_) => self.filtered_profile_picks(crate::picker::ProfileFilter::SinglePane),
+            OverlayKind::ProfileCreate => crate::profiles_page::profile_creation(),
             OverlayKind::ProfileTemplates => crate::profiles_page::profile_templates(),
+            OverlayKind::ProfileIcons => crate::profiles_page::profile_icons(),
             OverlayKind::Schemes => self.scheme_names().into_iter().map(|n| Pick { label: n.clone(), value: n, ..Pick::default() }).collect(),
             OverlayKind::TabColors => TAB_COLORS.iter().map(|(name, hex)| Pick { label: crate::i18n::t(name).to_owned(), hint: hex.to_string(), value: hex.to_string(), ..Pick::default() }).collect(),
             OverlayKind::SerialSpeed(pane) => {
@@ -1564,9 +1583,11 @@ impl App {
         self.overlay = None;
         self.dirty = true;
         match kind {
+            OverlayKind::ProfileCreate => self.create_profile_item(&value),
             OverlayKind::ProfileTemplates => self.edit_profile_template(&value),
             OverlayKind::SshKeys(_) => self.choose_ssh_key(value),
             OverlayKind::SshPorts(_) => {}
+            OverlayKind::ProfileIcons => self.set_profile_icon(value),
             OverlayKind::SerialSpeed(pane) => {
                 let Ok(baud) = value.parse() else { return };
                 if let Some(launch) = self.panes.get_mut(&pane).and_then(|p| p.pending.as_mut()) {
@@ -1610,6 +1631,7 @@ impl App {
     }
 
     fn preview_scheme(&mut self) {
+        if self.config.read_only() { return; }
         let Some(o) = self.overlay.as_ref().filter(|o| o.kind == OverlayKind::Schemes) else { return };
         if let Some(v) = o.selected_value() {
             if !v.eq_ignore_ascii_case(self.current_scheme()) {
@@ -1763,6 +1785,7 @@ impl App {
             self.restore_settings_page();
             self.dirty = true;
         } else if !on && self.settings.is_some() {
+            self.config_editor.cancel_paste();
             if let Some(page) = self.settings.as_mut() {
                 page.cancel_vault_input();
             }
@@ -1895,6 +1918,7 @@ impl App {
             }
             Event::Pasted(t) => self.paste(t),
             Event::VaultPasted { input, text } => self.paste_vault(input, text),
+            Event::ConfigEditorPasted { request, text } => self.paste_config_editor(request, &text),
             Event::Preedit(p) => {
                 self.preedit = if self.settings.as_ref().is_some_and(|page| page.editing_passphrase()) { Preedit::default() } else { p };
                 self.dirty = true;
@@ -2037,7 +2061,7 @@ impl App {
             if page.editing_passphrase() || page.editor.is_some() || page.group_editor.is_some() || page.scheme_editor.is_some() || page.deleting_scheme.is_some() {
                 return self.settings_key(key, mods);
             }
-            let editing = page.editing();
+            let editing = page.editing() || self.config_editor_focused();
             if !editing && page.current_shortcut().is_some() && crate::settings::shortcut_edit_key(key, mods) {
                 self.keymap.reset();
                 return self.settings_key(key, mods);
@@ -2231,6 +2255,7 @@ impl App {
         if self.menu.is_some() {
             return self.menu_hover(x, y);
         }
+        if self.config_editor_mouse_move(x, y) { return; }
         if self.drag == Drag::None && self.update_hovered(x, y) {
             self.hover = HitArea::Client;
             self.hover_link = None;
@@ -2249,6 +2274,11 @@ impl App {
         match self.drag.clone() {
             Drag::SidebarResize { .. } => return self.resize_sidebar(x),
             Drag::Pane { pane, start, moved } => return self.drag_pane(pane, start, moved, x, y),
+            Drag::SettingsSlider { item, track, .. } => {
+                self.drag = Drag::SettingsSlider { item, track, x };
+                self.dirty = true;
+                return;
+            }
             Drag::Select { pane, .. } => {
                 if let Some(rect) = self.layout.panes.iter().find(|(id, _)| *id == pane).map(|(_, r)| *r) {
                     let (line, col, side) = self.cell_at(pane, rect, x, y);
@@ -2592,12 +2622,18 @@ impl App {
     }
 
     fn on_up(&mut self, x: f32, y: f32, button: MouseButton) {
+        if button == MouseButton::Left && self.config_editor_mouse_up() {
+            self.dirty = true;
+            return;
+        }
+        if matches!(self.drag, Drag::SettingsSlider { .. }) && button != MouseButton::Left { return; }
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.dirty = true;
         match drag {
             Drag::SidebarResize { width } if button == MouseButton::Left => self.save_sidebar_width(width),
             Drag::Pane { pane, moved: true, .. } if button == MouseButton::Left => self.finish_pane_drag(pane, x, y),
             Drag::Tab { index, moved, .. } if button == MouseButton::Left => self.finish_tab_drag(index, moved, x, y),
+            Drag::SettingsSlider { item, track, .. } if self.settings.is_some() => self.finish_settings_slider(item, track, x),
             Drag::Select { pane, open_link } => {
                 let has = self.panes.get(&pane).is_some_and(|p| p.terminal.lock().has_selection());
                 if !has {
@@ -2739,12 +2775,12 @@ impl App {
                     self.effects.push(Effect::Write { pane, bytes });
                 }
                 VtEvent::Title(t) => {
-                    if let Some(p) = self.panes.get_mut(&pane) {
+                    if let Some(p) = self.panes.get_mut(&pane).filter(|p| p.profile.keep_tab_title != Some(true)) {
                         p.title = Some(t).filter(|t| !t.trim().is_empty() && !is_program_path(t));
                     }
                 }
                 VtEvent::ResetTitle => {
-                    if let Some(p) = self.panes.get_mut(&pane) {
+                    if let Some(p) = self.panes.get_mut(&pane).filter(|p| p.profile.keep_tab_title != Some(true)) {
                         p.title = None;
                     }
                 }
@@ -2755,6 +2791,10 @@ impl App {
         self.scan_prompts();
         self.poll_background_activity(Instant::now());
         self.dirty = true;
+    }
+
+    pub fn pane_clears_after_connect(&self, pane: PaneId) -> bool {
+        self.panes.get(&pane).is_some_and(|p| p.profile.clear_after_connect == Some(true))
     }
 
     pub fn exited(&mut self, pane: PaneId, code: Option<u32>) {
@@ -2885,8 +2925,17 @@ impl App {
     }
 
     pub(crate) fn push_save_config(&mut self) {
+        if self.config.read_only() {
+            return self.warn_read_only_config();
+        }
         let text = self.config.to_text();
         self.effects.push(Effect::SaveConfig(text));
+    }
+
+    pub fn warn_read_only_config(&mut self) {
+        if self.config.read_only() {
+            self.toast(self.config.read_only_message(), Duration::from_secs(8));
+        }
     }
 
     pub fn take_effects(&mut self) -> Vec<Effect> {

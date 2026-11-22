@@ -1,7 +1,7 @@
 pub mod host;
 pub mod monitors;
 
-use aster_core::input::{CursorIcon, Event, HitArea};
+use aster_core::input::{CursorIcon, Event, HitArea, PasteTarget};
 use aster_core::profile::Profile;
 use aster_gfx::atlas::Slot;
 use aster_gfx::render::{DrawList, Rect};
@@ -19,6 +19,16 @@ pub struct PlatformError {
 impl PlatformError {
     pub fn new(code: i64, message: impl Into<String>) -> Self {
         Self { code, message: message.into() }
+    }
+
+    pub fn localized(&self) -> String {
+        let code = self.code as u32;
+        let raw = if cfg!(windows) && code & 0xffff_0000 == 0x8007_0000 {
+            (code & 0xffff) as i32
+        } else {
+            i32::try_from(self.code).unwrap_or(-1)
+        };
+        aster_core::i18n::platform_error(std::io::Error::from_raw_os_error(raw).kind(), &self.message)
     }
 }
 
@@ -113,7 +123,7 @@ pub trait Window {
     fn activate(&self);
     fn open_window(&self, opts: WindowOptions);
     fn placement(&self) -> Placement;
-    fn clipboard_text(&self, vault_input: Option<u64>) -> Option<String>;
+    fn clipboard_text(&self, target: Option<PasteTarget>) -> Option<String>;
     fn set_clipboard_text(&self, text: &str);
     fn set_clipboard_html(&self, text: &str, html: &str);
     fn set_ime_area(&self, area: Rect);
@@ -204,6 +214,12 @@ pub trait Platform: 'static {
     fn config_dir() -> Option<PathBuf>;
     fn home_dir() -> Option<PathBuf>;
     fn open(target: &str);
+
+    fn reveal_file(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            Self::open(&parent.to_string_lossy());
+        }
+    }
     fn ssh_command() -> Option<String>;
     fn process_cwd(pid: u32) -> Option<String>;
     fn child_processes(pid: u32) -> Vec<String>;

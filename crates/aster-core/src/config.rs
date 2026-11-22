@@ -194,7 +194,7 @@ pub struct Terminal {
     pub word_separator: String,
     pub scroll_on_input: bool,
     pub profile: String,
-    #[serde(rename = "env", alias = "environment")]
+    #[serde(rename = "env")]
     pub environment: BTreeMap<String, String>,
     pub refresh_environment: bool,
     pub set_comspec: bool,
@@ -209,8 +209,8 @@ pub struct Terminal {
 
 impl Default for Terminal {
     fn default() -> Self {
-        Self {
-            font: "Cascadia Mono".into(),
+        let mut terminal = Self {
+            font: "monospace".into(),
             font_weight: 400,
             font_weight_bold: 700,
             fallback_font: String::new(),
@@ -249,7 +249,9 @@ impl Default for Terminal {
             confirm_close: true,
             close_window_with_last_tab: true,
             recent_profiles: 3,
-        }
+        };
+        crate::config_defaults::apply_os_defaults(&mut terminal);
+        terminal
     }
 }
 
@@ -421,6 +423,19 @@ pub struct Updates {
     pub check_automatically: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Picker {
+    pub show_builtin_profiles: bool,
+    pub quick_connect: crate::quick_connect::Provider,
+}
+
+impl Default for Picker {
+    fn default() -> Self {
+        Self { show_builtin_profiles: true, quick_connect: crate::quick_connect::Provider::default() }
+    }
+}
+
 impl Default for Updates {
     fn default() -> Self {
         Self { check_automatically: true }
@@ -443,12 +458,6 @@ impl Default for Vault {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
-pub struct Picker {
-    pub quick_connect: crate::quick_connect::Provider,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default, rename_all = "kebab-case")]
 pub struct Palette {
     pub hidden_commands: Vec<String>,
 }
@@ -460,10 +469,11 @@ pub struct Colors {
     pub harmonious: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Config {
-    pub picker: Picker,
+    #[serde(skip)]
+    pub version: u32,
     pub palette: Palette,
     pub terminal: Terminal,
     pub appearance: Appearance,
@@ -475,6 +485,7 @@ pub struct Config {
     pub ssh: Ssh,
     pub system: System,
     pub updates: Updates,
+    pub picker: Picker,
     pub hotkeys: BTreeMap<String, Vec<String>>,
     pub profiles: Vec<Profile>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -486,7 +497,47 @@ pub struct Config {
     pub profile_defaults: BTreeMap<String, ProfileDefaults>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        let terminal = Terminal::default();
+        let appearance = Appearance::default();
+        let system = System::default();
+        Self {
+            version: crate::config_schema::CURRENT,
+            terminal,
+            appearance,
+            colors: Colors::default(),
+            panes: Panes::default(),
+            notifications: Notifications::default(),
+            dock: DockSettings::default(),
+            vault: Vault::default(),
+            ssh: Ssh::default(),
+            system,
+            updates: Updates::default(),
+            picker: Picker::default(),
+            palette: Palette::default(),
+            hotkeys: BTreeMap::new(),
+            profiles: Vec::new(),
+            hidden_profiles: Vec::new(),
+            color_schemes: Vec::new(),
+            groups: Vec::new(),
+            profile_defaults: BTreeMap::new(),
+        }
+    }
+}
+
+fn format_error(text: &str, e: toml::de::Error) -> String {
+    let Some(prefix) = e.span().and_then(|span| text.get(..span.start)) else { return e.message().to_owned() };
+    let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let column = prefix.rsplit('\n').next().unwrap_or_default().chars().count() + 1;
+    crate::i18n::tf("Line {line}, column {column}: {error}", &[("line", &line.to_string()), ("column", &column.to_string()), ("error", e.message())])
+}
+
 impl Config {
+    pub(crate) fn profile_in_picker(&self, profile: &Profile) -> bool {
+        !self.profile_hidden(profile) && (self.picker.show_builtin_profiles || !profile.builtin || profile.id.starts_with("ssh:") || profile.id.starts_with("serial:"))
+    }
+
     pub fn profile_hidden(&self, profile: &Profile) -> bool {
         if profile.builtin {
             self.hidden_profiles.contains(&profile.id)
@@ -496,29 +547,48 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Config, String> {
-        let mut config: Config = toml::from_str(text).map_err(|e| {
-            let Some(prefix) = e.span().and_then(|span| text.get(..span.start)) else { return e.message().to_owned() };
-            let line = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-            let column = prefix.rsplit('\n').next().unwrap_or_default().chars().count() + 1;
-            crate::i18n::tf("Line {line}, column {column}: {error}", &[("line", &line.to_string()), ("column", &column.to_string()), ("error", e.message())])
-        })?;
-        if let Ok(raw) = toml::from_str::<toml::Table>(text) {
-            let legacy_bool = |section: &str, key: &str, previous_section: &str, previous_key: &str| {
-                if raw.get(section).and_then(|v| v.get(key)).is_some() { return None; }
-                raw.get(previous_section)?.get(previous_key)?.as_bool()
-            };
-            if let Some(value) = legacy_bool("terminal", "close-window-with-last-tab", "appearance", "last-tab-closes-window") {
-                config.terminal.close_window_with_last_tab = value;
-            }
-            if let Some(value) = legacy_bool("panes", "focus-follows-mouse", "terminal", "focus-follows-mouse") {
-                config.panes.focus_follows_mouse = value;
-            }
-        }
+        let value: toml::Value = toml::from_str(text).map_err(|e| format_error(text, e))?;
+        Self::from_value(text, value)
+    }
+
+    pub(crate) fn from_value(text: &str, value: toml::Value) -> Result<Config, String> {
+        use crate::config_schema::{decode_newer, migrate, version, CURRENT};
+        let from = version(&value).ok_or_else(|| crate::i18n::t("The config version must be a nonnegative integer").to_owned())?;
+        let mut config = if from > CURRENT {
+            decode_newer(value)
+        } else {
+            migrate(value, from).try_into::<Self>().map_err(|e| {
+                toml::from_str::<Self>(text).err().map_or_else(|| e.message().to_owned(), |e| format_error(text, e))
+            })?
+        };
+        config.version = from.max(CURRENT);
         Ok(config)
     }
 
+    pub fn read_only(&self) -> bool {
+        self.version > crate::config_schema::CURRENT
+    }
+
+    pub fn read_only_message(&self) -> String {
+        crate::i18n::tf("Config version {version} is newer. Settings are read-only.", &[("version", &self.version.to_string())])
+    }
+
+    pub fn replace_vault_seal(text: &str, sealed: &str) -> Option<String> {
+        crate::config_schema::replace_vault_seal(text, sealed)
+    }
+
     pub fn to_text(&self) -> String {
-        toml::to_string_pretty(self).unwrap_or_default()
+        crate::config_defaults::overrides(self).and_then(|table| toml::to_string_pretty(&table))
+            .map(|text| self.versioned_text(&text)).unwrap_or_default()
+    }
+
+    pub fn defaults_text() -> String {
+        let defaults = Self::default();
+        toml::to_string_pretty(&defaults).map(|text| defaults.versioned_text(&text)).unwrap_or_default()
+    }
+
+    fn versioned_text(&self, body: &str) -> String {
+        if body.is_empty() { format!("version = {}\n", self.version) } else { format!("version = {}\n\n{body}", self.version) }
     }
 }
 

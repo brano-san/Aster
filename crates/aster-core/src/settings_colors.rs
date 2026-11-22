@@ -121,6 +121,7 @@ impl App {
     }
 
     pub(crate) fn apply_settings_scheme(&mut self, name: String) {
+        if self.config.read_only() { return self.warn_read_only_config(); }
         let tab = self.settings.as_ref().filter(|p| p.colors_page()).map_or_else(|| self.active_scheme_tab(), |p| p.scheme_tab);
         if tab.name(&self.config.appearance) != name {
             let mut config = self.config.clone();
@@ -178,6 +179,7 @@ impl App {
 
     fn delete_settings_scheme(&mut self) {
         let Some(name) = self.settings.as_mut().and_then(|p| p.deleting_scheme.take()) else { return };
+        if self.config.read_only() { return self.warn_read_only_config(); }
         let mut config = self.config.clone();
         let count = config.color_schemes.len();
         config.color_schemes.retain(|scheme| !scheme.name.eq_ignore_ascii_case(&name));

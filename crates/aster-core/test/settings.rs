@@ -35,8 +35,8 @@ fn every_setting_points_at_a_config_value_of_the_matching_type() {
         let value = get(&config, s.key).unwrap_or_else(|| panic!("{} is missing", s.key));
         let fits = match s.control {
             Control::Toggle => value.is_bool(),
-            Control::Number { .. } => value.is_integer() || value.is_float(),
-            Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles | Control::Text | Control::Font { .. } => value.is_str(),
+            Control::Number { .. } | Control::Slider { .. } => value.is_integer() || value.is_float(),
+            Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles | Control::Text | Control::Color | Control::Font { .. } => value.is_str(),
             Control::StringList => value.is_array(),
             Control::Run(_) | Control::ReadOnly(_) => unreachable!(),
         };
@@ -54,7 +54,67 @@ fn window_and_appearance_list_their_own_settings() {
     for key in ["terminal.font", "terminal.font-size", "terminal.line-padding", "terminal.padding", "terminal.cursor", "terminal.cursor-blink", "terminal.fallback-font", "appearance.ui-font"] {
         assert!(keys(APPEARANCE).contains(&key));
     }
-    assert!(PAGES.windows(2).any(|p| p == [COLORS, "Window"]));
+    assert_eq!(&PAGES[..4], [SYSTEM, APPEARANCE, PROFILES, TERMINAL]);
+    assert!(PAGES[4..PAGES.len() - 1].iter().map(|name| name.to_ascii_lowercase()).is_sorted());
+    assert_eq!(PAGES.last(), Some(&CONFIG_FILE));
+}
+
+#[test]
+fn opacity_uses_the_pointer_position_and_keyboard_steps() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    a.run(Action::Settings);
+    typed(&mut a, "opacity");
+    let page = a.settings.as_ref().unwrap();
+    let selected = page.shown.iter().position(|&item| SETTINGS.get(item).is_some_and(|setting| setting.key == "appearance.opacity")).unwrap();
+    let r = a.settings_geometry().unwrap().rows.into_iter().find(|r| r.kind == RowKind::Item(selected)).unwrap().control;
+    let image_opacity = a.config().appearance.background_image_opacity;
+    let (x, y) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
+    a.settings_click(x, y);
+    a.on_event(Event::MouseUp { x, y, button: crate::input::MouseButton::Left });
+    assert!(a.config().appearance.opacity < 0.8);
+    assert_eq!(a.config().appearance.background_image_opacity, image_opacity);
+    let before = a.config().appearance.opacity;
+    key(&mut a, Key::Right);
+    assert!((a.config().appearance.opacity - before - 0.05).abs() < 0.001);
+}
+
+#[test]
+fn restart_button_tracks_startup_changes_and_uses_the_restart_effect() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    a.run(Action::Settings);
+    assert!(a.settings_geometry().unwrap().restart.is_none());
+    typed(&mut a, "terminal.open-on-start");
+    key(&mut a, Key::Enter);
+    assert!(!saved(&mut a).unwrap().terminal.open_on_start);
+    let r = a.settings_geometry().unwrap().restart.unwrap();
+    a.settings_click(r.x + 4.0, r.y + 4.0);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Restart)));
+    key(&mut a, Key::Enter);
+    assert!(a.settings_geometry().unwrap().restart.is_none());
+}
+
+#[test]
+fn loading_a_newer_config_warns_and_settings_cannot_edit_it() {
+    let mut a = app();
+    let newer = Config::parse("version = 42\n[terminal]\nopen-on-start = false").unwrap();
+    a.set_config(newer.clone());
+    assert!(a.tab_toast.as_ref().unwrap().0.contains("42"));
+    a.run(Action::Settings);
+    typed(&mut a, "terminal.open-on-start");
+    key(&mut a, Key::Enter);
+    assert!(saved(&mut a).is_none());
+    assert_eq!(a.config(), &newer);
+    assert!(a.settings_geometry().unwrap().restart.is_none());
+}
+
+#[test]
+fn color_swatches_accept_only_complete_hex_colors() {
+    assert_eq!(color_value(" #00Aaff "), Some(aster_gfx::render::Color::rgb(0x00aaff)));
+    for text in ["", "red", "#fff", "#0088xx", "#0088ff99", "#+12345"] {
+        assert!(color_value(text).is_none(), "{text}");
+    }
 }
 
 #[test]
@@ -270,10 +330,16 @@ fn the_query_filters_by_every_word_across_label_hint_and_section() {
     let mut listed = std::collections::BTreeSet::new();
     for installed in [None, Some(false), Some(true)] {
         page.launcher_installed = installed;
+        page.profiles_advanced = false;
         for (k, name) in PAGES.iter().enumerate() {
             page.show_page(k);
             assert!(page.shown.iter().all(|&i| page.section(i) == *name), "{name} shows only its own items");
             listed.extend(page.shown.iter().copied().filter(|&i| i < SETTINGS.len()));
+            if *name == PROFILES {
+                page.profiles_advanced = true;
+                page.refilter();
+                listed.extend(page.shown.iter().copied().filter(|&i| i < SETTINGS.len()));
+            }
             if *name == SHORTCUTS {
                 assert!(page.shown.iter().any(|&i| shortcut(i).is_some()), "shortcuts have their page");
             }
@@ -506,6 +572,7 @@ fn focus_field(a: &mut App, tab: &str, label: &str) {
 fn choose_template(a: &mut App, name: &str) {
     select_profile(a, "");
     key(a, Key::Enter);
+    key(a, Key::Enter);
     typed(a, name);
     key(a, Key::Enter);
 }
@@ -518,7 +585,7 @@ fn new_profile_templates_prefill_the_editor_and_focus_the_connection_field() {
         let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
         let active = &editor.tabs[editor.tab];
         assert_eq!((editor.focus, active.label.as_str(), active.fields[editor.focus].value.as_str()), (0, tab, initial));
-        assert_eq!(editor.tabs[0].fields[0].value, name);
+        assert!(editor.tabs[0].fields[0].value.is_empty());
         if tab != "Command" { assert!(editor.tabs.iter().all(|t| t.label != "Command")); }
         key(&mut a, Key::Escape);
     }
@@ -620,7 +687,7 @@ fn a_new_ssh_profile_needs_only_a_name_and_a_destination() {
     focus_field(&mut a, "General", "Name");
     a.on_event(ctrl(Key::Backspace));
     a.on_event(ctrl(Key::Enter));
-    assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "a nameless profile is refused");
+    assert!(a.settings.as_ref().unwrap().editor.as_ref().unwrap().error.is_some(), "a connection still needs a destination");
     typed(&mut a, "Prod");
     focus_field(&mut a, "SSH", "SSH destination");
     typed(&mut a, "deploy@prod");
@@ -694,7 +761,7 @@ fn a_serial_profile_needs_only_a_name_and_a_port() {
     key(&mut a, Key::Right);
     a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
-    let p = config.profiles.iter().find(|p| p.name == "Serial port").unwrap();
+    let p = config.profiles.iter().find(|p| p.name == "COM3").unwrap();
     assert_eq!(p.serial.as_deref(), Some("COM3:9600,8N1"));
     assert!(a.settings.as_ref().unwrap().profiles.iter().any(|r| r.detail == "serial COM3:9600,8N1"));
 }
@@ -735,7 +802,7 @@ fn a_network_profile_stores_a_normalized_address() {
     key(&mut a, Key::Right);
     a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).expect("saved");
-    let p = config.profiles.iter().find(|p| p.name == "TCP").unwrap();
+    let p = config.profiles.iter().find(|p| p.name == "switch.lan:23").unwrap();
     assert_eq!(p.socket.as_deref(), Some("telnet://switch.lan:23"));
     assert_eq!(p.group.as_deref(), Some("Network"));
     assert!(!p.is_local());
@@ -794,8 +861,7 @@ fn color_scheme_page_lists_settings_then_custom_and_builtin_palettes() {
     });
     a.set_config(config);
     a.run(Action::Settings);
-    a.on_event(ctrl(Key::PageDown));
-    a.on_event(ctrl(Key::PageDown));
+    a.show_settings_page(PAGES.iter().position(|p| *p == COLORS).unwrap());
     let page = a.settings.as_ref().unwrap();
     assert_eq!(PAGES[page.page], COLORS);
     assert!(page.shown.iter().all(|&i| page.section(i) == COLORS));
@@ -853,6 +919,29 @@ fn deleting_a_custom_scheme_requires_confirmation_and_restores_defaults() {
     assert_eq!(config.appearance.color_scheme, "Aster Dark");
     assert_eq!(config.appearance.light_color_scheme, "Aster Light");
     assert!(a.settings.as_ref().unwrap().scheme_item("Sample").is_none());
+}
+
+#[test]
+fn scheme_controls_respect_future_config_read_only_mode() {
+    let mut a = app();
+    let mut config = Config::parse("version = 42").unwrap();
+    config.appearance.color_scheme = "Sample".into();
+    config.color_schemes.push(crate::config::CustomScheme {
+        name: "Sample".into(), foreground: "#123456".into(), background: "#abcdef".into(),
+        colors: vec!["#204060".into(); 16], ..Default::default()
+    });
+    a.set_config(config.clone());
+    a.run(Action::Settings);
+    a.show_settings_page(PAGES.iter().position(|&p| p == COLORS).unwrap());
+    a.apply_settings_scheme("Aster Dark".into());
+    key(&mut a, Key::Delete);
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::F(2));
+    assert!(a.settings.as_ref().unwrap().scheme_editor.is_some());
+    typed(&mut a, "Edited scheme");
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(a.config(), &config);
+    assert!(saved(&mut a).is_none());
 }
 
 #[test]
@@ -1132,7 +1221,9 @@ fn group_modal_creates_edits_cancels_and_confirms_deletion() {
     c.groups.push(crate::profile::ProfileGroup { id: "p".into(), name: "Parent".into(), ..Default::default() });
     a.set_config(c);
     a.open_profile_settings();
-    select_tree_row(&mut a, TreeKind::NewGroup);
+    select_tree_row(&mut a, TreeKind::NewProfile);
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::Down);
     key(&mut a, Key::Enter);
     typed(&mut a, "East");
     key(&mut a, Key::Tab);
@@ -1178,6 +1269,7 @@ fn type_and_group_defaults_save_reset_and_reach_the_pending_launch() {
     config.profiles.push(source.clone());
     a.set_config(config);
     a.open_profile_settings();
+    a.show_profiles_tab(true);
     select_tree_row(&mut a, TreeKind::Defaults("ssh"));
     key(&mut a, Key::Enter);
     focus_field(&mut a, "SSH", "User");
@@ -1185,6 +1277,7 @@ fn type_and_group_defaults_save_reset_and_reach_the_pending_launch() {
     a.on_event(ctrl(Key::Enter));
     let config = saved(&mut a).unwrap();
     assert_eq!(config.profile_defaults["ssh"].ssh_options.as_ref().unwrap().user.as_deref(), Some("operator"));
+    a.show_profiles_tab(false);
     let group_row = TreeKind::Header(Header::Group("lab".into()));
     select_tree_row(&mut a, group_row.clone());
     key(&mut a, Key::Char('E'));
@@ -1209,6 +1302,7 @@ fn type_and_group_defaults_save_reset_and_reach_the_pending_launch() {
     key(&mut a, Key::Delete);
     a.on_event(ctrl(Key::Enter));
     assert!(saved(&mut a).unwrap().groups[0].defaults.is_empty());
+    a.show_profiles_tab(true);
     select_tree_row(&mut a, TreeKind::Defaults("ssh"));
     key(&mut a, Key::Delete);
     assert!(saved(&mut a).is_none());
@@ -1330,4 +1424,21 @@ fn vault_change_masks_both_fields_and_discards_interrupted_input() {
         assert!(!a.settings.as_ref().unwrap().editing());
         assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::VaultChange { .. } | Effect::Write { .. } | Effect::SaveConfig(_))));
     }
+}
+
+#[test]
+fn profile_advanced_tab_holds_picker_settings_and_type_defaults() {
+    use crate::profiles_page::TreeKind;
+    let mut a = app();
+    a.open_profile_settings();
+    let advanced = a.settings_geometry().unwrap().profile_tabs.unwrap()[1];
+    a.settings_click(advanced.x + 4.0, advanced.y + 4.0);
+    let page = a.settings.as_ref().unwrap();
+    assert!(page.profiles_advanced);
+    let keys: Vec<_> = page.shown.iter().filter_map(|&i| SETTINGS.get(i).map(|s| s.key)).collect();
+    assert_eq!(keys, ["terminal.recent-profiles", "picker.show-builtin-profiles", "picker.quick-connect"]);
+    assert!(page.shown.iter().any(|&i| page.tree_at(i).is_some_and(|row| row.kind == TreeKind::Defaults("ssh"))));
+    assert!(page.shown.iter().all(|&i| page.profile_at(i).is_none()));
+    a.on_event(ctrl(Key::Left));
+    assert!(!a.settings.as_ref().unwrap().profiles_advanced);
 }

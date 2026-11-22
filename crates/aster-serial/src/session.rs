@@ -1,4 +1,4 @@
-use crate::settings::{Flow, Parity, Settings};
+use crate::settings::{Flow, Parity, Settings, StopBits};
 use crossbeam_channel::{after, bounded, never, select, unbounded, Receiver, Sender, TryRecvError};
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
@@ -74,10 +74,24 @@ impl Port for SerialDevice {
     }
 }
 
-pub fn open(settings: &Settings) -> Result<Connection, String> {
+#[cfg(windows)]
+type DeviceHandle = std::os::windows::io::RawHandle;
+#[cfg(unix)]
+type DeviceHandle = std::os::fd::RawFd;
+
+pub fn open(settings: &Settings, configure: impl FnOnce(DeviceHandle, &Settings) -> io::Result<()>) -> Result<Connection, String> {
     let name = &settings.port;
     if settings.ask_baud {
         return Err("Select a baud rate before opening the serial port.".to_owned());
+    }
+    if cfg!(windows) && settings.flow == Flow::Xany {
+        return Err("XANY flow control is unavailable on this platform.".into());
+    }
+    if !cfg!(windows) && matches!(settings.parity, Parity::Mark | Parity::Space) {
+        return Err("Mark and space parity are unavailable on this platform.".into());
+    }
+    if !cfg!(windows) && settings.stop_bits == StopBits::OneAndHalf {
+        return Err("1.5 stop bits are unavailable on this platform.".into());
     }
     let data_bits = match settings.data_bits {
         5 => serialport::DataBits::Five,
@@ -91,22 +105,17 @@ pub fn open(settings: &Settings) -> Result<Connection, String> {
         }
     };
     let stop_bits = match settings.stop_bits {
-        1 => serialport::StopBits::One,
-        2 => serialport::StopBits::Two,
-        other => {
-            return Err(format!(
-                "Cannot open {name}: unsupported stop bits {other}."
-            ))
-        }
+        StopBits::One | StopBits::OneAndHalf => serialport::StopBits::One,
+        StopBits::Two => serialport::StopBits::Two,
     };
     let parity = match settings.parity {
         Parity::None => serialport::Parity::None,
-        Parity::Odd => serialport::Parity::Odd,
+        Parity::Odd | Parity::Mark | Parity::Space => serialport::Parity::Odd,
         Parity::Even => serialport::Parity::Even,
     };
     let flow = match settings.flow {
         Flow::None => serialport::FlowControl::None,
-        Flow::Software => serialport::FlowControl::Software,
+        Flow::Software | Flow::Xany => serialport::FlowControl::Software,
         Flow::Hardware => serialport::FlowControl::Hardware,
     };
     let port = serialport::new(name.as_str(), settings.baud)
@@ -115,9 +124,14 @@ pub fn open(settings: &Settings) -> Result<Connection, String> {
         .parity(parity)
         .flow_control(flow)
         .timeout(READ_TIMEOUT)
-        .open()
+        .open_native()
         .map_err(|error| format!("Cannot open {name}: {error}"))?;
-    Ok(start_with_mode(Box::new(SerialDevice(port)), settings.slow))
+    #[cfg(windows)]
+    let handle = std::os::windows::io::AsRawHandle::as_raw_handle(&port);
+    #[cfg(unix)]
+    let handle = std::os::fd::AsRawFd::as_raw_fd(&port);
+    configure(handle, settings).map_err(|error| format!("Cannot open {name}: {error}"))?;
+    Ok(start_with_mode(Box::new(SerialDevice(Box::new(port))), settings.slow))
 }
 
 pub fn start(port: Box<dyn Port>) -> Connection {

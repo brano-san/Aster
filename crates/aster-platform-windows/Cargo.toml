@@ -10,6 +10,7 @@ license.workspace = true
 aster-core.workspace = true
 aster-gfx.workspace = true
 aster-platform.workspace = true
+aster-proto.workspace = true
 crc32fast.workspace = true
 tracing.workspace = true
 windows-core.workspace = true
@@ -20,6 +21,7 @@ features = [
     "Data_Xml_Dom",
     "Foundation",
     "UI_Notifications",
+    "Win32_Devices_Communication",
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Direct3D",

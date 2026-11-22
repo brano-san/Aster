@@ -36,7 +36,7 @@ pub fn read_initial(path: &Path) -> io::Result<String> {
             match fs::read_to_string(path) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     let config = Config::default();
-                    write_config(path, &config, None)?;
+                    write_config(path, &config, None, None)?;
                     Ok(config.to_text())
                 }
                 result => result,
@@ -59,21 +59,32 @@ pub fn vault_issue(error: VaultError) -> VaultIssue {
 }
 
 impl ConfigAccess {
-    pub fn load(&self, path: &Path) -> io::Result<Config> {
-        let text = fs::read_to_string(path)?;
-        let encrypted = is_encrypted(&text);
-        let mut config = if encrypted {
+    fn plain_text<'a>(&self, text: &'a str) -> io::Result<std::borrow::Cow<'a, str>> {
+        if is_encrypted(text) {
             let cipher = self.cipher.as_ref().ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "config is encrypted"))?;
-            let clear = cipher.decrypt(&text).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "could not decrypt config"))?;
-            parse(&clear)?
+            cipher.decrypt(text).map(std::borrow::Cow::Owned).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "could not decrypt config"))
+        } else if self.cipher.is_some() {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "config encryption changed on disk"))
         } else {
-            if self.cipher.is_some() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "config encryption changed on disk"));
-            }
-            parse(&text)?
-        };
-        config.vault.encrypt_config = encrypted;
+            Ok(std::borrow::Cow::Borrowed(text))
+        }
+    }
+
+    fn parse_document(&self, text: &str) -> Result<Config, String> {
+        let mut config = Config::parse(text)?;
+        config.vault.encrypt_config = self.cipher.is_some();
         Ok(config)
+    }
+
+    pub fn load_document(&self, path: &Path) -> io::Result<(String, Result<Config, String>)> {
+        let disk = fs::read_to_string(path)?;
+        let text = self.plain_text(&disk)?.into_owned();
+        let config = self.parse_document(&text);
+        Ok((text, config))
+    }
+
+    pub fn load(&self, path: &Path) -> io::Result<Config> {
+        self.load_document(path)?.1.map_err(invalid_data)
     }
 
     pub fn unlock(&mut self, path: &Path, passphrase: &str) -> Result<Config, VaultIssue> {
@@ -104,41 +115,48 @@ impl ConfigAccess {
     pub fn save_settings(&self, path: &Path, config: &mut Config, sealed: &str) -> io::Result<()> {
         self.writable()?;
         let _lock = lock_config(path)?;
-        config.vault.sealed = match self.load(path) {
-            Ok(disk) => disk.vault.sealed,
-            Err(e) if e.kind() == io::ErrorKind::NotFound && self.cipher.is_none() => sealed.to_owned(),
-            Err(e) => return Err(e),
+        let existing = source(path)?;
+        config.vault.sealed = match &existing {
+            Some(disk) => self.read_writable(disk)?.vault.sealed,
+            None if self.cipher.is_none() => sealed.to_owned(),
+            None => return Err(io::Error::new(io::ErrorKind::NotFound, "encrypted configuration is missing")),
         };
         config.vault.encrypt_config = self.cipher.is_some();
-        write_config(path, config, self.cipher.as_ref())
+        write_config(path, config, self.cipher.as_ref(), existing.as_deref())
     }
 
     pub fn save_vault(&mut self, path: &Path, expected: &str, sealed: &str, rekey: Option<&str>) -> io::Result<bool> {
         self.writable()?;
         let _lock = lock_config(path)?;
-        let mut config = self.load(path)?;
+        let disk = fs::read_to_string(path)?;
+        let text = self.plain_text(&disk)?;
+        let mut config = self.parse_document(&text).map_err(invalid_data)?;
+        ensure_writable(&config)?;
         if config.vault.sealed != expected {
             return Err(io::Error::other("vault changed on disk"));
         }
-        config.vault.sealed = sealed.to_owned();
         if self.cipher.is_some() && sealed.is_empty() {
+            config.vault.sealed.clear();
             config.vault.encrypt_config = false;
-            write_config(path, &config, None)?;
+            write_config(path, &config, None, Some(&disk))?;
             self.cipher = None;
-        } else if let Some(passphrase) = rekey.filter(|_| self.cipher.is_some()) {
-            let cipher = ConfigCipher::new(passphrase);
-            write_config(path, &config, Some(&cipher))?;
-            self.cipher = Some(cipher);
         } else {
-            write_config(path, &config, self.cipher.as_ref())?;
+            let updated = Config::replace_vault_seal(&text, sealed)
+                .ok_or_else(|| invalid_data("could not update the vault configuration".into()))?;
+            let next = rekey.filter(|_| self.cipher.is_some()).map(ConfigCipher::new);
+            write_document(path, &updated, next.as_ref().or(self.cipher.as_ref()), Some(Some(&disk)))?;
+            if next.is_some() {
+                self.cipher = next;
+            }
         }
-        Ok(config.vault.encrypt_config)
+        Ok(self.cipher.is_some())
     }
 
     pub fn set_encryption(&mut self, path: &Path, sealed: &str, passphrase: &str, enabled: bool) -> Result<(), VaultIssue> {
         self.writable().map_err(|_| VaultIssue::SaveFailed)?;
         let _lock = lock_config(path).map_err(|_| VaultIssue::SaveFailed)?;
-        let mut config = self.load(path).map_err(|_| VaultIssue::ConfigReadFailed)?;
+        let disk = fs::read_to_string(path).map_err(|_| VaultIssue::ConfigReadFailed)?;
+        let mut config = self.read_writable(&disk).map_err(|_| VaultIssue::ConfigReadFailed)?;
         if sealed.is_empty() || config.vault.sealed != sealed {
             return Err(VaultIssue::NotConfigured);
         }
@@ -146,9 +164,66 @@ impl ConfigAccess {
         if config.vault.encrypt_config != enabled {
             let cipher = enabled.then(|| ConfigCipher::new(passphrase));
             config.vault.encrypt_config = enabled;
-            write_config(path, &config, cipher.as_ref()).map_err(|_| VaultIssue::SaveFailed)?;
+            write_config(path, &config, cipher.as_ref(), Some(&disk)).map_err(|_| VaultIssue::SaveFailed)?;
             self.cipher = cipher;
         }
+        Ok(())
+    }
+}
+
+fn invalid_data(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn ensure_writable(config: &Config) -> io::Result<()> {
+    if config.read_only() {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, config.read_only_message()))
+    } else {
+        Ok(())
+    }
+}
+
+impl ConfigAccess {
+    fn read_writable(&self, disk: &str) -> io::Result<Config> {
+        let config = self.parse_document(&self.plain_text(disk)?).map_err(invalid_data)?;
+        ensure_writable(&config)?;
+        Ok(config)
+    }
+
+    pub fn save_raw(&self, path: &Path, expected: Option<&str>, text: &str) -> io::Result<Config> {
+        self.writable()?;
+        let config = self.parse_document(text).map_err(invalid_data)?;
+        ensure_writable(&config)?;
+        let _lock = lock_config(path)?;
+        let disk = source(path)?;
+        if disk.is_none() && self.cipher.is_some() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "encrypted configuration is missing"));
+        }
+        let existing = disk.as_deref().map(|disk| self.plain_text(disk)).transpose()?;
+        if let Some(old) = existing.as_deref().and_then(|source| self.parse_document(source).ok()) {
+            ensure_writable(&old)?;
+            if self.cipher.is_some() && old.vault.sealed != config.vault.sealed {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, VaultIssue::SaveFailed.message()));
+            }
+        }
+        expect_source(existing.as_deref(), expected)?;
+        write_document(path, text, self.cipher.as_ref(), Some(disk.as_deref()))?;
+        Ok(config)
+    }
+}
+
+fn source(path: &Path) -> io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn expect_source(existing: Option<&str>, expected: Option<&str>) -> io::Result<()> {
+    if existing != expected {
+        Err(io::Error::new(io::ErrorKind::AlreadyExists, "configuration changed on disk"))
+    } else {
         Ok(())
     }
 }
@@ -158,16 +233,27 @@ pub fn write_defaults(dir: &Path) -> io::Result<PathBuf> {
     if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "defaults.toml is a symbolic link"));
     }
-    write_config(&path, &Config::default(), None)?;
+    write_text(&path, &Config::defaults_text(), None)?;
     Ok(path)
 }
 
-fn write_config(path: &Path, config: &Config, cipher: Option<&ConfigCipher>) -> io::Result<()> {
+fn write_config(path: &Path, config: &Config, cipher: Option<&ConfigCipher>, expected: Option<&str>) -> io::Result<()> {
+    ensure_writable(config)?;
     let text = config.to_text();
     if text.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "could not serialize configuration"));
     }
-    let text = match cipher { Some(cipher) => cipher.encrypt(&text), None => text };
+    write_document(path, &text, cipher, Some(expected))
+}
+
+fn write_document(path: &Path, text: &str, cipher: Option<&ConfigCipher>, expected: Option<Option<&str>>) -> io::Result<()> {
+    match cipher {
+        Some(cipher) => write_text(path, &cipher.encrypt(text), expected),
+        None => write_text(path, text, expected),
+    }
+}
+
+fn write_text(path: &Path, text: &str, expected: Option<Option<&str>>) -> io::Result<()> {
     let target = match path.canonicalize() {
         Ok(target) => target,
         Err(e) if e.kind() == io::ErrorKind::NotFound => path.to_owned(),
@@ -194,6 +280,9 @@ fn write_config(path: &Path, config: &Config, cipher: Option<&ConfigCipher>) -> 
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
+        if let Some(expected) = expected {
+            expect_source(source(&target)?.as_deref(), expected)?;
+        }
         #[cfg(windows)]
         if permissions.is_some() {
             return aster_platform_windows::replace_file(&target, &temp);

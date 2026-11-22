@@ -58,6 +58,20 @@ fn hidden_profiles_leave_both_picker_sections_but_remain_addressable() {
 }
 
 #[test]
+fn picker_preferences_hide_shells_and_recents_but_keep_discovered_connections() {
+    let mut a = app(Vec::new());
+    a.set_recent(vec!["ssh:db".into(), "local:pwsh".into()]);
+    let mut config = a.config().clone();
+    config.terminal.recent_profiles = 0;
+    config.picker.show_builtin_profiles = false;
+    a.set_config(config);
+    let picks = a.profile_picks();
+    assert!(!picks.iter().any(|p| p.value == "local:pwsh" || p.group == "Recent"));
+    assert!(picks.iter().any(|p| p.value == "ssh:db"));
+    assert!(picks.iter().any(|p| p.value == "serial:COM3"));
+}
+
+#[test]
 fn nested_groups_supply_the_section_title_badge_and_tint() {
     let config = Config::parse("[[groups]]\nid='team'\nname='Team'\nicon='cmd'\n[[groups]]\nid='qa'\nname='QA'\nparent='team'\ncolor='#123456'\n[[profiles]]\nid='qa-shell'\ngroup='QA'\ncommand='shell'").unwrap();
     let a = App::new(config, profiles(), true, None, Arc::new(|| {}));

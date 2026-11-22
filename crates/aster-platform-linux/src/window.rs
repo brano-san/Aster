@@ -1,4 +1,4 @@
-use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, Preedit};
+use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, PasteTarget, Preedit};
 use aster_core::notifications::Notification;
 use aster_gfx::render::Rect;
 use aster_platform::monitors::{choose_monitor, correct_offscreen, monitor_at, Bounds, Monitor};
@@ -37,7 +37,7 @@ pub(crate) fn display() -> Option<OwnedDisplayHandle> {
 enum Command {
     Open(WindowOptions),
     Close(WindowId),
-    Paste(WindowId, Option<u64>),
+    Paste(WindowId, Option<PasteTarget>),
     Copy(String),
 }
 
@@ -197,8 +197,8 @@ impl Window for LinuxWindow {
         Placement { x: at.x, y: at.y, width: w as i32, height: h as i32, maximized: self.raw.is_maximized() }
     }
 
-    fn clipboard_text(&self, vault_input: Option<u64>) -> Option<String> {
-        self.commands.borrow_mut().push(Command::Paste(self.id, vault_input));
+    fn clipboard_text(&self, target: Option<PasteTarget>) -> Option<String> {
+        self.commands.borrow_mut().push(Command::Paste(self.id, target));
         None
     }
 
@@ -496,7 +496,7 @@ struct Loop<H> {
     notification_waker: LinuxWaker,
     monitors: Vec<Monitor>,
     next_monitor_scan: Option<Instant>,
-    pastes: HashMap<AsyncRequestSerial, (WindowId, Option<u64>)>,
+    pastes: HashMap<AsyncRequestSerial, (WindowId, Option<PasteTarget>)>,
     pending: Arc<AtomicBool>,
     next_id: WindowId,
     mods: ModifiersState,
@@ -769,7 +769,7 @@ impl<H: WindowHandler<LinuxWindows>> ApplicationHandler for Loop<H> {
                 if let Some(node) = self.nodes.iter().find(|n| n.window.id == window) {
                     match value.try_as_string() {
                         Ok(text) => self.handler.event(&node.window, match input {
-                            Some(input) => Event::VaultPasted { input, text },
+                            Some(target) => target.event(text),
                             None => Event::Pasted(text),
                         }),
                         Err(e) => tracing::debug!("clipboard text is unreadable: {e}"),

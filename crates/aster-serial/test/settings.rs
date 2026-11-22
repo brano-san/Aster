@@ -19,7 +19,7 @@ fn defaults_are_115200_baud_8n1_without_flow_control() {
             s.stop_bits,
             s.flow
         ),
-        ("", 115_200, 8, Parity::None, 1, Flow::None)
+        ("", 115_200, 8, Parity::None, StopBits::One, Flow::None)
     );
 }
 
@@ -44,7 +44,7 @@ fn ask_baud_and_slow_round_trip_without_losing_port_options() {
     let settings = parse(" dev:port : ? , 7e2 , HARDWARE , SlOw ").unwrap();
     assert_eq!(settings, Settings {
         ask_baud: true, slow: true, data_bits: 7, parity: Parity::Even,
-        stop_bits: 2, flow: Flow::Hardware, ..port("dev:port")
+        stop_bits: StopBits::Two, flow: Flow::Hardware, ..port("dev:port")
     });
     assert_eq!(format(&settings), "dev:port:?,7E2,rtscts,slow");
     assert_eq!(parse(&format(&settings)), Ok(settings));
@@ -55,7 +55,7 @@ fn ask_baud_and_slow_round_trip_without_losing_port_options() {
 
 #[test]
 fn ask_baud_and_slow_still_reject_invalid_specs() {
-    for spec in [":?,slow", "COM3:?,7M2", "COM3:0,slow", "COM3:?,8N1,xany,slow", "COM3,slow,slow", "COM3,slow,unknown"] {
+    for spec in [":?,slow", "COM3:?,7K2", "COM3:0,slow", "COM3:?,8N1,xonany,slow", "COM3,slow,slow", "COM3,slow,unknown"] {
         assert!(parse(spec).is_err(), "{spec}");
     }
 }
@@ -66,7 +66,7 @@ fn a_spec_with_parity_two_stop_bits_and_hardware_flow_is_parsed() {
         baud: 115_200,
         data_bits: 7,
         parity: Parity::Even,
-        stop_bits: 2,
+        stop_bits: StopBits::Two,
         flow: Flow::Hardware,
         ..port("/dev/ttyUSB0")
     };
@@ -89,7 +89,7 @@ fn frames_and_flow_names_ignore_case_and_surrounding_whitespace() {
         baud: 9600,
         data_bits: 5,
         parity: Parity::Odd,
-        stop_bits: 1,
+        stop_bits: StopBits::One,
         flow: Flow::Hardware,
         ..port("COM4")
     };
@@ -199,7 +199,7 @@ fn format_writes_the_canonical_spec_and_omits_absent_flow_control() {
         baud: 9600,
         data_bits: 7,
         parity: Parity::Even,
-        stop_bits: 2,
+        stop_bits: StopBits::Two,
         flow: Flow::Hardware,
         ..port("/dev/ttyS0")
     };
@@ -224,7 +224,7 @@ fn formatted_specs_parse_back_to_the_same_settings() {
             baud: 110,
             data_bits: 5,
             parity: Parity::Odd,
-            stop_bits: 2,
+            stop_bits: StopBits::Two,
             flow: Flow::Software,
             ..port(r"\\.\COM10")
         },
@@ -232,7 +232,7 @@ fn formatted_specs_parse_back_to_the_same_settings() {
             baud: 4_000_000,
             data_bits: 6,
             parity: Parity::Even,
-            stop_bits: 1,
+            stop_bits: StopBits::One,
             flow: Flow::Hardware,
             ..port("/dev/ttyUSB0")
         },
