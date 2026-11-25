@@ -2733,8 +2733,8 @@ impl App {
                 button(g, *rect, &control.label, Target::Row(i, j), control.enabled);
             }
         }
-        if let Some(rect) = layout.scrollbar {
-            g.dl.round_rect(rect, theme.overlay_border, 1.5 * s);
+        if let Some(bar) = layout.scrollbar {
+            self.draw_settings_scrollbar(&mut g.dl, bar, page.extensions.scroll);
         }
         g.dl.set_clip(None);
     }
@@ -2960,15 +2960,22 @@ impl App {
             match row.kind {
                 RowKind::Section(name) => {
                     let mut r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), row.rect.w, (28.0 * s).round());
+                    let arrow_x = r.x + 4.0 * s;
                     if !page.searching() {
-                        let angle = controls.angle(crate::control_motion::Control::Section(name), page.section_open(name));
-                        let ink = if row.rect.contains(mx, my) { theme.accent } else { theme.text_dim };
-                        g.dl.chevron((r.x + 4.0 * s, r.y + r.h * 0.5), 8.0 * s, angle, 1.5 * s, ink);
                         r.x += (18.0 * s).round();
                         r.w = (row.rect.right() - r.x).max(0.0);
                     }
                     let y = baseline(g, r, section);
+                    let heading = g.dl.instances.len();
                     g.text(r.x, y, t(name), section, theme.accent, r.w);
+                    if !page.searching() {
+                        let text_bounds = g.dl.instances[heading..].iter().map(|instance| (instance.rect[1], instance.rect[1] + instance.rect[3]))
+                            .reduce(|(top, bottom), (y0, y1)| (top.min(y0), bottom.max(y1)));
+                        let arrow_y = text_bounds.map_or(r.y + r.h / 2.0, |(top, bottom)| (top + bottom) / 2.0);
+                        let angle = controls.angle(crate::control_motion::Control::Section(name), page.section_open(name));
+                        let ink = if row.rect.contains(mx, my) { theme.accent } else { theme.text_dim };
+                        g.dl.chevron((arrow_x, arrow_y), 8.0 * s, angle, 1.5 * s, ink);
+                    }
                     if name == crate::settings::SYSTEM && !page.searching() {
                         let version = if self.installation == crate::installation::State::Installed {
                             tf("Aster {version} · Installed for this user", &[("version", env!("CARGO_PKG_VERSION"))])
@@ -3130,16 +3137,13 @@ impl App {
                             let kx = crate::control_motion::knob_x(c, knob, 3.0 * s, progress);
                             g.dl.circle(Rect::new(kx, c.y + ((c.h - knob) / 2.0).round(), knob, knob), crate::control_motion::blend(theme.text_dim, theme.on_accent, progress));
                         }
-                        Control::Run(action) => {
+                        Control::Run { action, label } => {
                             g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
                             g.dl.outline(c, if selected { theme.accent } else { theme.overlay_border }, radius, line);
-                            let label = match action {
-                                crate::keymap::Action::ApplicationsMenu(true) => t("Add"),
-                                crate::keymap::Action::ApplicationsMenu(false) => t("Remove"),
-                                crate::keymap::Action::StartMenuShortcut => if self.start_menu_shortcut { t("Remove shortcut") } else { t("Create shortcut") },
-                                crate::keymap::Action::InstallForUser => t("Install"),
-                                crate::keymap::Action::EditEnvironment => t("Edit"),
-                                _ => t("Open"),
+                            let label = if self.start_menu_shortcut && *action == crate::keymap::Action::StartMenuShortcut {
+                                t("Remove shortcut")
+                            } else {
+                                t(label)
                             };
                             centered(g, c, label, ui, theme.text);
                         }
@@ -3240,14 +3244,18 @@ impl App {
             self.draw_profile_editor(g, geo.page, page, controls);
             return;
         }
-        if geo.height > geo.list.h {
-            let track = geo.list;
-            let thumb_h = (track.h * track.h / geo.height).max(24.0 * s);
-            let max_scroll = geo.height - track.h;
-            let thumb_y = track.y + (track.h - thumb_h) * (scroll / max_scroll).clamp(0.0, 1.0);
-            let w = (4.0 * s).round();
-            g.dl.round_rect(Rect::new(track.right() + (8.0 * s).round(), thumb_y.round(), w, thumb_h.round()), theme.overlay_border, w / 2.0);
+        if let Some(bar) = geo.scrollbar(s) {
+            self.draw_settings_scrollbar(&mut g.dl, bar, scroll);
         }
+    }
+
+    fn draw_settings_scrollbar(&self, dl: &mut aster_gfx::render::DrawList, bar: crate::settings::Scrollbar, scroll: f32) {
+        let hot = matches!(self.drag, Drag::SettingsScrollbar { .. }) || bar.track.contains(self.mouse.0, self.mouse.1);
+        let thumb = bar.thumb(scroll);
+        if hot {
+            dl.round_rect(bar.track, self.theme.overlay, bar.track.w / 2.0);
+        }
+        dl.round_rect(thumb, if hot { self.theme.text_dim } else { self.theme.overlay_border }, thumb.w / 2.0);
     }
 
     fn draw_config_editor<B: TextBackend>(&mut self, g: &mut Gfx<B>, area: Rect) {

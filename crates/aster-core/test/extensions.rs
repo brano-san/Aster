@@ -116,6 +116,30 @@ fn extensions_page_searches_catalog_and_requests_the_indexed_version() {
 }
 
 #[test]
+fn extensions_scrollbar_moves_the_extension_list() {
+    use crate::input::{Event, MouseButton};
+
+    let mut app = app();
+    app.set_viewport(750, 290, 1.0);
+    app.chrome = app.tab_chrome();
+    app.run(KeyAction::Settings);
+    let index = crate::settings::PAGES.iter().position(|page| *page == crate::settings::EXTENSIONS).unwrap();
+    app.settings.as_mut().unwrap().show_page(index);
+    let page = app.settings.as_ref().unwrap();
+    let area = app.settings_geometry().unwrap().list;
+    let layout = page.extensions.layout(area, app.ui(), &app.extension_rows(page));
+    let bar = layout.scrollbar.expect("the extension list overflows at this height");
+    let x = bar.track.x + bar.track.w / 2.0;
+    let y = bar.track.y + 1.0;
+    let bottom = bar.track.bottom() + 5.0;
+
+    app.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+    app.on_event(Event::MouseMove { x, y: bottom });
+    app.on_event(Event::MouseUp { x, y: bottom, button: MouseButton::Left });
+    assert_eq!(app.settings.as_ref().unwrap().extensions.scroll, layout.maximum);
+}
+
+#[test]
 fn extensions_page_requires_confirmation_to_remove_an_extension() {
     let mut app = app();
     app.set_viewport(1100, 700, 1.0);

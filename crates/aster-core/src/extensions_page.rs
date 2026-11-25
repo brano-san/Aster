@@ -2,7 +2,7 @@ use crate::app::{App, Effect, TOAST};
 use crate::extensions::{CatalogEntry, Reply, Request, Status, https_url};
 use crate::i18n::{t, tf};
 use crate::input::{Key, Mods};
-use crate::settings::{EXTENSIONS, PAGES, SettingsPage};
+use crate::settings::{EXTENSIONS, PAGES, Scrollbar, SettingsPage};
 use aster_gfx::render::Rect;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -32,7 +32,7 @@ pub(crate) struct Page {
     pub busy: bool,
     pub feedback: Option<String>,
     replace: bool,
-    scroll: f32,
+    pub(crate) scroll: f32,
     confirm: Option<String>,
     catalog: Catalog,
 }
@@ -73,8 +73,8 @@ pub(crate) struct Layout {
     pub feedback: Rect,
     pub list: Rect,
     pub rows: Vec<(Rect, Vec<Rect>)>,
-    pub scrollbar: Option<Rect>,
-    maximum: f32,
+    pub scrollbar: Option<Scrollbar>,
+    pub maximum: f32,
 }
 
 impl SettingsPage {
@@ -105,10 +105,8 @@ impl Page {
         let pitch = 134.0 * s;
         let maximum = (rows.len() as f32 * pitch - list.h).max(0.0);
         let scroll = self.scroll.clamp(0.0, maximum);
-        let scrollbar = (maximum > 0.0 && list.h > 0.0).then(|| {
-            let h = (list.h * list.h / (list.h + maximum)).max(12.0 * s).min(list.h);
-            Rect::new(list.right() - 3.0 * s, list.y + (list.h - h) * scroll / maximum, 3.0 * s, h)
-        });
+        let track = Rect::new(list.right() - gap, list.y, gap, list.h);
+        let scrollbar = Scrollbar::new(track, 3.0 * s, 12.0 * s, maximum);
         let cards = rows.iter().enumerate().map(|(i, row)| {
             let rect = Rect::new(list.x, list.y + i as f32 * pitch - scroll, list.w - scrollbar.map_or(0.0, |_| gap), pitch - gap);
             let count = row.buttons.len().max(1) as f32;

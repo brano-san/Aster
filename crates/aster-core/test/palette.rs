@@ -46,7 +46,7 @@ fn settings_run_buttons_and_picker_window_commands_are_listed_and_bindable() {
     use crate::settings::{Control, SETTINGS};
     let mut a = app();
     let mut actions: Vec<_> = SETTINGS.iter().filter_map(|setting| match setting.control {
-        Control::Run(action) => Some(action.clone()),
+        Control::Run { action, .. } => Some(action.clone()),
         _ => None,
     }).collect();
     actions.extend([Action::ManageProfiles, Action::ClearRecentProfiles, Action::MinimizeWindow, Action::ToggleMaximize, Action::CloseWindow, Action::Tab(20)]);

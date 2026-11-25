@@ -24,7 +24,7 @@ pub enum Control {
     Text,
     StringList,
     Font { monospace: bool },
-    Run(&'static Action),
+    Run { action: &'static Action, label: &'static str },
     ReadOnly(Info),
 }
 
@@ -126,7 +126,7 @@ pub const SETTINGS: &[Setting] = &[
     item(PROFILES, "picker.quick-connect", "Default quick connect provider", "Protocol used when an address has no prefix", Control::Choice(QUICK_CONNECT)),
     item(TERMINAL, "terminal.scrollback-lines", "Scrollback", "Lines kept above the screen", Control::Number { min: 0.0, max: 1_000_000.0, step: 1000.0 }),
     item(TERMINAL, "terminal.draw-bold-text-in-bright-colors", "Bold text in bright colors", "Bold text uses the bright palette colors", Control::Toggle),
-    item(TERMINAL, "terminal.env", "Environment variables", "Set key=value entries for all local shells", Control::Run(&Action::EditEnvironment)),
+    item(TERMINAL, "terminal.env", "Environment variables", "Set key=value entries for all local shells", Control::Run { action: &Action::EditEnvironment, label: "Edit" }),
     #[cfg(windows)]
     item(TERMINAL, "terminal.refresh-environment", "Refresh environment", "Read Windows environment variables for every new local session", Control::Toggle),
     #[cfg(windows)]
@@ -233,35 +233,35 @@ pub const SETTINGS: &[Setting] = &[
     item(SSH, "ssh.clear-after-connect", "Clear after login", "Clear connection messages before the remote shell starts", Control::Toggle),
     item(SSH, "ssh.x11-display", "Local X11 display", "For X11 forwarding. Leave empty to use DISPLAY", Control::Text),
     item(SSH, "info.ssh-profiles", "Connection profiles", "Hosts, authentication, port forwards and algorithms", Control::ReadOnly(Info::SshProfiles)),
-    item(SYSTEM, "action.whats-new", "What's new", "Read the notes for this version", Control::Run(&Action::WhatsNew)),
-    item(SYSTEM, "action.check-for-updates", "Check for updates", "Look for a new version now", Control::Run(&Action::CheckForUpdates)),
+    item(SYSTEM, "action.whats-new", "What's new", "Read the notes for this version", Control::Run { action: &Action::WhatsNew, label: "Read" }),
+    item(SYSTEM, "action.check-for-updates", "Check for updates", "Look for a new version now", Control::Run { action: &Action::CheckForUpdates, label: "Check" }),
     item(SYSTEM, "updates.check-automatically", "Check for updates automatically", "Look for a new version each time Aster starts", Control::Toggle),
-    item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run(&Action::OpenLog)),
-    item(SYSTEM, "action.open-config-file", "Config file", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
+    item(SYSTEM, "action.open-log", "Log", "Open the folder with the log file", Control::Run { action: &Action::OpenLog, label: "Open folder" }),
+    item(SYSTEM, "action.open-config-file", "Config file", "Open the config file in the system editor", Control::Run { action: &Action::OpenConfigFile, label: "Edit" }),
     item(SYSTEM, "appearance.language", "Language", "Language of menus, settings and hints; automatic follows the system", Control::Choice(LANGUAGES)),
     #[cfg(not(windows))]
     item(SYSTEM, "system.explorer-menu", "File manager menu", "Add \"Open in Aster\" to the context menu for folders", Control::Toggle),
     #[cfg(windows)]
     item(SYSTEM, "system.explorer-menu", "Explorer menu", "Add Aster commands to file and folder menus in Windows Explorer", Control::Toggle),
     item(SYSTEM, "system.autostart", "Start at sign-in", "Launch Aster automatically for your user account", Control::Toggle),
-    item(SYSTEM, "action.install-launcher", "Add to the applications menu", "Create a launcher for Aster and its profiles", Control::Run(&Action::ApplicationsMenu(true))),
-    item(SYSTEM, "action.remove-launcher", "Remove from the applications menu", "Remove the launcher and its icon", Control::Run(&Action::ApplicationsMenu(false))),
+    item(SYSTEM, "action.install-launcher", "Add to the applications menu", "Create a launcher for Aster and its profiles", Control::Run { action: &Action::ApplicationsMenu(true), label: "Add" }),
+    item(SYSTEM, "action.remove-launcher", "Remove from the applications menu", "Remove the launcher and its icon", Control::Run { action: &Action::ApplicationsMenu(false), label: "Remove" }),
     #[cfg(windows)]
     item(SYSTEM, "system.url-scheme", "Aster links", "Allow aster:// links to open profiles and folders", Control::Toggle),
     #[cfg(windows)]
-    item(SYSTEM, "action.start-menu-shortcut", "Start menu shortcut", "Show Aster in the Windows Start menu", Control::Run(&Action::StartMenuShortcut)),
+    item(SYSTEM, "action.start-menu-shortcut", "Start menu shortcut", "Show Aster in the Windows Start menu", Control::Run { action: &Action::StartMenuShortcut, label: "Create shortcut" }),
     #[cfg(windows)]
-    item(SYSTEM, "action.install-for-user", "Install for this user", "Copy Aster to your programs folder and register it in Windows", Control::Run(&Action::InstallForUser)),
+    item(SYSTEM, "action.install-for-user", "Install for this user", "Copy Aster to your programs folder and register it in Windows", Control::Run { action: &Action::InstallForUser, label: "Install" }),
     #[cfg(windows)]
-    item(SYSTEM, "action.set-default-terminal", "Make Aster the default terminal", "Open Windows console applications in Aster tabs", Control::Run(&Action::DefaultTerminal(true))),
+    item(SYSTEM, "action.set-default-terminal", "Make Aster the default terminal", "Open Windows console applications in Aster tabs", Control::Run { action: &Action::DefaultTerminal(true), label: "Set as default" }),
     #[cfg(windows)]
-    item(SYSTEM, "action.restore-default-terminal", "Restore the previous default terminal", "Stop opening Windows console applications in Aster tabs by default", Control::Run(&Action::DefaultTerminal(false))),
-    item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run(&Action::ReportProblem)),
+    item(SYSTEM, "action.restore-default-terminal", "Restore the previous default terminal", "Stop opening Windows console applications in Aster tabs by default", Control::Run { action: &Action::DefaultTerminal(false), label: "Restore" }),
+    item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run { action: &Action::ReportProblem, label: "Open form" }),
     item(CONFIG_FILE, "info.config-path", "File path", "Location of the active configuration", Control::ReadOnly(Info::ConfigPath)),
-    item(CONFIG_FILE, "action.edit-config", "Open in the editor", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
-    item(CONFIG_FILE, "action.open-config-folder", "Open the folder", "Open the folder containing the config file", Control::Run(&Action::OpenConfigFolder)),
+    item(CONFIG_FILE, "action.edit-config", "Open in the editor", "Open the config file in the system editor", Control::Run { action: &Action::OpenConfigFile, label: "Edit" }),
+    item(CONFIG_FILE, "action.open-config-folder", "Open the folder", "Open the folder containing the config file", Control::Run { action: &Action::OpenConfigFolder, label: "Open folder" }),
     item(CONFIG_FILE, "info.config-status", "File status", "Check the configuration on disk", Control::ReadOnly(Info::ConfigStatus)),
-    item(CONFIG_FILE, "action.show-default-config", "Show the defaults", "Open a copy of the default settings", Control::Run(&Action::ShowDefaultConfig)),
+    item(CONFIG_FILE, "action.show-default-config", "Show the defaults", "Open a copy of the default settings", Control::Run { action: &Action::ShowDefaultConfig, label: "Show" }),
 ];
 
 pub fn get(config: &Config, key: &str) -> Option<Value> {
@@ -596,9 +596,9 @@ impl SettingsPage {
         let base = self.profile_base();
         let mut shown: Vec<_> = (0..SETTINGS.len()).filter(|&i| {
             let available = match SETTINGS[i].control {
-                Control::Run(Action::ApplicationsMenu(install)) => self.launcher_installed == Some(!install),
-                Control::Run(Action::InstallForUser) => self.installation == crate::installation::State::Available,
-                Control::Run(Action::DefaultTerminal(enable)) => self.default_terminal.offers(*enable),
+                Control::Run { action: Action::ApplicationsMenu(install), .. } => self.launcher_installed == Some(!install),
+                Control::Run { action: Action::InstallForUser, .. } => self.installation == crate::installation::State::Available,
+                Control::Run { action: Action::DefaultTerminal(enable), .. } => self.default_terminal.offers(*enable),
                 _ if SETTINGS[i].section == SYNC => self.sync.setting_visible(SETTINGS[i].key),
                 _ => true,
             };
@@ -847,6 +847,44 @@ pub struct SettingsGeometry {
     pub(crate) font_sample: Option<Rect>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Scrollbar {
+    pub track: Rect,
+    width: f32,
+    height: f32,
+    maximum: f32,
+}
+
+impl Scrollbar {
+    pub(crate) fn new(track: Rect, width: f32, minimum_height: f32, maximum: f32) -> Option<Self> {
+        (maximum > 0.0 && track.h > 1.0).then(|| {
+            let height = (track.h * track.h / (track.h + maximum)).round().max(minimum_height).min(track.h - 1.0);
+            Self { track, width, height, maximum }
+        })
+    }
+
+    pub(crate) fn thumb(self, scroll: f32) -> Rect {
+        let x = self.track.x + (self.track.w - self.width) / 2.0;
+        Rect::new(x, self.thumb_top(scroll).round(), self.width, self.height)
+    }
+
+    fn thumb_top(self, scroll: f32) -> f32 {
+        self.track.y + (self.track.h - self.height) * (scroll / self.maximum).clamp(0.0, 1.0)
+    }
+
+    fn scroll_at(self, y: f32, grab: f32) -> f32 {
+        ((y - self.track.y - grab) / (self.track.h - self.height)).clamp(0.0, 1.0) * self.maximum
+    }
+}
+
+impl SettingsGeometry {
+    pub(crate) fn scrollbar(&self, scale: f32) -> Option<Scrollbar> {
+        let list = self.list;
+        let track = Rect::new(list.right() + (4.0 * scale).round(), list.y, (12.0 * scale).round(), list.h);
+        Scrollbar::new(track, (4.0 * scale).round(), (24.0 * scale).round(), self.height - list.h)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
     Whole,
@@ -862,7 +900,7 @@ pub fn control_width(control: Control) -> f32 {
         Control::Slider { .. } => 220.0,
         Control::Choice(_) | Control::Schemes | Control::Profiles => 220.0,
         Control::Text | Control::Color | Control::StringList | Control::Font { .. } => 260.0,
-        Control::Run(_) => 120.0,
+        Control::Run { .. } => 120.0,
         Control::ReadOnly(_) => 0.0,
     }
 }
@@ -1519,7 +1557,7 @@ impl App {
                 self.set_number(setting, now + step * delta as f64);
             }
             Control::Text | Control::Color | Control::StringList | Control::Font { .. } => self.begin_edit(),
-            Control::Run(action) => self.run(action.clone()),
+            Control::Run { action, .. } => self.run(action.clone()),
             Control::ReadOnly(_) => {}
         }
     }
@@ -1853,6 +1891,58 @@ impl App {
         self.dirty = true;
     }
 
+    fn settings_scrollbar(&self, geo: &SettingsGeometry) -> Option<(Scrollbar, f32)> {
+        let page = self.settings.as_ref()?;
+        let scale = self.ui();
+        if page.extensions_page() {
+            let layout = page.extensions.layout(geo.list, scale, &self.extension_rows(page));
+            return Some((layout.scrollbar?, page.extensions.scroll.clamp(0.0, layout.maximum)));
+        }
+        if self.config_editor_layout().is_some() || page.vault_dialog.is_some() || page.editor.is_some()
+            || page.group_editor.is_some() || page.scheme_editor.is_some()
+        {
+            return None;
+        }
+        let bar = geo.scrollbar(scale)?;
+        let visible = self.list_motion.settings.visible(geo.scroll, self.clock()).clamp(0.0, bar.maximum);
+        Some((bar, visible))
+    }
+
+    fn set_settings_scroll(&mut self, value: f32) {
+        if let Some(page) = self.settings.as_mut() {
+            if page.extensions_page() {
+                page.extensions.scroll = value;
+            } else {
+                page.scroll = value;
+                self.list_motion.settings = Default::default();
+            }
+            self.dirty = true;
+        }
+    }
+
+    fn start_settings_scrollbar(&mut self, geo: &SettingsGeometry, x: f32, y: f32) -> bool {
+        let Some((bar, scroll)) = self.settings_scrollbar(geo).filter(|(bar, _)| bar.track.contains(x, y)) else { return false };
+        let thumb = bar.thumb(scroll);
+        let (grab, next) = if y >= thumb.y && y < thumb.bottom() {
+            (y - bar.thumb_top(scroll), scroll)
+        } else {
+            (thumb.h / 2.0, bar.scroll_at(y, thumb.h / 2.0))
+        };
+        self.set_settings_scroll(next);
+        self.drag = Drag::SettingsScrollbar { page: self.settings.as_ref().unwrap().page, grab };
+        true
+    }
+
+    pub(crate) fn drag_settings_scrollbar(&mut self, page: usize, grab: f32, y: f32) {
+        if self.settings.as_ref().is_none_or(|settings| settings.page != page) {
+            self.drag = Drag::None;
+            return;
+        }
+        if let Some((bar, _)) = self.settings_geometry().and_then(|geo| self.settings_scrollbar(&geo)) {
+            self.set_settings_scroll(bar.scroll_at(y, grab));
+        }
+    }
+
     pub(crate) fn settings_click(&mut self, x: f32, y: f32) {
         let Some(geo) = self.settings_geometry() else { return };
         self.dirty = true;
@@ -1887,6 +1977,7 @@ impl App {
         if let Some(k) = geo.profile_tabs.and_then(|tabs| tabs.iter().position(|r| r.contains(x, y))) {
             return self.show_profiles_tab(k == 1);
         }
+        if self.start_settings_scrollbar(&geo, x, y) { return; }
         if !geo.list.contains(x, y) {
             return self.commit_edit();
         }

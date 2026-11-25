@@ -129,6 +129,8 @@ impl Chrome {
             let start = span - margin - settings_span;
             self.settings = if self.vertical {
                 Rect::new(self.plus.x, tab_bar.y + start, self.plus.w, settings_span)
+            } else if top {
+                Rect::new(tab_bar.x + start, self.caption.y + (self.caption.h - self.plus.h) / 2.0, settings_span, self.plus.h)
             } else {
                 Rect::new(tab_bar.x + start, self.plus.y, settings_span, self.plus.h)
             };

@@ -207,6 +207,9 @@ fn every_label_drawn_from_constants_has_a_russian_entry() {
         if let Control::Choice(options) | Control::Segments(options) = s.control {
             texts.extend(options.iter().map(|(_, l)| l.to_string()));
         }
+        if let Control::Run { label, .. } = s.control {
+            texts.push(label.to_owned());
+        }
     }
     texts.extend(Action::all().filter(|a| !matches!(a, Action::Tab(_))).map(|a| a.source_label()));
     let mut a = app();

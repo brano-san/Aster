@@ -31,14 +31,14 @@ fn saved(a: &mut App) -> Option<Config> {
 #[test]
 fn every_setting_points_at_a_config_value_of_the_matching_type() {
     let config = Config::default();
-    for s in SETTINGS.iter().filter(|s| !matches!(s.control, Control::Run(_) | Control::ReadOnly(_))) {
+    for s in SETTINGS.iter().filter(|s| !matches!(s.control, Control::Run { .. } | Control::ReadOnly(_))) {
         let value = get(&config, s.key).unwrap_or_else(|| panic!("{} is missing", s.key));
         let fits = match s.control {
             Control::Toggle => value.is_bool(),
             Control::Number { .. } | Control::Slider { .. } => value.is_integer() || value.is_float(),
             Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles | Control::Text | Control::Color | Control::Font { .. } => value.is_str(),
             Control::StringList => value.is_array(),
-            Control::Run(_) | Control::ReadOnly(_) => unreachable!(),
+            Control::Run { .. } | Control::ReadOnly(_) => unreachable!(),
         };
         assert!(fits, "{} holds {value:?}", s.key);
         if let Control::Choice(options) | Control::Segments(options) = s.control {
@@ -324,7 +324,7 @@ fn config_page_reports_disk_status_and_runs_file_actions() {
     a.set_config_status(Some("line 3, column 9: invalid key".into()));
     assert_eq!(a.setting_text(rows[3]), "line 3, column 9: invalid key");
     for (at, expected) in [(1, Action::OpenConfigFile), (2, Action::OpenConfigFolder), (4, Action::ShowDefaultConfig)] {
-        assert!(matches!(rows[at].control, Control::Run(action) if action == &expected));
+        assert!(matches!(rows[at].control, Control::Run { action, .. } if action == &expected));
         a.settings.as_mut().unwrap().selected = at;
         key(&mut a, Key::Enter);
         assert!(a.take_effects().iter().any(|e| matches!((e, &expected),
@@ -368,7 +368,7 @@ fn applications_menu_shows_only_the_available_launcher_action() {
     let mut a = app();
     a.run(Action::Settings);
     let launcher_action = |app: &App| app.settings.as_ref().unwrap().shown.iter().position(|&i| {
-        matches!(SETTINGS[i].control, Control::Run(Action::ApplicationsMenu(_)))
+        matches!(SETTINGS[i].control, Control::Run { action: Action::ApplicationsMenu(_), .. })
     });
     assert!(launcher_action(&a).is_none());
     for installed in [false, true] {
@@ -542,6 +542,35 @@ fn keys_do_not_reach_the_terminal_while_settings_are_open() {
     typed(&mut a, "ls");
     key(&mut a, Key::Enter);
     assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Write { .. })));
+}
+
+#[test]
+fn the_settings_scrollbar_drags_and_jumps_on_click() {
+    use crate::input::MouseButton;
+
+    let mut a = app();
+    a.set_viewport(1000, 360, 1.0);
+    a.chrome = a.tab_chrome();
+    a.run(Action::Settings);
+    let geo = a.settings_geometry().unwrap();
+    let max = geo.height - geo.list.h;
+    assert!(max > 0.0);
+    let x = geo.list.right() + 10.0;
+    let top = geo.list.y + 8.0;
+    let bottom = geo.list.bottom() + 10.0;
+    let down = |a: &mut App, y| a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+    let up = |a: &mut App, y| a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+
+    down(&mut a, top);
+    assert_eq!(a.settings.as_ref().unwrap().scroll, 0.0);
+    a.on_event(Event::MouseMove { x, y: bottom });
+    assert_eq!(a.settings.as_ref().unwrap().scroll, max);
+    up(&mut a, bottom);
+    a.on_event(Event::MouseMove { x, y: top });
+    assert_eq!(a.settings.as_ref().unwrap().scroll, max);
+    down(&mut a, top);
+    up(&mut a, top);
+    assert_eq!(a.settings.as_ref().unwrap().scroll, 0.0);
 }
 
 #[test]

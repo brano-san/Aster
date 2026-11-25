@@ -290,6 +290,9 @@ fn each_bar_position_separates_panes_tabs_and_caption_buttons() {
         assert!(if c.vertical { c.plus.bottom() <= c.tab_menu.y } else { c.plus.right() <= c.tab_menu.x });
         let (x, y) = center(c.settings);
         assert_eq!(a.hit_test(x, y), HitArea::Client);
+        if position == Top {
+            assert_eq!(y, center(c.min).1, "the settings button aligns with the window buttons");
+        }
         assert!(if c.vertical { c.tab_menu.bottom() <= c.settings.y } else { c.tab_menu.right() <= c.settings.x });
         for slot in &c.tabs {
             assert!(slot.rect.w > 0.0 && encloses(c.tab_bar, slot.rect) && encloses(slot.rect, slot.close));

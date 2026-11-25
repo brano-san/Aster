@@ -208,6 +208,7 @@ pub(crate) enum Drag {
     SidebarResize { width: f32 },
     Plus,
     SettingsSlider { item: usize, track: Rect, x: f32 },
+    SettingsScrollbar { page: usize, grab: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2445,6 +2446,7 @@ impl App {
                 self.dirty = true;
                 return;
             }
+            Drag::SettingsScrollbar { page, grab } => return self.drag_settings_scrollbar(page, grab, y),
             Drag::Select { pane, .. } => {
                 if let Some(rect) = self.layout.panes.iter().find(|(id, _)| *id == pane).map(|(_, r)| *r) {
                     let (line, col, side) = self.cell_at(pane, rect, x, y);
@@ -2810,7 +2812,7 @@ impl App {
             self.dirty = true;
             return;
         }
-        if matches!(self.drag, Drag::SettingsSlider { .. }) && button != MouseButton::Left { return; }
+        if matches!(self.drag, Drag::SettingsSlider { .. } | Drag::SettingsScrollbar { .. }) && button != MouseButton::Left { return; }
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.dirty = true;
         match drag {
@@ -2818,6 +2820,7 @@ impl App {
             Drag::Pane { pane, moved: true, .. } if button == MouseButton::Left => self.finish_pane_drag(pane, x, y),
             Drag::Tab { index, moved, .. } if button == MouseButton::Left => self.finish_tab_drag(index, moved, x, y),
             Drag::SettingsSlider { item, track, .. } if self.settings.is_some() => self.finish_settings_slider(item, track, x),
+            Drag::SettingsScrollbar { page, grab } => self.drag_settings_scrollbar(page, grab, y),
             Drag::Select { pane, open_link } => {
                 let has = self.panes.get(&pane).is_some_and(|p| p.terminal.lock().has_selection());
                 if !has {
