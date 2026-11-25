@@ -252,6 +252,10 @@ pub const SETTINGS: &[Setting] = &[
     item(SYSTEM, "action.start-menu-shortcut", "Start menu shortcut", "Show Aster in the Windows Start menu", Control::Run(&Action::StartMenuShortcut)),
     #[cfg(windows)]
     item(SYSTEM, "action.install-for-user", "Install for this user", "Copy Aster to your programs folder and register it in Windows", Control::Run(&Action::InstallForUser)),
+    #[cfg(windows)]
+    item(SYSTEM, "action.set-default-terminal", "Make Aster the default terminal", "Open Windows console applications in Aster tabs", Control::Run(&Action::DefaultTerminal(true))),
+    #[cfg(windows)]
+    item(SYSTEM, "action.restore-default-terminal", "Restore the previous default terminal", "Stop opening Windows console applications in Aster tabs by default", Control::Run(&Action::DefaultTerminal(false))),
     item(SYSTEM, "action.report-problem", "Report a problem", "Open a prefilled issue with the version and system", Control::Run(&Action::ReportProblem)),
     item(CONFIG_FILE, "info.config-path", "File path", "Location of the active configuration", Control::ReadOnly(Info::ConfigPath)),
     item(CONFIG_FILE, "action.edit-config", "Open in the editor", "Open the config file in the system editor", Control::Run(&Action::OpenConfigFile)),
@@ -540,6 +544,7 @@ pub struct SettingsPage {
     pub(crate) vault: VaultView,
     pub(crate) sync: crate::sync_settings::Page,
     launcher_installed: Option<bool>,
+    default_terminal: crate::default_terminal::State,
     installation: crate::installation::State,
     pub(crate) vault_dialog: Option<VaultDialog>,
     vault_input_interrupted: bool,
@@ -593,6 +598,7 @@ impl SettingsPage {
             let available = match SETTINGS[i].control {
                 Control::Run(Action::ApplicationsMenu(install)) => self.launcher_installed == Some(!install),
                 Control::Run(Action::InstallForUser) => self.installation == crate::installation::State::Available,
+                Control::Run(Action::DefaultTerminal(enable)) => self.default_terminal.offers(*enable),
                 _ if SETTINGS[i].section == SYNC => self.sync.setting_visible(SETTINGS[i].key),
                 _ => true,
             };
@@ -1118,7 +1124,7 @@ impl App {
     }
 
     pub(crate) fn fresh_settings_page(&self) -> SettingsPage {
-        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.dynamic_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes: self.scheme_rows(), vault: self.vault.clone(), launcher_installed: self.launcher_installed, installation: self.installation, restart_pending: self.restart_pending(), ..SettingsPage::default() };
+        let mut page = SettingsPage { profiles: self.profile_rows(), profile_actions: self.dynamic_actions(), groups: self.config.groups.clone(), collapsed: self.profile_collapsed.clone(), schemes: self.scheme_rows(), vault: self.vault.clone(), launcher_installed: self.launcher_installed, default_terminal: self.default_terminal, installation: self.installation, restart_pending: self.restart_pending(), ..SettingsPage::default() };
         page.sync = crate::sync_settings::Page { backend: self.config.sync.backend, ready: self.config.sync.ready(), entries: self.sync_view.entries.clone(), ..Default::default() };
         page.refilter();
         page
@@ -1218,6 +1224,32 @@ impl App {
             page.notice = Some(tf("Could not update the applications menu: {error}", &[("error", error)]));
             self.dirty = true;
         }
+    }
+
+    pub fn set_default_terminal_state(&mut self, state: crate::default_terminal::State) {
+        if self.default_terminal == state {
+            return;
+        }
+        self.default_terminal = state;
+        for page in self.settings.iter_mut().chain(self.settings_stash.iter_mut()) {
+            let (selected, scroll) = (page.selected, page.scroll);
+            page.default_terminal = state;
+            page.refilter();
+            page.selected = selected.min(page.shown.len().saturating_sub(1));
+            page.scroll = scroll;
+        }
+        self.reveal_selected();
+        self.dirty = true;
+    }
+
+    pub fn default_terminal_error(&mut self, error: &str) {
+        let message = tf("Could not change the default terminal: {error}", &[("error", error)]);
+        if let Some(page) = self.settings.as_mut() {
+            page.notice = Some(message);
+        } else {
+            self.toast(message, crate::app::TOAST);
+        }
+        self.dirty = true;
     }
 
     pub fn settings_file_error(&mut self, error: &str) {

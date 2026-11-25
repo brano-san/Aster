@@ -39,6 +39,7 @@ const BELL_GAP: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
+    pub delegation: Option<String>,
     pub elevated: bool,
     pub ssh: Option<String>,
     pub ssh_options: Option<Box<crate::profile::SshOptions>>,
@@ -97,6 +98,7 @@ pub enum Effect {
     OpenLog,
     StartMenuShortcut(bool),
     InstallForUser,
+    DefaultTerminal(bool),
     SaveOutput { pane: PaneId },
     ExportBuffer { pane: PaneId, text: String },
     RecentProfiles(Vec<String>),
@@ -267,6 +269,7 @@ pub struct App {
     pub(crate) config_path: Option<String>,
     pub(crate) config_status: Option<Result<(), String>>,
     pub(crate) launcher_installed: Option<bool>,
+    pub(crate) default_terminal: crate::default_terminal::State,
     pub(crate) start_menu_shortcut: bool,
     pub(crate) installation: crate::installation::State,
     pub(crate) config_encrypted: bool,
@@ -406,6 +409,7 @@ impl App {
             config_path: None,
             config_status: None,
             launcher_installed: None,
+            default_terminal: Default::default(),
             start_menu_shortcut: false,
             installation: Default::default(),
             config_encrypted: false,
@@ -903,7 +907,7 @@ impl App {
         let local_environment = profile.is_local().then(|| Box::new(crate::environment::LocalEnvironment {
             global: self.config.terminal.environment.clone(), profile: profile.env.clone(), refresh: self.config.terminal.refresh_environment, set_comspec: self.config.terminal.set_comspec,
         }));
-        let launch = Launch { local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), clear_after_connect: profile.clear_after_connect, command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
+        let launch = Launch { delegation: None, local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), clear_after_connect: profile.clear_after_connect, command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
         self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, ssh_connecting: false, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, host_id: None, restore_buffer: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
         id
     }
@@ -1495,6 +1499,11 @@ impl App {
             InstallForUser => {
                 if self.installation == crate::installation::State::Available {
                     self.effects.push(Effect::InstallForUser);
+                }
+            }
+            DefaultTerminal(enable) => {
+                if self.default_terminal.offers(enable) {
+                    self.effects.push(Effect::DefaultTerminal(enable));
                 }
             }
             OpenConfigFile => self.effects.push(Effect::OpenConfigFile),

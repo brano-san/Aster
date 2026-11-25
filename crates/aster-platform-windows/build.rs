@@ -2,15 +2,54 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=shaders/ui.hlsl");
+    println!("cargo:rerun-if-changed=idl/default_terminal.idl");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    #[cfg(windows)]
+    compile_default_terminal_proxy(&out);
     let src = fs::read_to_string("shaders/ui.hlsl").unwrap();
     for (entry, target, file) in [("vs_main", "vs_5_0", "ui_vs.cso"), ("ps_main", "ps_5_0", "ui_ps.cso")] {
         let code = compile(&src, entry, target).unwrap_or_else(|e| panic!("{entry}: {e}"));
         fs::write(out.join(file), code).unwrap();
     }
+}
+
+#[cfg(windows)]
+fn compile_default_terminal_proxy(out: &std::path::Path) {
+    println!("cargo:rerun-if-env-changed=WindowsSdkDir");
+    println!("cargo:rerun-if-env-changed=WindowsSDKVersion");
+    let target = env::var("TARGET").unwrap();
+    let architecture = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86") => "win32",
+        Ok("x86_64") => "x64",
+        Ok("aarch64") => "arm64",
+        _ => panic!("unsupported Windows target for the default terminal proxy: {target}"),
+    };
+    let mut midl = cc::windows_registry::find(&target, "midl.exe").expect("install the Windows SDK MIDL compiler");
+    let compiler = cc::windows_registry::find_tool(&target, "cl.exe").expect("install the MSVC C compiler");
+    let path = midl.get_envs().find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+        .and_then(|(_, value)| value.map(ToOwned::to_owned)).or_else(|| env::var_os("PATH")).unwrap_or_default();
+    let path = env::join_paths(std::iter::once(compiler.path().parent().unwrap().to_owned()).chain(env::split_paths(&path))).unwrap();
+    let status = midl.env("PATH", path)
+        .args(["/nologo", "/env", architecture, "/target", "NT100", "/robust", "/protocol", "all", "/out"])
+        .arg(out)
+        .args(["/h", "default_terminal.h", "/iid", "default_terminal_i.c", "/proxy", "default_terminal_p.c", "/dlldata", "default_terminal_data.c"])
+        .arg("idl/default_terminal.idl")
+        .status().expect("run the Windows SDK MIDL compiler");
+    assert!(status.success(), "compiling the default terminal proxy failed: {status}");
+
+    cc::Build::new().include(out)
+        .define("DllGetClassObject", "AsterDeftermProxyGetClassObject")
+        .define("PROXY_CLSID_IS", "{0xf10cc1ad,0x2771,0x4baf,{0xa9,0x81,0x96,0x37,0xec,0x31,0x59,0xdb}}")
+        .file(out.join("default_terminal_i.c"))
+        .file(out.join("default_terminal_p.c"))
+        .file(out.join("default_terminal_data.c"))
+        .compile("aster_defterm_proxy");
+    println!("cargo:rustc-link-lib=rpcrt4");
+    println!("cargo:rustc-link-lib=ole32");
+    println!("cargo:rustc-link-lib=oleaut32");
 }
 
 #[cfg(windows)]

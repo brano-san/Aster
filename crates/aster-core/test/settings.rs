@@ -401,10 +401,16 @@ fn the_query_filters_by_every_word_across_label_hint_and_section() {
     page.vault.configured = true;
     page.installation = crate::installation::State::Available;
     let mut listed = std::collections::BTreeSet::new();
+    use crate::default_terminal::State as DefaultTerminal;
     use crate::sync::Backend;
-    for (installed, backend) in [(None, Backend::Off), (Some(false), Backend::Folder), (Some(true), Backend::Git)] {
+    for (installed, backend, terminal) in [
+        (None, Backend::Off, DefaultTerminal::Unavailable),
+        (Some(false), Backend::Folder, DefaultTerminal::Available),
+        (Some(true), Backend::Git, DefaultTerminal::Selected),
+    ] {
         page.launcher_installed = installed;
         page.sync.backend = backend;
+        page.default_terminal = terminal;
         page.profiles_advanced = false;
         for (k, name) in PAGES.iter().enumerate() {
             page.show_page(k);

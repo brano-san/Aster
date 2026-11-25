@@ -57,7 +57,14 @@ fn settings_run_buttons_and_picker_window_commands_are_listed_and_bindable() {
     for action in actions {
         assert!(Action::all().any(|candidate| candidate == action));
         assert_eq!(Action::from_id(&action.id()), Some(action.clone()));
-        assert!(picks.iter().any(|pick| pick.value == action.id()));
+        if let Action::DefaultTerminal(enable) = &action {
+            use crate::default_terminal::State;
+            assert!(!picks.iter().any(|pick| pick.value == action.id()));
+            a.set_default_terminal_state(if *enable { State::Available } else { State::Selected });
+            assert!(a.command_picks().iter().any(|pick| pick.value == action.id()));
+        } else {
+            assert!(picks.iter().any(|pick| pick.value == action.id()));
+        }
         let config = std::collections::BTreeMap::from([(action.id(), vec!["F8".to_owned()])]);
         let mut keymap = crate::keymap::Keymap::new(&config);
         assert_eq!(keymap.press(crate::keymap::Chord::parse("F8").unwrap()), crate::keymap::Outcome::Action(action));

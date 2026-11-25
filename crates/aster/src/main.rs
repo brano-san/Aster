@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod background;
 mod cli;
@@ -102,9 +102,15 @@ fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::Pla
     let windows = P::Windows::new()?;
     let waker = windows.waker();
     let alone = std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_INSTANCE").is_none();
+    let delegated = matches!(request.command, cli::Command::DelegatedConsole { .. });
     let wake = waker.clone();
     let requests = if alone { None } else { P::instance_listen(std::sync::Arc::new(move || wake.wake())) };
-    if !alone && requests.is_none() && P::instance_send(&request.encode()) {
+    if !alone && !delegated && requests.is_none() && P::instance_send(&request.encode()) {
+        return Ok(());
+    }
+    let wake = waker.clone();
+    let delegated_requests = if alone { None } else { P::delegated_instance_listen(std::sync::Arc::new(move || wake.wake())) };
+    if !alone && delegated && delegated_requests.is_none() && P::delegated_instance_send(&request.encode()) {
         return Ok(());
     }
     let (config, encrypted) = load_config::<P>();
@@ -117,7 +123,7 @@ fn run<P: Platform>(mut request: cli::Request) -> Result<(), aster_platform::Pla
     let placement = state_path::<P>().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| parse_placement(&t));
     let (mut handler, vault_worker, extensions, local_worker) = handler::Handler::<P>::new(config, waker, encrypted)
         .map_err(|e| aster_platform::PlatformError::new(0, format!("vault worker: {e}")))?;
-    handler.set_instance(requests, (!hidden || cfg!(windows)).then_some(request));
+    handler.set_instance(requests, delegated_requests, (!hidden || cfg!(windows)).then_some(request));
     let result = windows.run(WindowOptions { title: "Aster".into(), placement, dark, visible: !hidden }, handler);
     local_worker.finish();
     drop(extensions);
@@ -151,6 +157,17 @@ fn host<P: Platform>(base: &str, token: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if args.get(1).is_some_and(|arg| arg == aster_platform_windows::defterm::SERVER_ARG) {
+        use aster_platform_windows::{defterm, Windows};
+        let log = log::open(log_path::<Windows>().as_deref());
+        tracing_subscriber::fmt().with_ansi(false).with_writer(move || log.clone()).init();
+        if let Err(error) = defterm::run_server() {
+            tracing::error!("terminal delegation: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let (Some("--pty-host"), Some(endpoint)) = (args.get(1).map(String::as_str), args.get(2)) {
         #[cfg(windows)]
         let code = pty_host::run::<aster_platform_windows::Windows>(endpoint);

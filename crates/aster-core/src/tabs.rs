@@ -380,6 +380,18 @@ impl App {
         self.open_tab_at(profile, cwd);
     }
 
+    pub fn open_delegated_console(&mut self, token: String) {
+        if !crate::default_terminal::valid_token(&token) {
+            return;
+        }
+        let mut profile = crate::profile::Profile::new("run", crate::i18n::t("Console application"), "cmd.exe", &[]);
+        profile.hold = true;
+        self.insert_profile_tab(profile, None);
+        if let Some(launch) = self.focused_pane().and_then(|pane| self.panes.get_mut(&pane)).and_then(|pane| pane.pending.as_mut()) {
+            launch.delegation = Some(token);
+        }
+    }
+
     pub fn renaming(&self) -> Option<&Rename> {
         self.rename.as_ref()
     }

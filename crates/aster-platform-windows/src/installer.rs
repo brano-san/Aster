@@ -197,6 +197,7 @@ fn uninstall(paths: &InstallPaths, source: &Path, delete_settings: bool, close_s
     };
     crate::instance::stop_for_installation(&paths.exe, Some(source))?;
     close_sessions()?;
+    crate::defterm_registration::remove(&paths.exe)?;
     crate::shortcut::apply_for(Some(false), &paths.exe).map_err(io_platform)?;
     crate::jump_list::remove().map_err(io_platform)?;
     let explorer = crate::explorer::set("", false);

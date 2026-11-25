@@ -236,6 +236,9 @@ pub trait Platform: 'static {
     fn font_families(monospace: bool) -> Vec<String>;
     fn shells() -> Vec<Profile>;
     fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError>;
+    fn attach_delegated_console(_token: &str) -> Result<Spawned, PlatformError> {
+        Err(PlatformError::new(0, "console delegation is unsupported"))
+    }
     fn spawn_extension(command: &mut std::process::Command) -> std::io::Result<std::process::Child>;
     fn config_dir() -> Option<PathBuf>;
     fn home_dir() -> Option<PathBuf>;
@@ -251,12 +254,16 @@ pub trait Platform: 'static {
     fn child_processes(pid: u32) -> Vec<String>;
     fn instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>>;
     fn instance_send(message: &str) -> bool;
+    fn delegated_instance_listen(_wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>> { None }
+    fn delegated_instance_send(_message: &str) -> bool { false }
     fn set_explorer_menu(label: &str, enabled: bool) -> bool;
     fn update_launcher(_profiles: &[String], _install: Option<bool>) -> std::io::Result<bool> { Ok(false) }
     fn set_autostart(enabled: bool, args: &[&str]) -> std::io::Result<()>;
     fn set_explorer_paste_menu(_label: &str, _enabled: bool) -> bool { true }
     fn start_menu_shortcut(_change: Option<bool>) -> Result<bool, PlatformError> { Ok(false) }
     fn installation_state() -> aster_core::installation::State { Default::default() }
+    fn default_terminal_state() -> Result<aster_core::default_terminal::State, PlatformError> { Ok(Default::default()) }
+    fn set_default_terminal(_enabled: bool) -> Result<aster_core::default_terminal::State, PlatformError> { Ok(Default::default()) }
     fn start_user_install() -> std::io::Result<()> { Err(std::io::ErrorKind::Unsupported.into()) }
     fn update_install_registration(_path: &std::path::Path, _version: &str) -> std::io::Result<()> { Ok(()) }
     fn set_url_scheme(_enabled: bool) -> bool { true }

@@ -52,6 +52,7 @@ enum StoreEvent {
     ConfigStatus(u64, Option<String>),
     StartMenuShortcut(Option<WindowId>, Result<bool, aster_platform::PlatformError>),
     InstallationError(WindowId, std::io::Error),
+    DefaultTerminal(Option<WindowId>, Result<aster_core::default_terminal::State, aster_platform::PlatformError>),
     RawConfigSaved(WindowId, Result<(String, Box<Config>), String>),
     RestartReady(WindowId, Result<PathBuf, String>),
     RestartSessionSaved(WindowId, Result<PathBuf, String>),
@@ -95,6 +96,7 @@ pub struct Handler<P: Platform> {
     installed_extensions: Arc<aster_core::extensions::Snapshot>,
     desktop: crate::desktop::Worker,
     launcher_installed: Option<bool>,
+    default_terminal: aster_core::default_terminal::State,
     font_families: Option<(Vec<String>, Vec<String>)>,
     config: Config,
     restart_baseline: RestartSettings,
@@ -134,6 +136,7 @@ pub struct Handler<P: Platform> {
     applied: Option<(String, Option<DockSpec>)>,
     window_prefs_dirty: bool,
     requests: Option<std::sync::mpsc::Receiver<String>>,
+    delegated_requests: Option<std::sync::mpsc::Receiver<String>>,
     deferred_requests: Vec<String>,
     startup: Option<crate::cli::Request>,
     last_focused: Option<WindowId>,
@@ -220,6 +223,7 @@ fn serve_request(app: &mut App, request: crate::cli::Request) -> bool {
             }
         }
         Command::Run { command, dir } => app.run_command(&command, dir.or(request.cwd)),
+        Command::DelegatedConsole { token } => app.open_delegated_console(token),
         Command::Profile { name } => {
             if !app.open_named_profile(&name) {
                 tracing::warn!("no profile named {name}");
@@ -303,6 +307,10 @@ impl<P: Platform> Handler<P> {
         let restart_baseline = RestartSettings::from_config(&config);
         let desktop = crate::desktop::Worker::start()?;
         let launcher_installed = cfg!(target_os = "linux").then_some(false);
+        if cfg!(windows) {
+            let events = store_events.clone();
+            desktop.send(move || events.post(StoreEvent::DefaultTerminal(None, P::default_terminal_state())));
+        }
         let shell_integration = crate::shell_integration::ShellIntegration::start::<P>()?;
         if cfg!(windows) && !capturing() {
             let events = store_events.clone();
@@ -311,7 +319,7 @@ impl<P: Platform> Handler<P> {
         let extension_events = store_events.clone();
         let root = config_path.as_deref().and_then(std::path::Path::parent).map(|path| path.join("extensions"));
         let (extensions, extension_worker) = crate::extensions::Host::start::<P>(root, move |event| extension_events.post(StoreEvent::Extensions(event)))?;
-        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, shell_integration, start_menu_shortcut: false, installation: P::installation_state(), installation_quit: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, deferred_requests: Vec::new(), startup: None, last_focused: None, recent, recent_folders, jump_list: None, sync, sync_view: Default::default(), sync_requested: None, updates, update_window: None, restarting: false, restart_preparing: false };
+        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, default_terminal: Default::default(), shell_integration, start_menu_shortcut: false, installation: P::installation_state(), installation_quit: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, delegated_requests: None, deferred_requests: Vec::new(), startup: None, last_focused: None, recent, recent_folders, jump_list: None, sync, sync_view: Default::default(), sync_requested: None, updates, update_window: None, restarting: false, restart_preparing: false };
         if !encrypted {
             handler.scan_extensions(&handler.config);
             handler.update_launcher(&handler.config, None);
@@ -325,9 +333,21 @@ impl<P: Platform> Handler<P> {
         self.extensions.scan(config.extensions.disabled.clone(), language.into());
     }
 
-    pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
+    pub fn set_instance(&mut self, requests: Option<std::sync::mpsc::Receiver<String>>, delegated_requests: Option<std::sync::mpsc::Receiver<String>>, startup: Option<crate::cli::Request>) {
         self.requests = requests;
+        self.delegated_requests = delegated_requests;
+        if self.config_startup == ConfigStartup::Prompt {
+            if let Some(request) = startup.as_ref() { self.claim_delegation(&request.command); }
+        }
         self.startup = startup;
+    }
+
+    fn claim_delegation(&mut self, command: &crate::cli::Command) {
+        if let crate::cli::Command::DelegatedConsole { token } = command {
+            if let Err(error) = self.local_spawns.claim_delegation::<P>(token) {
+                tracing::warn!("console attachment before config unlock: {error}");
+            }
+        }
     }
 
     fn request_target(&self) -> Option<WindowId> {
@@ -339,7 +359,7 @@ impl<P: Platform> Handler<P> {
             return;
         }
         let mut incoming = std::mem::take(&mut self.deferred_requests);
-        if let Some(requests) = &self.requests {
+        for requests in self.requests.iter().chain(self.delegated_requests.iter()) {
             incoming.extend(requests.try_iter());
         }
         if incoming.iter().any(|text| text == aster_platform::INSTALLATION_QUIT) {
@@ -347,6 +367,9 @@ impl<P: Platform> Handler<P> {
             return;
         }
         if self.config_startup == ConfigStartup::Prompt {
+            for text in &incoming {
+                if let Some(request) = crate::cli::Request::decode(text) { self.claim_delegation(&request.command); }
+            }
             self.deferred_requests = incoming;
             return;
         }
@@ -797,8 +820,8 @@ impl<P: Platform> Handler<P> {
                 self.sessions.insert((id, pane), session);
             }
             Effect::Spawn { pane, launch, terminal, .. } => {
-                let clear = launch.ssh.is_none() && launch.clear_after_connect == Some(true);
-                let hosted = self.config.terminal.persistent_sessions && launch.local_environment.is_some() && !launch.elevated && !capturing();
+                let clear = launch.delegation.is_none() && launch.ssh.is_none() && launch.clear_after_connect == Some(true);
+                let hosted = launch.delegation.is_none() && self.config.terminal.persistent_sessions && launch.local_environment.is_some() && !launch.elevated && !capturing();
                 let app = self.windows.get(&id).map(|state| &state.app);
                 let previous = app.and_then(|app| app.pane_host_id(pane));
                 let title = app.and_then(|app| app.pane_profile_name(pane)).unwrap_or(&launch.command).to_owned();
@@ -811,7 +834,7 @@ impl<P: Platform> Handler<P> {
                     cols: launch.cols,
                     rows: launch.rows,
                 };
-                let request = crate::local_spawn::Request { key: (id, pane), request: req, terminal, stream: launch.stream, elevated: launch.elevated, clear, hosted, previous, title };
+                let request = crate::local_spawn::Request { key: (id, pane), request: req, terminal, delegation: launch.delegation, stream: launch.stream, elevated: launch.elevated, clear, hosted, previous, title };
                 let waker = self.waker.clone();
                 if let Err(error) = self.local_spawns.launch::<P>(request, move || waker.wake()) {
                     tracing::error!("local spawn worker: {error}");
@@ -913,6 +936,10 @@ impl<P: Platform> Handler<P> {
                         events.post(StoreEvent::InstallationError(id, error));
                     }
                 });
+            }
+            Effect::DefaultTerminal(enabled) => {
+                let events = self.store_events.clone();
+                self.desktop.send(move || events.post(StoreEvent::DefaultTerminal(Some(id), P::set_default_terminal(enabled))));
             }
             Effect::RevealConfigFile => {
                 if let Some(path) = self.config_path.clone() {
@@ -1491,6 +1518,20 @@ impl<P: Platform> Handler<P> {
                         state.app.installation_error(&error.to_string());
                     }
                 }
+                StoreEvent::DefaultTerminal(window, result) => match result {
+                    Ok(status) => {
+                        self.default_terminal = status;
+                        for state in self.windows.values_mut() {
+                            state.app.set_default_terminal_state(status);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("default terminal: {error}");
+                        if let Some(state) = window.and_then(|id| self.windows.get_mut(&id)) {
+                            state.app.default_terminal_error(&error.localized());
+                        }
+                    }
+                },
                 StoreEvent::ConfigStatus(revision, error) => {
                     if self.settings_revision == revision {
                         self.reload_config(true);
@@ -1747,7 +1788,8 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         self.drain_exits();
         self.drain_store();
         self.drain_updates();
-        let pending = queue_background_request(&mut self.startup, self.requests.as_ref());
+        let pending = queue_background_request(&mut self.startup, self.requests.as_ref())
+            || queue_background_request(&mut self.startup, self.delegated_requests.as_ref());
         if self.startup.as_ref().is_some_and(|request| request.command == crate::cli::Command::InstallationQuit) {
             self.startup = None;
             self.quit_for_installation();
@@ -1785,6 +1827,7 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         }
         app.set_start_menu_shortcut(self.start_menu_shortcut);
         app.set_installation(self.installation);
+        app.set_default_terminal_state(self.default_terminal);
         app.set_system_language(&P::ui_language());
         app.warn_read_only_config();
         app.vault_state(self.vault_view.clone());

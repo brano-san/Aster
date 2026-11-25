@@ -1,0 +1,32 @@
+import "unknwn.idl";
+
+typedef struct AsterTerminalStartup {
+    BSTR title;
+    BSTR icon;
+    LONG icon_index;
+    DWORD x;
+    DWORD y;
+    DWORD width;
+    DWORD height;
+    DWORD columns;
+    DWORD rows;
+    DWORD fill;
+    DWORD flags;
+    WORD show;
+} AsterTerminalStartup;
+
+[
+    object,
+    uuid(6F23DA90-15C5-4203-9DB0-64E73F1B1B00)
+]
+interface IAsterTerminalHandoff : IUnknown {
+    HRESULT Attach(
+        [out, system_handle(sh_pipe)] HANDLE* input,
+        [out, system_handle(sh_pipe)] HANDLE* output,
+        [in, system_handle(sh_pipe)] HANDLE signal,
+        [in, system_handle(sh_file)] HANDLE reference,
+        [in, system_handle(sh_process)] HANDLE server,
+        [in, system_handle(sh_process)] HANDLE client,
+        [in] const AsterTerminalStartup* startup
+    );
+};

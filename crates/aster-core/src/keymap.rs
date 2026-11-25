@@ -89,6 +89,7 @@ pub enum Action {
     OpenLog,
     StartMenuShortcut,
     InstallForUser,
+    DefaultTerminal(bool),
     EditEnvironment,
     OpenConfigFile,
     OpenConfigFolder,
@@ -196,6 +197,10 @@ const NAMED: &[(Action, &str, &str)] = &[
     (Action::StartMenuShortcut, "start-menu-shortcut", "Toggle Start menu shortcut"),
     #[cfg(windows)]
     (Action::InstallForUser, "install-for-user", "Install for this user"),
+    #[cfg(windows)]
+    (Action::DefaultTerminal(true), "set-default-terminal", "Make Aster the default terminal"),
+    #[cfg(windows)]
+    (Action::DefaultTerminal(false), "restore-default-terminal", "Restore the previous default terminal"),
     (Action::OpenConfigFile, "open-config-file", "Open the config file in an editor"),
     (Action::OpenConfigFolder, "open-config-folder", "Open the config folder"),
     (Action::ShowDefaultConfig, "show-default-config", "Show the defaults"),

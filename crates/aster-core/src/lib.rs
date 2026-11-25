@@ -4,6 +4,7 @@ mod busy;
 mod clipboard;
 pub mod close;
 pub mod config;
+pub mod default_terminal;
 pub mod environment;
 mod config_editor;
 mod text_editor;

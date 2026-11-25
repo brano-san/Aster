@@ -19,6 +19,7 @@ impl App {
             .filter(|a| !matches!(a, Action::SerialSpeed | Action::SerialBreak) || self.serial_pane().is_some())
             .filter(|a| *a != Action::SaveLayout || self.can_save_layout())
             .filter(|a| *a != Action::SaveAsProfile || self.focused_pane().is_some_and(|id| self.panes.contains_key(&id)))
+            .filter(|a| !matches!(a, Action::DefaultTerminal(enable) if !self.default_terminal.offers(*enable)))
             .map(|action| self.command_pick(&action, action.label(), action.source_label()))
             .collect();
 

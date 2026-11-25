@@ -20,6 +20,7 @@ pub struct Request {
     pub key: Key,
     pub request: SpawnRequest,
     pub terminal: Shared,
+    pub delegation: Option<String>,
     pub stream: Option<Stream>,
     pub elevated: bool,
     pub clear: bool,
@@ -81,6 +82,7 @@ pub struct LocalSpawns {
     sender: Sender<Ready>,
     ready: Receiver<Ready>,
     pending: HashMap<Key, Pending>,
+    claimed: HashMap<String, Receiver<Result<Spawned, PlatformError>>>,
     restore: Arc<Mutex<HashMap<u64, SessionInfo>>>,
     closing: Arc<Closing>,
 }
@@ -136,7 +138,18 @@ impl LocalSpawns {
             let _ = finished.send(());
         })?;
         let worker = Worker { done, closing: closing.clone() };
-        Ok((Self { queue, sender, ready, pending: HashMap::new(), restore: Arc::default(), closing }, worker))
+        Ok((Self { queue, sender, ready, pending: HashMap::new(), claimed: HashMap::new(), restore: Arc::default(), closing }, worker))
+    }
+
+    pub fn claim_delegation<P: Platform>(&mut self, token: &str) -> io::Result<()> {
+        if self.claimed.contains_key(token) { return Ok(()); }
+        let (send, receive) = bounded(1);
+        let owned_token = token.to_owned();
+        std::thread::Builder::new().name("aster-console-claim".into()).spawn(move || {
+            let _ = send.send(P::attach_delegated_console(&owned_token));
+        })?;
+        self.claimed.insert(token.to_owned(), receive);
+        Ok(())
     }
 
     pub fn prepare_restore<P: Platform>(&self, windows: Vec<WindowState>) {
@@ -160,7 +173,9 @@ impl LocalSpawns {
     }
 
     pub fn launch<P: Platform>(&mut self, request: Request, wake: impl FnOnce() + Send + 'static) -> io::Result<()> {
-        let Request { key, request, terminal, stream, elevated, clear, hosted, previous, title } = request;
+        let Request { key, request, terminal, delegation, stream, elevated, clear, hosted, previous, title } = request;
+        let claimed = delegation.as_ref().and_then(|token| self.claimed.remove(token));
+        let worker_name = if delegation.is_some() { Some("aster-console-attach") } else if elevated { Some("aster-elevate") } else { None };
         let pending = Pending::default();
         let cancelled = pending.cancelled.clone();
         let sender = self.sender.clone();
@@ -174,7 +189,16 @@ impl LocalSpawns {
             let size = (request.cols, request.rows);
             let mut replay = None;
             let direct = || P::spawn(&request).map(|spawned| crate::stream::wrap(spawned, stream.as_ref()));
-            let result = if elevated {
+            let result = if let Some(token) = delegation {
+                let attached = match claimed {
+                    Some(receiver) => receiver.recv().unwrap_or_else(|_| Err(PlatformError::new(0, "console attachment worker stopped"))),
+                    None => P::attach_delegated_console(&token),
+                };
+                attached.inspect(|spawned| {
+                    tracing::info!(pid = spawned.pty.pid(), "delegated console attached");
+                    spawned.pty.resize(size.0, size.1);
+                })
+            } else if elevated {
                 P::spawn_elevated(&request)
             } else if hosted {
                 let attach = previous.and_then(|id| restore.lock().unwrap().remove(&id));
@@ -203,8 +227,8 @@ impl LocalSpawns {
                 wake();
             }
         };
-        if elevated {
-            std::thread::Builder::new().name("aster-elevate".into()).spawn(run)?;
+        if let Some(name) = worker_name {
+            std::thread::Builder::new().name(name.into()).spawn(run)?;
         } else {
             self.queue.send(Box::new(run)).map_err(|_| std::io::Error::other("local spawn worker stopped"))?;
         }

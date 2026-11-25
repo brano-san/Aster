@@ -29,7 +29,7 @@ fn os_error(error: windows::core::Error) -> io::Error {
 
 fn raw(handle: &OwnedHandle) -> HANDLE { HANDLE(handle.as_raw_handle()) }
 
-fn sid(process: HANDLE) -> io::Result<String> {
+pub(super) fn sid(process: HANDLE) -> io::Result<String> {
     let mut token = HANDLE::default();
     unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(os_error)?;
     let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
@@ -51,17 +51,17 @@ pub fn endpoint() -> io::Result<String> {
     Ok(format!(r"\\.\pipe\aster-pty-{hash:016x}"))
 }
 
-struct Security(PSECURITY_DESCRIPTOR);
+pub(super) struct Security(PSECURITY_DESCRIPTOR);
 
 impl Security {
-    fn current_user() -> io::Result<Self> {
+    pub(super) fn current_user() -> io::Result<Self> {
         let sddl = HSTRING::from(format!("D:P(A;;GA;;;{})", sid(unsafe { GetCurrentProcess() })?));
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, SDDL_REVISION_1, &mut descriptor, None) }.map_err(os_error)?;
         Ok(Self(descriptor))
     }
 
-    fn attributes(&self) -> SECURITY_ATTRIBUTES {
+    pub(super) fn attributes(&self) -> SECURITY_ATTRIBUTES {
         SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: self.0.0, ..Default::default() }
     }
 }

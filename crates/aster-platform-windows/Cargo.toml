@@ -6,12 +6,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
+
 [target.'cfg(windows)'.dependencies]
 aster-core.workspace = true
 aster-gfx.workspace = true
 aster-platform.workspace = true
 aster-proto.workspace = true
 crc32fast.workspace = true
+getrandom.workspace = true
 tracing.workspace = true
 windows-core.workspace = true
 

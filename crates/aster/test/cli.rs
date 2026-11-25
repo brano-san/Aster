@@ -83,6 +83,16 @@ fn requests_survive_the_trip_between_instances() {
 }
 
 #[test]
+#[cfg(windows)]
+fn delegated_console_requests_carry_a_one_shot_token() {
+    let token = "196e6dfa6258497b85681528382b6d17";
+    let wire = format!(r#"{{"cwd":null,"command":{{"kind":"delegatedconsole","token":"{token}"}}}}"#);
+    let request = Request::decode(&wire).expect("delegated console request");
+    assert_eq!(request.encode(), wire);
+    assert!(Request::decode(&wire.replace(token, "unexpected-pipe-name")).is_none());
+}
+
+#[test]
 fn paste_path_takes_one_literal_path_and_forwards_it() {
     let path = r"C:\Work & Notes\plan.txt";
     let command = Command::PastePath { path: path.into() };

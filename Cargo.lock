@@ -139,7 +139,7 @@ checksum = "175571dd1d178ced59193a6fc02dde1b972eb0bc56c892cde9beeceac5bf0f6b"
 
 [[package]]
 name = "aster"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-core",
  "aster-ext",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "aster-core"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-ext",
  "aster-gfx",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "aster-ext"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -194,11 +194,11 @@ dependencies = [
 
 [[package]]
 name = "aster-gfx"
-version = "0.11.0"
+version = "0.11.1"
 
 [[package]]
 name = "aster-net"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-proto",
  "crossbeam-channel",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "aster-platform"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-core",
  "aster-gfx",
@@ -214,7 +214,7 @@ dependencies = [
 
 [[package]]
 name = "aster-platform-linux"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-core",
  "aster-gfx",
@@ -234,13 +234,15 @@ dependencies = [
 
 [[package]]
 name = "aster-platform-windows"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-core",
  "aster-gfx",
  "aster-platform",
  "aster-proto",
+ "cc",
  "crc32fast",
+ "getrandom 0.4.3",
  "tracing",
  "windows",
  "windows-core",
@@ -248,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "aster-proto"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "regex",
  "serde",
@@ -256,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "aster-serial"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-proto",
  "crossbeam-channel",
@@ -265,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "aster-sign"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-core",
  "ed25519-dalek",
@@ -274,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "aster-ssh"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "aster-proto",
  "crossbeam-channel",
@@ -287,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "aster-vault"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -299,14 +301,14 @@ dependencies = [
 
 [[package]]
 name = "aster-vt"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "alacritty_terminal",
 ]
 
 [[package]]
 name = "aster-zmodem"
-version = "0.11.0"
+version = "0.11.1"
 
 [[package]]
 name = "atomic-waker"

@@ -7,6 +7,7 @@ pub enum Command {
     Window,
     Hidden,
     InstallationQuit,
+    DelegatedConsole { token: String },
     Open { dir: String },
     Run {
         command: Vec<String>,
@@ -74,6 +75,10 @@ pub fn parse(args: &[String], cwd: Option<&Path>) -> Parsed {
         Some("--version" | "-V") => Parsed::Version,
         Some("--help" | "-h") => Parsed::Help,
         Some("--hidden") if args.len() == 1 => Parsed::Request(Command::Hidden),
+        #[cfg(windows)]
+        Some(aster_platform_windows::defterm::CLIENT_ARG) if args.len() == 2 && aster_core::default_terminal::valid_token(&args[1]) => {
+            Parsed::Request(Command::DelegatedConsole { token: args[1].clone() })
+        }
         Some("open") => match args.len() {
             1 => Parsed::Request(Command::Open { dir: absolute(".") }),
             2 => Parsed::Request(Command::Open { dir: absolute(&args[1]) }),
@@ -119,7 +124,11 @@ impl Request {
         if cfg!(windows) && text == aster_platform::INSTALLATION_QUIT {
             return Some(Self { cwd: None, command: Command::InstallationQuit });
         }
-        serde_json::from_str(text).ok()
+        let request: Self = serde_json::from_str(text).ok()?;
+        match &request.command {
+            Command::DelegatedConsole { token } if !cfg!(windows) || !aster_core::default_terminal::valid_token(token) => None,
+            _ => Some(request),
+        }
     }
 }
 

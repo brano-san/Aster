@@ -3,6 +3,8 @@
 mod autostart;
 mod conpty;
 mod d3d;
+pub mod defterm;
+mod defterm_registration;
 mod elevate;
 mod environment;
 mod explorer;
@@ -109,6 +111,18 @@ impl Platform for Windows {
         conpty::spawn(req)
     }
 
+    fn attach_delegated_console(token: &str) -> Result<Spawned, PlatformError> {
+        defterm::attach(token)
+    }
+
+    fn default_terminal_state() -> Result<aster_core::default_terminal::State, PlatformError> {
+        defterm_registration::state()
+    }
+
+    fn set_default_terminal(enabled: bool) -> Result<aster_core::default_terminal::State, PlatformError> {
+        defterm_registration::set(enabled)
+    }
+
     fn config_dir() -> Option<PathBuf> {
         std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("Aster"))
     }
@@ -127,6 +141,10 @@ impl Platform for Windows {
 
     fn instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>> {
         instance::listen(wake)
+    }
+
+    fn delegated_instance_listen(wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Option<std::sync::mpsc::Receiver<String>> {
+        instance::delegated_listen(wake)
     }
 
     fn set_explorer_menu(label: &str, enabled: bool) -> bool {
@@ -167,6 +185,10 @@ impl Platform for Windows {
 
     fn instance_send(message: &str) -> bool {
         instance::send(message)
+    }
+
+    fn delegated_instance_send(message: &str) -> bool {
+        instance::delegated_send(message)
     }
 
     fn downloads_dir() -> Option<PathBuf> {

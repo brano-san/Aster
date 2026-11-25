@@ -1,6 +1,8 @@
+use crate::pty_host::{sid, Security};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::windows::ffi::OsStringExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -8,9 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use windows::core::{HSTRING, PWSTR};
 use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_PIPE_BUSY, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND};
-use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject};
+use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND, SECURITY_IDENTIFICATION};
+use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeServerProcessId, GetNamedPipeServerSessionId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_ACCESS_RIGHTS, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject};
 
 const LIMIT: u64 = 1 << 20;
 
@@ -23,22 +25,84 @@ fn name() -> String {
     format!(r"\\.\pipe\aster-instance-{user}-{session}")
 }
 
-fn create(first: bool) -> Option<HANDLE> {
+#[derive(Clone)]
+struct InstanceOwner {
+    user: String,
+    session: u32,
+}
+
+impl InstanceOwner {
+    fn current() -> io::Result<Self> {
+        windows::core::link!("kernel32.dll" "system" fn ProcessIdToSessionId(pid: u32, session: *mut u32) -> windows::core::BOOL);
+        let mut session = 0;
+        unsafe { ProcessIdToSessionId(std::process::id(), &mut session).ok() }.map_err(io::Error::other)?;
+        let user = sid(unsafe { GetCurrentProcess() })?;
+        Ok(Self { user, session })
+    }
+
+    fn matches(&self, pipe: &File, process: HANDLE) -> io::Result<bool> {
+        let mut session = 0;
+        unsafe { GetNamedPipeServerSessionId(HANDLE(pipe.as_raw_handle()), &mut session) }.map_err(io::Error::other)?;
+        Ok(session == self.session && sid(process)? == self.user)
+    }
+}
+
+#[derive(Clone)]
+struct DelegatedScope {
+    image: PathBuf,
+    owner: InstanceOwner,
+}
+
+impl DelegatedScope {
+    fn current() -> Option<Self> {
+        let image = std::env::current_exe().and_then(std::fs::canonicalize).ok()?;
+        Some(Self { image, owner: InstanceOwner::current().ok()? })
+    }
+
+    fn name(&self) -> String {
+        let hash = self.image.as_os_str().encode_wide().flat_map(u16::to_le_bytes)
+            .fold(0xcbf29ce484222325u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3));
+        format!(r"\\.\pipe\aster-defterm-instance-v1-{}-{}-{hash:016x}", self.owner.session, self.owner.user)
+    }
+
+    fn matches(&self, pipe: &File, process: HANDLE) -> io::Result<bool> {
+        if !self.owner.matches(pipe, process)? { return Ok(false); }
+        let image = process_path(process).map_err(io::Error::other)?;
+        Ok(crate::shortcut::same_path(&self.image, &image))
+    }
+
+    fn allows(&self, pipe: &File) -> bool {
+        let Ok(Some(process)) = pipe_process(pipe, PROCESS_QUERY_LIMITED_INFORMATION, false) else { return false };
+        self.matches(pipe, HANDLE(process.as_raw_handle())).unwrap_or(false)
+    }
+}
+
+fn create(name: &str, first: bool, private: bool) -> Option<File> {
     let flags = if first { PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE } else { PIPE_ACCESS_INBOUND };
-    let handle = unsafe { CreateNamedPipeW(&HSTRING::from(name()), flags, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 0, 64 * 1024, 0, None) };
-    (handle != INVALID_HANDLE_VALUE && !handle.is_invalid()).then_some(handle)
+    let security = if private { Some(Security::current_user().ok()?) } else { None };
+    let attributes = security.as_ref().map(Security::attributes);
+    let handle = unsafe { CreateNamedPipeW(&HSTRING::from(name), flags, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 0, 64 * 1024, 0, attributes.as_ref().map(std::ptr::from_ref)) };
+    if handle == INVALID_HANDLE_VALUE || handle.is_invalid() { return None; }
+    Some(unsafe { File::from_raw_handle(handle.0) })
 }
 
 pub fn listen(wake: Arc<dyn Fn() + Send + Sync>) -> Option<Receiver<String>> {
-    let mut pipe = create(true)?.0 as isize;
+    listen_at(name(), false, wake)
+}
+
+pub fn delegated_listen(wake: Arc<dyn Fn() + Send + Sync>) -> Option<Receiver<String>> {
+    listen_at(DelegatedScope::current()?.name(), true, wake)
+}
+
+fn listen_at(name: String, private: bool, wake: Arc<dyn Fn() + Send + Sync>) -> Option<Receiver<String>> {
+    let mut file = create(&name, true, private)?;
     let (tx, rx) = channel();
-    let spawned = std::thread::Builder::new().name("aster-instance".into()).spawn(move || loop {
-        let handle = HANDLE(pipe as _);
-        let connected = match unsafe { ConnectNamedPipe(handle, None) } {
+    let thread = if private { "aster-defterm-instance" } else { "aster-instance" };
+    let spawned = std::thread::Builder::new().name(thread.into()).spawn(move || loop {
+        let connected = match unsafe { ConnectNamedPipe(HANDLE(file.as_raw_handle()), None) } {
             Ok(()) => true,
             Err(e) => e.code() == ERROR_PIPE_CONNECTED.to_hresult() || e.code() == ERROR_NO_DATA.to_hresult(),
         };
-        let mut file = unsafe { File::from_raw_handle(handle.0) };
         if connected {
             let mut bytes = Vec::new();
             let mut chunk = [0u8; 4096];
@@ -56,10 +120,10 @@ pub fn listen(wake: Arc<dyn Fn() + Send + Sync>) -> Option<Receiver<String>> {
                 wake();
             }
         }
-        let next = create(false);
+        let next = create(&name, false, private);
         drop(file);
         match next {
-            Some(next) => pipe = next.0 as isize,
+            Some(next) => file = next,
             None => return,
         }
     });
@@ -67,9 +131,22 @@ pub fn listen(wake: Arc<dyn Fn() + Send + Sync>) -> Option<Receiver<String>> {
 }
 
 pub fn send(message: &str) -> bool {
+    send_at(&name(), message, None)
+}
+
+pub fn delegated_send(message: &str) -> bool {
+    DelegatedScope::current().is_some_and(|scope| send_at(&scope.name(), message, Some(&scope)))
+}
+
+fn send_at(name: &str, message: &str, expected: Option<&DelegatedScope>) -> bool {
+    let mut options = OpenOptions::new();
+    options.write(true);
+    if expected.is_some() {
+        options.security_qos_flags(SECURITY_IDENTIFICATION.0);
+    }
     for _ in 0..40 {
-        match OpenOptions::new().write(true).open(name()) {
-            Ok(mut pipe) => return pipe.write_all(message.as_bytes()).and_then(|()| pipe.flush()).is_ok(),
+        match options.open(name) {
+            Ok(mut pipe) => return expected.is_none_or(|scope| scope.allows(&pipe)) && pipe.write_all(message.as_bytes()).and_then(|()| pipe.flush()).is_ok(),
             Err(e) if e.raw_os_error() == Some(231) => std::thread::sleep(std::time::Duration::from_millis(25)),
             Err(_) => return false,
         }
@@ -77,7 +154,7 @@ pub fn send(message: &str) -> bool {
     false
 }
 
-fn process_path(process: HANDLE) -> windows::core::Result<PathBuf> {
+pub(super) fn process_path(process: HANDLE) -> windows::core::Result<PathBuf> {
     let mut name = vec![0u16; 32768];
     let mut len = name.len() as u32;
     unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(name.as_mut_ptr()), &mut len)? };
@@ -85,31 +162,66 @@ fn process_path(process: HANDLE) -> windows::core::Result<PathBuf> {
 }
 
 pub fn stop_for_installation(installed: &Path, source: Option<&Path>) -> io::Result<()> {
+    stop_for_installation_at(&name(), installed, source)
+}
+
+fn stop_for_installation_at(legacy: &str, installed: &Path, source: Option<&Path>) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
+    let owner = InstanceOwner::current()?;
+    let source = source.filter(|path| !crate::shortcut::same_path(installed, path));
+    for candidate in std::iter::once(installed).chain(source) {
+        let image = match std::fs::canonicalize(candidate) {
+            Ok(image) => image,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let scope = DelegatedScope { image, owner: owner.clone() };
+        stop_at(&scope.name(), deadline, |pipe, process| scope.matches(pipe, process))?;
+    }
+    stop_at(legacy, deadline, |pipe, process| {
+        if !owner.matches(pipe, process)? { return Ok(false); }
+        let image = process_path(process).map_err(io::Error::other)?;
+        Ok(crate::shortcut::same_path(&image, installed) || source.is_some_and(|path| crate::shortcut::same_path(&image, path)))
+    })
+}
+
+fn pipe_process(pipe: &File, access: PROCESS_ACCESS_RIGHTS, ignore_self: bool) -> io::Result<Option<OwnedHandle>> {
+    let mut pid = 0;
+    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut pid) }.map_err(io::Error::other)?;
+    if ignore_self && pid == std::process::id() { return Ok(None); }
+    let process = unsafe { OpenProcess(access, false, pid) }.map_err(io::Error::other)?;
+    Ok(Some(unsafe { OwnedHandle::from_raw_handle(process.0) }))
+}
+
+fn quit_timeout() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, aster_core::installation::quit_timeout())
+}
+
+fn stop_at(name: &str, deadline: Instant, eligible: impl FnOnce(&File, HANDLE) -> io::Result<bool>) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).security_qos_flags(SECURITY_IDENTIFICATION.0);
     let mut pipe = loop {
-        match OpenOptions::new().write(true).open(name()) {
+        match options.open(name) {
             Ok(pipe) => break pipe,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { return Err(quit_timeout()); }
+                std::thread::sleep(remaining.min(Duration::from_millis(25)));
             }
             Err(error) => return Err(error),
         }
     };
-    let mut pid = 0;
-    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut pid) }.map_err(io::Error::other)?;
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, false, pid) }.map_err(io::Error::other)?;
-    let owned = unsafe { OwnedHandle::from_raw_handle(process.0) };
-    let image = process_path(HANDLE(owned.as_raw_handle())).map_err(io::Error::other)?;
-    if !crate::shortcut::same_path(&image, installed) && !source.is_some_and(|source| crate::shortcut::same_path(&image, source)) {
-        return Ok(());
-    }
+    let Some(process) = pipe_process(&pipe, PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, true)? else { return Ok(()) };
+    let handle = HANDLE(process.as_raw_handle());
+    if !eligible(&pipe, handle)? { return Ok(()); }
+    if Instant::now() >= deadline { return Err(quit_timeout()); }
     pipe.write_all(aster_platform::INSTALLATION_QUIT.as_bytes())?;
     drop(pipe);
     let remaining = deadline.saturating_duration_since(Instant::now());
-    match unsafe { WaitForSingleObject(HANDLE(owned.as_raw_handle()), remaining.as_millis() as u32) } {
+    match unsafe { WaitForSingleObject(handle, remaining.as_millis() as u32) } {
         WAIT_OBJECT_0 => Ok(()),
-        WAIT_TIMEOUT => Err(io::Error::new(io::ErrorKind::TimedOut, aster_core::installation::quit_timeout())),
+        WAIT_TIMEOUT => Err(quit_timeout()),
         _ => Err(io::Error::last_os_error()),
     }
 }

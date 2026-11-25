@@ -682,6 +682,19 @@ fn command_tabs_stay_after_success_and_are_not_restored() {
 }
 
 #[test]
+fn a_delegated_console_is_a_held_tab_with_a_one_shot_launch() {
+    let mut a = app(1);
+    a.open_delegated_console("invalid".into());
+    assert_eq!(a.tab_count(), 1);
+    a.open_delegated_console("196e6dfa6258497b85681528382b6d17".into());
+    assert_eq!(a.tab_count(), 2);
+    let pane = &a.panes[&a.focused_pane().unwrap()];
+    assert_eq!(pane.pending.as_ref().unwrap().delegation.as_deref(), Some("196e6dfa6258497b85681528382b6d17"));
+    assert!(pane.profile.hold);
+    assert_eq!(a.snapshot().tabs.len(), 1);
+}
+
+#[test]
 fn the_tab_bar_hides_by_setting_or_shortcut_and_tab_switches_show_their_name() {
     let mut a = app(1);
     assert!(!a.tab_bar_hidden());
