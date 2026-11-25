@@ -202,6 +202,7 @@ pub(crate) enum Drag {
     Button(HitArea),
     TabClose(usize),
     TabMenu,
+    SettingsButton,
     SidebarResize { width: f32 },
     Plus,
     SettingsSlider { item: usize, track: Rect, x: f32 },
@@ -2659,6 +2660,12 @@ impl App {
             return;
         }
         if !self.tab_bar_hidden() && self.chrome.tab_bar.contains(x, y) {
+            if self.chrome.settings.contains(x, y) {
+                if button == MouseButton::Left {
+                    self.drag = Drag::SettingsButton;
+                }
+                return;
+            }
             if self.chrome.tab_menu.contains(x, y) {
                 if button == MouseButton::Left {
                     self.drag = Drag::TabMenu;
@@ -2830,6 +2837,9 @@ impl App {
                 let menu = self.chrome.tab_menu;
                 self.open_tab_menu(self.active, menu.x, menu.bottom());
             }
+            Drag::SettingsButton if button == MouseButton::Left && !self.tab_bar_hidden() && self.chrome.settings.contains(x, y) => {
+                self.run(Action::Settings);
+            }
             Drag::Plus if self.chrome.plus.contains(x, y) => self.open_default_tab(),
             _ => {}
         }
@@ -2928,7 +2938,9 @@ impl App {
             HitArea::Maximize
         } else if c.close.contains(x, y) {
             HitArea::Close
-        } else if c.caption.contains(x, y) && !c.plus.contains(x, y) && !c.tab_menu.contains(x, y) && !c.tabs.iter().any(|t| t.rect.contains(x, y)) {
+        } else if c.caption.contains(x, y) && !c.plus.contains(x, y) && !c.tab_menu.contains(x, y)
+            && !c.settings.contains(x, y) && !c.tabs.iter().any(|t| t.rect.contains(x, y))
+        {
             HitArea::Caption
         } else {
             HitArea::Client

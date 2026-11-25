@@ -18,6 +18,7 @@ pub use crate::tabs::{bare_chrome, chrome, Chrome, TabSlot, TAB_H};
 const PAD: f32 = 6.0;
 const G_CLOSE: &str = "\u{E8BB}";
 const G_PLUS: &str = "\u{E710}";
+const G_SETTINGS: &str = "\u{E713}";
 const G_MIN: &str = "\u{E921}";
 const G_MAX: &str = "\u{E922}";
 const G_RESTORE: &str = "\u{E923}";
@@ -690,6 +691,8 @@ impl App {
             Some(TabHover::Plus)
         } else if c.tab_menu.contains(mx, my) {
             Some(TabHover::Menu)
+        } else if c.settings.contains(mx, my) {
+            Some(TabHover::Settings)
         } else {
             c.tabs.iter().zip(&self.tabs).find(|(slot, _)| slot.rect.contains(mx, my)).map(|(slot, tab)| {
                 if slot.close.contains(mx, my) { TabHover::Close(tab.key) } else { TabHover::Tab(tab.key) }
@@ -843,6 +846,16 @@ impl App {
         }
         if let Some(start) = dragged_instances {
             g.dl.instances[start..].rotate_left(tabs_end - start);
+        }
+        if c.settings.w > 0.0 && c.settings.h > 0.0 {
+            let pressed = self.drag == Drag::SettingsButton && hot == Some(TabHover::Settings);
+            let fill = if pressed { Some(theme.button_press) }
+                else { hover_fill(&self.hover_state.tabs, TabHover::Settings, now, theme.button_hover) };
+            if let Some(fill) = fill {
+                g.dl.round_rect(c.settings, fill, (6.0 * s).round());
+            }
+            let gear = FontStyle::new(FontFamily::Icons, (16.0 * s).round(), false);
+            centered(g, c.settings, G_SETTINGS, gear, theme.text);
         }
         g.dl.set_clip(Some(c.caption));
         for (r, glyph, area) in [(c.min, G_MIN, HitArea::Minimize), (c.max, if maximized { G_RESTORE } else { G_MAX }, HitArea::Maximize), (c.close, G_CLOSE, HitArea::Close)] {

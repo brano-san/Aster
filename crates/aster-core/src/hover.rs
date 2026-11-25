@@ -9,6 +9,7 @@ pub(crate) enum TabHover {
     Close(u64),
     Plus,
     Menu,
+    Settings,
 }
 
 #[derive(Default)]

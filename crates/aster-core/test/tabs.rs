@@ -284,9 +284,13 @@ fn each_bar_position_separates_panes_tabs_and_caption_buttons() {
         }
         assert!(encloses(c.tab_bar, c.plus));
         assert!(encloses(c.tab_bar, c.tab_menu));
+        assert!(c.settings.w > 0.0 && c.settings.h > 0.0 && encloses(c.tab_bar, c.settings));
         let (x, y) = center(c.tab_menu);
         assert_eq!(a.hit_test(x, y), HitArea::Client);
         assert!(if c.vertical { c.plus.bottom() <= c.tab_menu.y } else { c.plus.right() <= c.tab_menu.x });
+        let (x, y) = center(c.settings);
+        assert_eq!(a.hit_test(x, y), HitArea::Client);
+        assert!(if c.vertical { c.tab_menu.bottom() <= c.settings.y } else { c.tab_menu.right() <= c.settings.x });
         for slot in &c.tabs {
             assert!(slot.rect.w > 0.0 && encloses(c.tab_bar, slot.rect) && encloses(slot.rect, slot.close));
             let (x, y) = center(slot.rect);
@@ -318,7 +322,7 @@ fn fixed_width_shrinks_to_fit_and_pins_keep_their_compact_slot() {
     let many = a.tab_chrome();
     assert_eq!(many.tabs[0].rect.w, 48.0);
     assert_eq!(many.tabs[a.active].rect.w, 84.0);
-    assert!(many.plus.right() <= many.min.x);
+    assert!(many.tab_menu.right() <= many.settings.x && many.settings.right() <= many.min.x);
 }
 
 #[test]
@@ -355,6 +359,28 @@ fn tab_menu_button_opens_the_active_tab_menu_and_can_be_hidden() {
     a.on_event(Event::MouseDown { x: tab.x + 1.0, y: tab.y + 1.0, button: MouseButton::Right, clicks: 1 });
     assert!(a.menu_open());
     assert_eq!(a.active, 0);
+}
+
+#[test]
+fn clicking_the_settings_button_opens_and_reuses_the_settings_tab() {
+    let mut a = app(1);
+    a.config.appearance.tab_menu_button = false;
+    a.chrome = a.tab_chrome();
+    let x = a.chrome.min.x - 26.0;
+    let y = a.chrome.caption.h / 2.0;
+    let click = |a: &mut App| {
+        assert_eq!(a.hit_test(x, y), crate::input::HitArea::Client);
+        a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+        a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+    };
+    click(&mut a);
+    assert!(a.settings.is_some());
+    assert_eq!(a.tab_count(), 2);
+    a.activate(0);
+    a.chrome = a.tab_chrome();
+    click(&mut a);
+    assert!(a.settings.is_some());
+    assert_eq!(a.tab_count(), 2);
 }
 
 #[test]

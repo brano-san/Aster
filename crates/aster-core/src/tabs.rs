@@ -20,6 +20,7 @@ pub struct Chrome {
     pub tabs: Vec<TabSlot>,
     pub plus: Rect,
     pub tab_menu: Rect,
+    pub settings: Rect,
     pub min: Rect,
     pub max: Rect,
     pub close: Rect,
@@ -60,10 +61,12 @@ impl Chrome {
         let span = if self.vertical { tab_bar.h } else if top { self.min.x } else { tab_bar.w };
         let margin = (8.0 * s).round().min(span);
         let plus_span = row.min(span - margin);
+        let settings_span = if span - margin - plus_span >= row { row } else { 0.0 };
+        let remaining = span - margin - plus_span - settings_span;
         let menu_width = (24.0 * s).round();
-        let menu_span = if appearance.tab_menu_button && tabs > 0 && span - margin - plus_span >= menu_width { menu_width } else { 0.0 };
-        let gap = (4.0 * s).round().min(span - margin - plus_span - menu_span);
-        let available = (span - margin - plus_span - menu_span - gap - (12.0 * s).round()).max(0.0);
+        let menu_span = if appearance.tab_menu_button && tabs > 0 && remaining >= menu_width { menu_width } else { 0.0 };
+        let gap = (4.0 * s).round().min(remaining - menu_span);
+        let available = (remaining - menu_span - gap - (12.0 * s).round()).max(0.0);
         let pin_width = (48.0 * s).round();
         let preferred = (if appearance.tab_width == TabWidth::Fixed { 200.0 } else { 220.0 } * s).round();
         let regular_width = ((available - pinned as f32 * pin_width) / tabs.saturating_sub(pinned).max(1) as f32)
@@ -120,6 +123,14 @@ impl Chrome {
                 Rect::new(plus.x, plus.bottom(), plus.w, menu_span)
             } else {
                 Rect::new(plus.right(), plus.y, menu_span, plus.h)
+            };
+        }
+        if settings_span > 0.0 {
+            let start = span - margin - settings_span;
+            self.settings = if self.vertical {
+                Rect::new(self.plus.x, tab_bar.y + start, self.plus.w, settings_span)
+            } else {
+                Rect::new(tab_bar.x + start, self.plus.y, settings_span, self.plus.h)
             };
         }
     }
