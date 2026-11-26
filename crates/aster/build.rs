@@ -22,6 +22,8 @@ fn main() {
         .arg("aster.rc")
         .status()
         .expect("run the Windows SDK resource compiler");
-    assert!(status.success(), "compiling the application icon failed: {status}");
+    assert!(status.success(), "compiling the application resources failed: {status}");
     println!("cargo:rustc-link-arg-bin=aster={}", resource.display());
+    println!("cargo:rustc-link-arg-bin=aster=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg-bin=aster=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'");
 }

@@ -1,9 +1,9 @@
 use std::ffi::OsString;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
-use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetKeyValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ};
+use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ, RRF_RT_REG_SZ};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Value {
@@ -17,6 +17,22 @@ impl Value {
 
 fn status(error: WIN32_ERROR) -> io::Result<()> {
     error.ok().map_err(|_| io::Error::from_raw_os_error(error.0 as i32))
+}
+
+pub fn read_text(path: &str, name: &str) -> io::Result<Option<OsString>> {
+    let (path, name) = (HSTRING::from(path), HSTRING::from(name));
+    let mut len = 0;
+    let result = unsafe { RegGetValueW(HKEY_CURRENT_USER, &path, &name, RRF_RT_REG_SZ, None, None, Some(&mut len)) };
+    if matches!(result, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
+        return Ok(None);
+    }
+    status(result)?;
+    let mut text = vec![0u16; (len as usize).div_ceil(2)];
+    status(unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, &path, &name, RRF_RT_REG_SZ, None, Some(text.as_mut_ptr().cast()), Some(&mut len))
+    })?;
+    let end = text.iter().position(|&unit| unit == 0).unwrap_or(text.len());
+    Ok(Some(OsString::from_wide(&text[..end])))
 }
 
 pub fn write(path: &str, values: &[(&str, Value)]) -> io::Result<()> {

@@ -21,7 +21,7 @@
 
 Готовые сборки — на странице [Releases](https://github.com/brano-san/Aster/releases):
 
-* **Windows 10/11:** скачайте `aster-<версия>-x86_64-windows.zip`, распакуйте в любую папку и запустите `aster.exe`. Права администратора не нужны.
+* **Windows 10/11:** запустите `aster-<версия>-x86_64-windows-setup.exe` и выберите папку установки и ярлыки. Права администратора не нужны. Для запуска из папки скачайте ZIP и откройте `aster.exe` после распаковки.
 * **Linux (Wayland / X11):** скачайте `aster-<версия>-x86_64-linux.tar.gz`, распакуйте и запустите `./aster`. Нужны EGL / OpenGL ES и xkbcommon (на Debian и Ubuntu: `libegl1`, `libgles2`, `libgl1-mesa-dri`, `libxkbcommon-x11-0`); сборка совместима с glibc 2.35 (Ubuntu 22.04) и новее.
 
 Откройте настройки шестерёнкой справа в полосе вкладок или нажмите `Ctrl+,`. Файл `config.toml` создаётся при первом запуске в `%APPDATA%\Aster` (Windows) или `~/.config/aster` (Linux).

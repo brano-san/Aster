@@ -1,1 +1,27 @@
+#include <windows.h>
+#include <commctrl.h>
+
 1 ICON "../../assets/windows/aster.ico"
+
+101 DIALOGEX 0, 0, 340, 190
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "Aster Setup"
+FONT 9, "Segoe UI", 400, 0, 1
+BEGIN
+    CONTROL         "", 1012, "Static", SS_ICON | SS_CENTERIMAGE, 16, 13, 25, 25
+    LTEXT           "", 1001, 52, 12, 272, 17, SS_NOPREFIX
+    LTEXT           "", 1002, 52, 33, 272, 29, SS_NOPREFIX
+    LTEXT           "", 1003, 16, 72, 307, 12
+    EDITTEXT        1004, 16, 86, 246, 15, ES_AUTOHSCROLL
+    PUSHBUTTON      "", 1005, 269, 86, 55, 15
+    AUTOCHECKBOX    "", 1006, 16, 113, 308, 13
+    AUTOCHECKBOX    "", 1007, 16, 131, 308, 13
+    AUTOCHECKBOX    "", 1008, 16, 86, 308, 13
+    CONTROL         "", 1009, "msctls_progress32", PBS_MARQUEE, 16, 77, 308, 12
+    EDITTEXT        1010, 16, 72, 308, 73, ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL
+    CONTROL         "", -1, "Static", SS_ETCHEDHORZ, 0, 155, 340, 1
+    PUSHBUTTON      "", 1011, 127, 164, 61, 17
+    DEFPUSHBUTTON   "", IDOK, 195, 164, 61, 17
+    PUSHBUTTON      "", IDCANCEL, 263, 164, 61, 17
+END

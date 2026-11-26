@@ -25,6 +25,15 @@ fn derives_the_user_install_paths() {
 }
 
 #[test]
+fn accepts_a_custom_directory_but_rejects_roots_and_relative_paths() {
+    let paths = InstallPaths::from_dir(PathBuf::from(r"D:\My Apps\Aster")).unwrap();
+    assert_eq!(paths.exe, Path::new(r"D:\My Apps\Aster\aster.exe"));
+    for path in [r"D:\", r"D:\Apps\..", r"D:Apps", r"Apps\Aster", r"\\server\share\Aster", r"D:\Apps\Aster:test"] {
+        assert!(InstallPaths::from_dir(PathBuf::from(path)).is_err(), "{path}");
+    }
+}
+
+#[test]
 fn plans_uninstall_registration_and_rounds_size_up() {
     let paths = InstallPaths::new(Path::new(r"C:\Some User\Local"));
     let values = uninstall_values(&paths, "1.2.3", 1025);
@@ -43,7 +52,7 @@ fn plans_uninstall_registration_and_rounds_size_up() {
 }
 
 #[test]
-fn deferred_removal_handles_windows_command_metacharacters_in_paths() {
+fn deferred_removal_preserves_other_files_in_a_custom_directory() {
     let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(".tmp");
     fs::create_dir_all(&scratch).unwrap();
     let dir = scratch.canonicalize().unwrap().join(format!("Aster & %TEMP% !{}", std::process::id()));
@@ -52,16 +61,19 @@ fn deferred_removal_handles_windows_command_metacharacters_in_paths() {
     fs::create_dir_all(&install).unwrap();
     fs::create_dir_all(&settings).unwrap();
     fs::write(install.join("aster.exe"), "installed").unwrap();
+    fs::write(install.join("notes.txt"), "user data").unwrap();
     fs::write(settings.join("config.toml"), "settings").unwrap();
 
-    assert!(delete_after_exit(&install, None).unwrap().wait().unwrap().success());
-    assert!(!install.exists());
+    assert!(delete_after_exit(&install.join("aster.exe")).unwrap().wait().unwrap().success());
+    assert!(!install.join("aster.exe").exists());
+    assert!(install.join("notes.txt").exists());
     assert!(settings.join("config.toml").exists());
-    fs::create_dir_all(&install).unwrap();
 
-    assert!(delete_after_exit(&install, Some(&settings)).unwrap().wait().unwrap().success());
+    fs::remove_file(install.join("notes.txt")).unwrap();
+    assert!(delete_after_exit(&install.join("aster.exe")).unwrap().wait().unwrap().success());
     assert!(!install.exists());
-    assert!(!settings.exists());
+    fs::remove_file(settings.join("config.toml")).unwrap();
+    fs::remove_dir(settings).unwrap();
     fs::remove_dir(dir.join("Programs")).unwrap();
     fs::remove_dir(dir.join("Roaming")).unwrap();
     fs::remove_dir(dir).unwrap();
