@@ -1,6 +1,12 @@
 # Aster
 
 <p align="center">
+  <a href="https://github.com/brano-san/Aster">
+    <img src="assets/aster-128.png" alt="Aster logo" width="128" height="128">
+  </a>
+</p>
+
+<p align="center">
   <a href="https://github.com/brano-san/Aster/actions"><img src="https://img.shields.io/github/actions/workflow/status/brano-san/Aster/ci.yml?branch=master&style=flat-square&logo=github" alt="CI Status"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-stable-orange?style=flat-square&logo=rust" alt="Rust stable"></a>
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-blue?style=flat-square" alt="Platform">
