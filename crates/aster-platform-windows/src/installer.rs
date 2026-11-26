@@ -8,6 +8,7 @@ use std::process::{Child, Command};
 use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_REPARSE_POINT, MOVEFILE_REPLACE_EXISTING, MoveFileExW};
 use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows::Win32::UI::Shell::SHCNE_UPDATEITEM;
 use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MESSAGEBOX_STYLE, MessageBoxW};
 use windows::core::{HSTRING, w};
 use crate::shell_registry::{self, Value};
@@ -98,6 +99,7 @@ pub fn state() -> aster_core::installation::State {
 }
 
 pub fn refresh(exe: &Path, version: &str) -> io::Result<()> {
+    crate::shortcut::notify(exe, SHCNE_UPDATEITEM);
     let Ok(paths) = InstallPaths::current() else { return Ok(()) };
     if !paths.contains(exe) { return Ok(()) }
     let values = uninstall_values(&paths, version, fs::metadata(exe)?.len());
@@ -158,6 +160,7 @@ fn install(paths: &InstallPaths, source: &Path, version: &str, silent: bool) -> 
         let result = fs::copy(source, &stage).and_then(|_| replace_executable(&stage, &paths.exe));
         if result.is_err() { let _ = fs::remove_file(&stage); }
         result?;
+        crate::shortcut::notify(&paths.exe, SHCNE_UPDATEITEM);
     }
     crate::shortcut::apply_for(Some(true), &paths.exe).map_err(io_platform)?;
     shell_registry::write(UNINSTALL_KEY, &uninstall_values(paths, version, fs::metadata(&paths.exe)?.len()))?;

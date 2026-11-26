@@ -1,6 +1,16 @@
 use super::*;
 
 #[test]
+fn legacy_padding_applies_to_each_edge_except_explicit_overrides() {
+    let config = Config::parse("version = 1\n[terminal]\npadding = 12\npadding-right = 3\n").unwrap();
+    let value = &config.terminal;
+    assert_eq!([value.padding_top, value.padding_bottom, value.padding_right, value.padding_left], [12.0, 12.0, 3.0, 12.0]);
+    let serialized = config.to_text();
+    assert!(!serialized.lines().any(|line| line.starts_with("padding =")));
+    assert_eq!(Config::parse(&serialized).unwrap().terminal, *value);
+}
+
+#[test]
 fn an_empty_file_gives_the_defaults() {
     let c = Config::parse("").unwrap();
     assert_eq!(c, Config::default());
@@ -67,13 +77,13 @@ fn dock_screen_accepts_named_and_numeric_toml_values() {
 
 #[test]
 fn last_tab_option_migrates_to_terminal_and_the_new_key_wins() {
-    let legacy = "[appearance]\nlast-tab-closes-window = false";
+    let legacy = "[appearance]\nlast-tab-closes-window = true";
     let migrated = Config::parse(legacy).unwrap();
-    assert!(!migrated.terminal.close_window_with_last_tab);
+    assert!(migrated.terminal.close_window_with_last_tab);
     let text = migrated.to_text();
-    assert!(text.contains("close-window-with-last-tab = false"));
+    assert!(text.contains("close-window-with-last-tab = true"));
     assert!(!text.contains("last-tab-closes-window"));
-    assert!(Config::parse(&format!("{legacy}\n[terminal]\nclose-window-with-last-tab = true")).unwrap().terminal.close_window_with_last_tab);
+    assert!(!Config::parse(&format!("{legacy}\n[terminal]\nclose-window-with-last-tab = false")).unwrap().terminal.close_window_with_last_tab);
 }
 
 #[test]
@@ -138,8 +148,8 @@ fn unversioned_config_migrates_camel_case_paste_settings_and_writes_version_firs
 
 #[test]
 fn versioned_config_keeps_legacy_window_pane_and_environment_options() {
-    let config = Config::parse("version = 1\n[appearance]\nlast-tab-closes-window = false\n[terminal]\nfocus-follows-mouse = true\n[terminal.environment]\nFIRST = 'old'\n").unwrap();
-    assert!(!config.terminal.close_window_with_last_tab);
+    let config = Config::parse("version = 1\n[appearance]\nlast-tab-closes-window = true\n[terminal]\nfocus-follows-mouse = true\n[terminal.environment]\nFIRST = 'old'\n").unwrap();
+    assert!(config.terminal.close_window_with_last_tab);
     assert!(config.panes.focus_follows_mouse);
     assert_eq!(config.terminal.environment["FIRST"], "old");
 

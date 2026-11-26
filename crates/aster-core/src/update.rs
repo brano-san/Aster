@@ -420,6 +420,28 @@ impl App {
         self.effects.push(Effect::Update(UpdateRequest::Check { manual: true }));
     }
 
+    fn application_check_in_progress(&self) -> bool {
+        self.tab_toast.as_ref().is_some_and(|toast| toast.checking && toast.fade_at > self.clock())
+    }
+
+    pub(crate) fn application_update_label(&self) -> &'static str {
+        match self.update_notice.as_ref().map(|notice| notice.stage) {
+            Some(Stage::Offer) => t("Update"),
+            Some(Stage::Downloading) => t("Downloading…"),
+            Some(Stage::Installing) => t("Installing and restarting…"),
+            _ if self.application_check_in_progress() => t("Checking for updates…"),
+            _ => t("Check for updates"),
+        }
+    }
+
+    pub(crate) fn application_update(&mut self) {
+        if self.update_notice.as_ref().is_some_and(|notice| notice.stage == Stage::Offer) {
+            self.press_update(NoticeButton::Install);
+        } else if !self.application_check_in_progress() {
+            self.check_updates();
+        }
+    }
+
     pub(crate) fn toast(&mut self, text: String, lasting: Duration) {
         self.show_toast(text, lasting, false);
     }

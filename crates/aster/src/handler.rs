@@ -153,14 +153,6 @@ pub struct Handler<P: Platform> {
     restart_preparing: bool,
 }
 
-fn ssh_hosts<P: Platform>(ssh: &str) -> Vec<Profile> {
-    let Some(home) = P::home_dir() else { return Vec::new() };
-    let dir = home.join(".ssh");
-    let Ok(text) = std::fs::read_to_string(dir.join("config")) else { return Vec::new() };
-    let read = |p: &std::path::Path| std::fs::read_to_string(p).ok();
-    aster_ssh::config::parse(&text, &dir, &home, &read).iter().map(|h| aster_core::ssh::host_profile(&h.alias, ssh)).collect()
-}
-
 fn capturing() -> bool {
     std::env::var_os("ASTER_CAPTURE").is_some() && std::env::var_os("ASTER_CAPTURE_SESSION").is_none()
 }
@@ -257,7 +249,7 @@ impl<P: Platform> Handler<P> {
         let mut profiles = P::shells();
         let ssh = P::ssh_command().or_else(|| (config.ssh.client == SshClient::Native).then(|| "ssh".to_owned()));
         if let Some(cmd) = &ssh {
-            profiles.extend(ssh_hosts::<P>(cmd));
+            profiles.extend(crate::ssh_profiles::discover::<P>(cmd, crate::config_dir::<P>()));
         }
         profiles.extend(crate::serial::profiles());
         let (exit_tx, exits) = unbounded();
@@ -823,6 +815,12 @@ impl<P: Platform> Handler<P> {
                 let clear = launch.delegation.is_none() && launch.ssh.is_none() && launch.clear_after_connect == Some(true);
                 let hosted = launch.delegation.is_none() && self.config.terminal.persistent_sessions && launch.local_environment.is_some() && !launch.elevated && !capturing();
                 let app = self.windows.get(&id).map(|state| &state.app);
+                if let Some(error) = app.and_then(|app| app.system_ssh_proxy_error(pane)) {
+                    if let Some(state) = self.windows.get_mut(&id) {
+                        state.app.spawn_failed(pane, error);
+                    }
+                    return;
+                }
                 let previous = app.and_then(|app| app.pane_host_id(pane));
                 let title = app.and_then(|app| app.pane_profile_name(pane)).unwrap_or(&launch.command).to_owned();
                 let req = SpawnRequest {
@@ -1092,8 +1090,8 @@ impl<P: Platform> Handler<P> {
                     }
                 }
             }
-            Effect::Surface(backdrop) => {
-                let got = window.set_surface(backdrop);
+            Effect::Surface { backdrop, blur } => {
+                let got = window.set_surface(backdrop, blur);
                 if let Some(s) = self.windows.get_mut(&id) {
                     s.app.set_surface(got.translucent, got.backdrop);
                 }
@@ -1848,7 +1846,12 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         }
         let dark = app.is_dark();
         window.set_dark(dark);
-        self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx: Gfx::new(text, ATLAS), renderer: None, quake: Default::default() });
+        let mut gfx = Gfx::new(text, ATLAS);
+        match crate::background::png(&include_bytes!("../../../assets/aster-128.png")[..]) {
+            Ok(icon) => gfx.add_image(aster_core::settings::APPLICATION_ICON, icon.size[0], icon.size[1], icon.rgba),
+            Err(error) => tracing::error!(%error, "Could not decode the application icon"),
+        }
+        self.windows.insert(window.id(), State { app, flow, output: HashMap::new(), gfx, renderer: None, quake: Default::default() });
         if first && self.config_startup != ConfigStartup::Prompt {
             self.open_pending_windows(window, dark, !hidden);
             self.applied = None;

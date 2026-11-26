@@ -31,7 +31,7 @@ fn tray_prefers_last_focus_among_surviving_windows() {
     let (tx, _events) = mpsc::channel();
     let queue = HubQueue { hwnd: 0, tx };
     let mut nodes: Vec<Rc<Node<()>>> = (1..=3).map(|id| Rc::new(Node {
-        window: Win32Window::new(id, HWND::default(), queue.clone()), queue: RefCell::default(),
+        window: Win32Window::new(id, HWND::default(), queue.clone(), Default::default()), queue: RefCell::default(),
         ready: Cell::new(false), focused_at: Cell::new(None), shared: std::ptr::null(),
     })).collect();
     assert_eq!(recent_window(&nodes).unwrap().window.id, 3);

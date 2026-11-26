@@ -99,7 +99,7 @@ fn bitmap(source_size: [u32; 2], decoded: [u32; 2], pixels: &[u8], format: Pixel
     Ok(Bitmap { source_size, size, rgba })
 }
 
-fn png(reader: impl Read) -> Result<Bitmap, Box<dyn Error>> {
+pub(crate) fn png(reader: impl Read) -> Result<Bitmap, Box<dyn Error>> {
     let mut decoder = png::Decoder::new(reader);
     decoder.set_limits(png::Limits { bytes: DECODE_BYTES });
     decoder.set_transformations(png::Transformations::normalize_to_color8());

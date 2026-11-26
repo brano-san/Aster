@@ -65,7 +65,8 @@ impl Composition {
     fn new(hwnd: windows::Win32::Foundation::HWND) -> Result<Self, PlatformError> {
         unsafe {
             let device: IDCompositionDesktopDevice = DCompositionCreateDevice2(None::<&windows::core::IUnknown>).map_err(err)?;
-            let target = device.CreateTargetForHwnd(hwnd, false).map_err(err)?;
+            // Leave the lower visual tree available for the optional background blur.
+            let target = device.CreateTargetForHwnd(hwnd, true).map_err(err)?;
             let visual = device.CreateVisual().map_err(err)?;
             target.SetRoot(&visual).map_err(err)?;
             Ok(Self { device, _target: target, visual })

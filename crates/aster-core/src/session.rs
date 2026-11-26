@@ -1,4 +1,4 @@
-use crate::app::{App, Tab};
+use crate::app::{App, Pane, Tab};
 use crate::panes::{Axis, Node, PaneId};
 use crate::profile::Profile;
 use serde::{Deserialize, Serialize};
@@ -91,12 +91,35 @@ impl SessionState {
 }
 
 fn restore_text(lines: &[String]) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut output = Vec::new();
     for line in lines {
-        out.extend_from_slice(line.as_bytes());
-        out.extend_from_slice(b"\r\n");
+        output.extend_from_slice(line.as_bytes());
+        output.extend_from_slice(b"\r\n");
     }
-    out
+    output
+}
+
+#[derive(Clone, Copy)]
+enum RestoreMode {
+    ClosedTab,
+    Startup { hosted: bool },
+}
+
+impl Pane {
+    pub(crate) fn restore_history(&mut self) {
+        let Some(lines) = self.restore_buffer.take() else { return };
+        let mut output = restore_text(&lines);
+        // On the primary screen, erase-display moves its populated rows into scrollback.
+        output.extend_from_slice(b"\x1b[2J\x1b[H");
+        self.restore_output(&output);
+    }
+
+    fn restore_output(&mut self, output: &[u8]) {
+        let mut terminal = self.terminal.lock();
+        terminal.feed(output);
+        self.seen = terminal.output_seq();
+        self.activity_seq = self.seen;
+    }
 }
 
 impl App {
@@ -173,11 +196,10 @@ impl App {
 
     pub fn finish_pane_restore(&mut self, id: PaneId, reattached: bool) {
         let Some(pane) = self.panes.get_mut(&id) else { return };
-        if let Some(buffer) = pane.restore_buffer.take().filter(|_| !reattached) {
-            let mut terminal = pane.terminal.lock();
-            terminal.feed(&restore_text(&buffer));
-            pane.seen = terminal.output_seq();
-            pane.activity_seq = pane.seen;
+        if reattached {
+            pane.restore_buffer = None;
+        } else {
+            pane.restore_history();
         }
     }
 
@@ -241,33 +263,29 @@ impl App {
     }
 
     pub(crate) fn build(&mut self, state: &NodeState) -> Node {
-        self.build_session_node(state, false)
+        self.build_session_node(state, RestoreMode::ClosedTab)
     }
 
-    fn build_session_node(&mut self, state: &NodeState, hosted: bool) -> Node {
+    fn build_session_node(&mut self, state: &NodeState, mode: RestoreMode) -> Node {
         match state {
             NodeState::Pane(p) => {
                 let profile = Profile { elevated: false, ..p.profile.clone() };
                 let id: PaneId = self.new_pane_in(profile, p.cwd.clone());
                 if let Some(pane) = self.panes.get_mut(&id) {
-                    pane.host_id = p.host_id.filter(|_| hosted && pane.profile.is_local());
+                    pane.host_id = p.host_id.filter(|_| matches!(mode, RestoreMode::Startup { hosted: true }) && pane.profile.is_local());
                     pane.name = p.name.clone().filter(|name| !name.trim().is_empty());
-                    let mut t = pane.terminal.lock();
-                    if !p.buffer.is_empty() && pane.host_id.is_some() {
-                        pane.restore_buffer = Some(p.buffer.clone());
-                    } else if !p.buffer.is_empty() {
-                        t.feed(&restore_text(&p.buffer));
+                    if !p.buffer.is_empty() {
+                        match mode {
+                            RestoreMode::ClosedTab => pane.restore_output(&restore_text(&p.buffer)),
+                            RestoreMode::Startup { .. } => pane.restore_buffer = Some(p.buffer.clone()),
+                        }
                     }
-                    let seen = t.output_seq();
-                    drop(t);
-                    pane.seen = seen;
-                    pane.activity_seq = seen;
                 }
                 Node::Leaf(id)
             }
             NodeState::Split { vertical, ratio, a, b } => {
-                let a = self.build_session_node(a, hosted);
-                let b = self.build_session_node(b, hosted);
+                let a = self.build_session_node(a, mode);
+                let b = self.build_session_node(b, mode);
                 Node::Split { axis: if *vertical { Axis::Vertical } else { Axis::Horizontal }, ratio: ratio.clamp(0.05, 0.95), a: Box::new(a), b: Box::new(b) }
             }
         }
@@ -275,7 +293,7 @@ impl App {
 
     pub fn restore(&mut self, state: &WindowState) -> bool {
         for tab in &state.tabs {
-            let root = self.build_session_node(&tab.root, self.config.terminal.persistent_sessions);
+            let root = self.build_session_node(&tab.root, RestoreMode::Startup { hosted: self.config.terminal.persistent_sessions });
             let order = root.panes();
             self.background_launches.extend(order.iter().copied().filter(|id| self.panes[id].host_id.is_some()));
             let focus = order.get(tab.focus).or(order.first()).copied().unwrap_or(0);

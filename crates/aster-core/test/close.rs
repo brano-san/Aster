@@ -40,7 +40,8 @@ fn idle_tabs_close_at_once_and_busy_ones_ask_first() {
     assert_eq!(a.tabs.len(), 1);
     a.run(Action::CloseTab);
     key(&mut a, Key::Enter);
-    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
+    assert!(a.tabs.is_empty());
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
 }
 
 #[test]

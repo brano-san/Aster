@@ -23,11 +23,15 @@ pub(crate) struct OverlayList<'a> {
 }
 
 impl<'a> OverlayList<'a> {
-    pub fn new(content: Rect, s: f32, overlay: &'a Overlay) -> Self {
+    pub fn new(content: Rect, s: f32, overlay: &'a Overlay, anchor: Option<Rect>) -> Self {
         let profiles = overlay.kind.is_profile_picker();
         let width = (if profiles { 520.0 } else { 560.0 } * s).min((content.w - 32.0 * s).max(200.0 * s)).min(content.w).round();
-        let x = (content.x + (content.w - width) / 2.0).round();
-        let y = content.y + (10.0 * s).round();
+        let x = anchor.map_or(content.x + (content.w - width) / 2.0, |button| {
+            let margin = ((content.w - width) / 2.0).clamp(0.0, 8.0 * s);
+            button.x.clamp(content.x + margin, (content.right() - width - margin).max(content.x + margin))
+        }).round();
+        let inset = (10.0 * s).round();
+        let y = content.y + inset;
         let input = Rect::new(x, y, width, (if profiles { 44.0 } else { 40.0 } * s).round());
         let item_height = (if profiles { 34.0 } else { 30.0 } * s).round();
         let header_height = (30.0 * s).round();
@@ -64,7 +68,22 @@ impl<'a> OverlayList<'a> {
         let list = Rect::new(x, top, width, first_page.max(item_height).min(available));
         let frame = Rect::new(input.x, input.y, width, list.bottom() + pad - input.y);
         let max = (y - list.bottom()).max(0.0);
-        Self { frame, input, list, max, item_height, items, headers, dividers }
+        let mut layout = Self { frame, input, list, max, item_height, items, headers, dividers };
+        if let Some(button) = anchor {
+            let lowest = (content.bottom() - inset - frame.h).max(input.y);
+            let target = if button.y >= content.bottom() { lowest } else { button.y.clamp(input.y, lowest) };
+            let dy = (target - input.y).round();
+            layout.frame.y += dy;
+            layout.input.y += dy;
+            layout.list.y += dy;
+            for (top, rect) in &mut layout.items {
+                *top += dy;
+                rect.y += dy;
+            }
+            for (_, rect) in &mut layout.headers { rect.y += dy; }
+            for rect in &mut layout.dividers { rect.y += dy; }
+        }
+        layout
     }
 
     pub fn target(&self, overlay: &Overlay) -> f32 {
@@ -138,7 +157,7 @@ impl App {
         };
         let (animate, now, scale) = (self.animations(), self.clock(), self.ui());
         let Some(overlay) = self.overlay.as_mut().filter(|o| o.kind.scrolls_smoothly()) else { return false };
-        let layout = OverlayList::new(self.chrome.content, scale, overlay);
+        let layout = OverlayList::new(self.chrome.content, scale, overlay, overlay.tab_anchor(self.chrome.tab_menu));
         let previous = layout.target(overlay);
         let target = layout.reveal(overlay.selection_after(delta), previous);
         let position = layout.position(target);
@@ -152,7 +171,7 @@ impl App {
     pub(crate) fn scroll_overlay_wheel(&mut self, dy: f32, pixels: Option<f32>) -> bool {
         let (animate, now, scale) = (self.animations(), self.clock(), self.ui());
         let Some(overlay) = self.overlay.as_mut().filter(|o| o.kind.scrolls_smoothly()) else { return false };
-        let layout = OverlayList::new(self.chrome.content, scale, overlay);
+        let layout = OverlayList::new(self.chrome.content, scale, overlay, overlay.tab_anchor(self.chrome.tab_menu));
         let previous = layout.target(overlay);
         let steps = dy * 3.0;
         let target = self.list_motion.overlay.wheel(previous, layout.max, steps * layout.item_height, pixels, animate, now);

@@ -226,12 +226,9 @@ fn fullscreen_visibility_respects_the_setting_and_restores_the_bar() {
 }
 
 #[test]
-fn closing_the_last_tab_can_keep_its_window_for_another_profile() {
+fn closing_the_last_tab_keeps_the_window_open_by_default() {
     let mut a = app(1);
     let old = a.tabs[0].focus;
-    let mut config = a.config().clone();
-    config.terminal.close_window_with_last_tab = false;
-    a.set_config(config);
     a.run(Action::CloseTab);
     assert!(a.tabs.is_empty());
     assert!(a.overlay.is_none(), "the start page shows instead of a picker");
@@ -239,7 +236,9 @@ fn closing_the_last_tab_can_keep_its_window_for_another_profile() {
     key(&mut a, Key::Enter, Mods::NONE);
     assert_eq!(a.tabs.len(), 1);
     assert_ne!(a.tabs[0].focus, old);
-    a.set_config(Config::default());
+    let mut config = Config::default();
+    config.terminal.close_window_with_last_tab = true;
+    a.set_config(config);
     a.run(Action::CloseTab);
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
 }
@@ -344,17 +343,38 @@ fn disabled_close_buttons_leave_the_slot_clickable_and_middle_click_still_closes
 }
 
 #[test]
-fn tab_menu_button_opens_the_active_tab_menu_and_can_be_hidden() {
-    let mut a = app(2);
+fn arrow_opens_only_profiles_and_plus_opens_the_default() {
+    let mut a = app(0);
+    a.profiles.push(Profile::new("local:b", "Other shell", "b.exe", &[]));
+    a.set_recent(vec!["local:b".into()]);
     let menu = a.chrome.tab_menu;
     assert!(menu.w > 0.0 && a.chrome.plus.right() <= menu.x && menu.right() <= a.chrome.min.x);
-    let (x, y) = (menu.x + menu.w / 2.0, menu.y + menu.h / 2.0);
-    assert_eq!(a.hit_test(x, y), crate::input::HitArea::Client);
-    a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
-    a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
-    assert!(a.menu_open());
-    assert_eq!(a.active, 1);
-    a.close_menu();
+    let click = |a: &mut App, rect: Rect| {
+        let (x, y) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        assert_eq!(a.hit_test(x, y), crate::input::HitArea::Client);
+        a.on_event(Event::MouseDown { x, y, button: MouseButton::Left, clicks: 1 });
+        a.on_event(Event::MouseUp { x, y, button: MouseButton::Left });
+    };
+    click(&mut a, menu);
+    assert_eq!(a.tab_count(), 0);
+    let overlay = a.overlay.as_ref().unwrap();
+    assert!(overlay.items.iter().all(|item| matches!(item.value.as_str(), "recent:local:b" | "local:a" | "local:b")));
+    typed(&mut a, "telnet://example.test");
+    assert!(a.overlay.as_ref().unwrap().shown.is_empty());
+    key(&mut a, Key::Escape, Mods::NONE);
+    click(&mut a, menu);
+    typed(&mut a, "Other shell");
+    key(&mut a, Key::Enter, Mods::NONE);
+    assert_eq!(a.tab_title(0), "Other shell");
+    a.chrome = a.tab_chrome();
+    let plus = a.chrome.plus;
+    click(&mut a, plus);
+    assert_eq!(a.tab_title(1), "Shell");
+}
+
+#[test]
+fn the_profile_arrow_can_be_hidden_and_the_tab_context_menu_still_opens() {
+    let mut a = app(2);
     a.config.appearance.tab_menu_button = false;
     a.chrome = a.tab_chrome();
     assert_eq!(a.chrome.tab_menu, Rect::default());

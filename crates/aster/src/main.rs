@@ -18,6 +18,7 @@ mod secrets;
 mod serial;
 mod session;
 mod shell_integration;
+mod ssh_profiles;
 mod stream;
 mod sync;
 mod update;

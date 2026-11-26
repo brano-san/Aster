@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 mod autostart;
+mod blur;
 mod conpty;
 mod d3d;
 pub mod defterm;
@@ -39,6 +40,9 @@ use std::path::PathBuf;
 use windows::core::{w, PCWSTR};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+// Resource ID from the executable's aster.rc.
+const APP_ICON: PCWSTR = PCWSTR(1 as _);
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
 pub(crate) fn err(e: windows::core::Error) -> PlatformError {

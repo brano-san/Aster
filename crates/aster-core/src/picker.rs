@@ -12,17 +12,19 @@ pub enum ProfileSection {
     Own,
     BuiltIn,
     SshConfig,
+    SshFile,
     SerialPorts,
 }
 
 impl ProfileSection {
-    const ALL: [Self; 4] = [Self::Own, Self::BuiltIn, Self::SshConfig, Self::SerialPorts];
+    const ALL: [Self; 5] = [Self::Own, Self::BuiltIn, Self::SshConfig, Self::SshFile, Self::SerialPorts];
 
     pub fn id(self) -> &'static str {
         match self {
             Self::Own => "own",
             Self::BuiltIn => "built-in",
             Self::SshConfig => "ssh-config",
+            Self::SshFile => "ssh-file",
             Self::SerialPorts => "serial-ports",
         }
     }
@@ -36,6 +38,7 @@ impl ProfileSection {
             Self::Own => "My profiles",
             Self::BuiltIn => "Built-in",
             Self::SshConfig => "From ~/.ssh/config",
+            Self::SshFile => "From ssh-profiles.yaml",
             Self::SerialPorts => "Serial ports",
         }
     }
@@ -45,6 +48,8 @@ impl ProfileSection {
             Self::Own
         } else if p.id.starts_with("ssh:") {
             Self::SshConfig
+        } else if p.id.starts_with("file-config:") {
+            Self::SshFile
         } else if p.id.starts_with("serial:") {
             Self::SerialPorts
         } else {
@@ -57,6 +62,7 @@ impl ProfileSection {
             Self::Own => 2,
             Self::BuiltIn => 4,
             Self::SshConfig => 5,
+            Self::SshFile => 5,
             Self::SerialPorts => 6,
         }
     }
@@ -65,6 +71,7 @@ impl ProfileSection {
 #[derive(Clone, Copy)]
 pub(crate) enum ProfileFilter<'a> {
     All,
+    TabMenu,
     SinglePane,
     Section(ProfileSection),
     Group(&'a str),
@@ -73,7 +80,7 @@ pub(crate) enum ProfileFilter<'a> {
 impl ProfileFilter<'_> {
     fn includes(self, p: &Profile, config: &Config) -> bool {
         match self {
-            Self::All => true,
+            Self::All | Self::TabMenu => true,
             Self::SinglePane => p.layout.is_none(),
             Self::Section(section) => ProfileSection::of(p) == section,
             Self::Group(id) => p.group.as_deref().is_some_and(|name| {

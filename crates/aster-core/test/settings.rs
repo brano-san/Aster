@@ -35,13 +35,13 @@ fn every_setting_points_at_a_config_value_of_the_matching_type() {
         let value = get(&config, s.key).unwrap_or_else(|| panic!("{} is missing", s.key));
         let fits = match s.control {
             Control::Toggle => value.is_bool(),
-            Control::Number { .. } | Control::Slider { .. } => value.is_integer() || value.is_float(),
-            Control::Choice(_) | Control::Segments(_) | Control::Schemes | Control::Profiles | Control::Text | Control::Color | Control::Font { .. } => value.is_str(),
+            Control::Number { .. } | Control::Percent { .. } => value.is_integer() || value.is_float(),
+            Control::Choice(_) | Control::Schemes | Control::Profiles | Control::Text | Control::Color | Control::Font { .. } => value.is_str(),
             Control::StringList => value.is_array(),
             Control::Run { .. } | Control::ReadOnly(_) => unreachable!(),
         };
         assert!(fits, "{} holds {value:?}", s.key);
-        if let Control::Choice(options) | Control::Segments(options) = s.control {
+        if let Control::Choice(options) = s.control {
             assert!(options.iter().any(|(v, _)| Some(*v) == value.as_str()), "{} default is not an option", s.key);
         }
     }
@@ -50,8 +50,8 @@ fn every_setting_points_at_a_config_value_of_the_matching_type() {
 #[test]
 fn window_and_appearance_list_their_own_settings() {
     let keys = |name: &str| SETTINGS.iter().filter(|s| s.section == name).map(|s| s.key).collect::<Vec<_>>();
-    assert_eq!(keys("Window"), ["appearance.opacity", "appearance.backdrop", "appearance.density", "appearance.tab-bar", "appearance.tab-index", "appearance.tab-icon", "appearance.tab-close-buttons", "appearance.tab-menu-button", "appearance.pane-titles", "panes.resize-step", "panes.focus-follows-mouse", "appearance.profile-sidebar", "appearance.profile-sidebar-width", "appearance.tabs-in-fullscreen", "appearance.tab-width", "appearance.tab-bar-position", "appearance.mru-tabs", "appearance.cycle-tabs", "appearance.animations", "terminal.close-window-with-last-tab", "notifications.command-finished", "notifications.activity", "notifications.activity-silence-seconds", "appearance.tray"]);
-    for key in ["terminal.font", "terminal.font-size", "terminal.line-padding", "terminal.padding", "terminal.cursor", "terminal.cursor-blink", "terminal.fallback-font", "appearance.ui-font"] {
+    assert_eq!(keys("Window"), ["appearance.opacity", "appearance.background-blur", "appearance.backdrop", "appearance.density", "appearance.tab-bar", "appearance.tab-index", "appearance.tab-icon", "appearance.tab-close-buttons", "appearance.tab-menu-button", "appearance.pane-titles", "panes.resize-step", "panes.focus-follows-mouse", "appearance.profile-sidebar", "appearance.profile-sidebar-width", "appearance.tabs-in-fullscreen", "appearance.tab-width", "appearance.tab-bar-position", "appearance.mru-tabs", "appearance.cycle-tabs", "appearance.animations", "terminal.close-window-with-last-tab", "notifications.command-finished", "notifications.activity", "notifications.activity-silence-seconds", "appearance.tray"]);
+    for key in ["terminal.font", "terminal.font-size", "terminal.line-padding", "terminal.padding-top", "terminal.padding-bottom", "terminal.padding-right", "terminal.padding-left", "terminal.cursor", "terminal.cursor-blink", "terminal.fallback-font", "appearance.ui-font"] {
         assert!(keys(APPEARANCE).contains(&key));
     }
     assert_eq!(&PAGES[..4], [SYSTEM, APPEARANCE, PROFILES, TERMINAL]);
@@ -102,7 +102,7 @@ fn deleting_a_synced_config_requires_a_second_action() {
 }
 
 #[test]
-fn opacity_uses_the_pointer_position_and_keyboard_steps() {
+fn opacity_uses_a_dropdown_and_keeps_keyboard_steps() {
     let mut a = app();
     a.chrome = a.tab_chrome();
     a.run(Action::Settings);
@@ -113,7 +113,9 @@ fn opacity_uses_the_pointer_position_and_keyboard_steps() {
     let image_opacity = a.config().appearance.background_image_opacity;
     let (x, y) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
     a.settings_click(x, y);
-    a.on_event(Event::MouseUp { x, y, button: crate::input::MouseButton::Left });
+    assert!(!a.settings_geometry().unwrap().suggestions.is_empty());
+    key(&mut a, Key::Home);
+    key(&mut a, Key::Enter);
     assert!(a.config().appearance.opacity < 0.8);
     assert_eq!(a.config().appearance.background_image_opacity, image_opacity);
     let before = a.config().appearance.opacity;
@@ -122,7 +124,42 @@ fn opacity_uses_the_pointer_position_and_keyboard_steps() {
 }
 
 #[test]
-fn settings_section_can_fold_and_still_appears_in_search() {
+fn image_fit_lists_all_modes_and_a_click_selects_the_mode() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    a.run(Action::Settings);
+    typed(&mut a, "background image fit");
+    key(&mut a, Key::Enter);
+    let geometry = a.settings_geometry().unwrap();
+    let menu = a.settings.as_ref().unwrap().choice_menu.as_ref().unwrap();
+    assert_eq!(menu.options.iter().map(|(value, _)| value.as_str().unwrap()).collect::<Vec<_>>(), ["cover", "contain", "stretch", "tile"]);
+    let row = geometry.suggestions.iter().find(|(index, _)| *index == 3).unwrap().1;
+    a.settings_click(row.x + row.w / 2.0, row.y + row.h / 2.0);
+    assert_eq!(a.config().appearance.background_image_fit, crate::background::Fit::Tile);
+    assert!(a.settings.as_ref().unwrap().choice_menu.is_none());
+}
+
+#[test]
+fn blur_starts_at_zero_and_is_only_editable_below_full_opacity() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    a.run(Action::Settings);
+    typed(&mut a, "background blur");
+    key(&mut a, Key::Enter);
+    assert!(a.settings.as_ref().unwrap().choice_menu.is_none());
+    assert_eq!(a.config().appearance.background_blur, 0.0);
+    let mut config = a.config().clone();
+    config.appearance.opacity = 0.75;
+    a.set_config(config);
+    key(&mut a, Key::Enter);
+    assert!(a.settings.as_ref().unwrap().choice_menu.is_some());
+    key(&mut a, Key::End);
+    key(&mut a, Key::Enter);
+    assert_eq!(saved(&mut a).unwrap().appearance.background_blur, 1.0);
+}
+
+#[test]
+fn settings_section_headings_never_hide_rows() {
     let mut a = app();
     a.chrome = a.tab_chrome();
     a.run(Action::Settings);
@@ -130,14 +167,37 @@ fn settings_section_can_fold_and_still_appears_in_search() {
     let geo = a.settings_geometry().unwrap();
     let heading = geo.rows.iter().find(|row| row.kind == RowKind::Section(WINDOW)).unwrap().rect;
     a.settings_click(heading.x + 15.0, heading.y + 18.0);
-    let folded = a.settings_geometry().unwrap();
-    assert_eq!(folded.rows.len(), 1);
-    assert_eq!(folded.rows[0].kind, RowKind::Section(WINDOW));
-    key(&mut a, Key::Enter);
-    assert!(a.settings_geometry().unwrap().rows.len() > 1);
-    a.settings_click(heading.x + 15.0, heading.y + 18.0);
+    assert_eq!(a.settings_geometry().unwrap().rows, geo.rows);
+    a.on_event(Event::Key { key: Key::Up, mods: Mods { alt: true, ..Mods::NONE }, pressed: true });
+    assert_eq!(a.settings_geometry().unwrap().rows, geo.rows);
     typed(&mut a, "opacity");
     assert!(a.settings_geometry().unwrap().rows.iter().any(|row| matches!(row.kind, RowKind::Item(_))));
+}
+
+#[test]
+fn empty_font_input_offers_installed_families_on_open() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    a.set_font_families(vec![], vec!["Interface Family".into()]);
+    a.run(Action::Settings);
+    typed(&mut a, "interface font");
+    key(&mut a, Key::Enter);
+    assert_eq!(a.settings.as_ref().unwrap().font_matches, ["Interface Family"]);
+    assert!(!a.settings_geometry().unwrap().suggestions.is_empty());
+}
+
+#[test]
+fn the_color_scheme_page_displays_the_same_font_sample_as_appearance() {
+    let mut a = app();
+    a.chrome = a.tab_chrome();
+    a.run(Action::Settings);
+    for section in [APPEARANCE, COLORS] {
+        a.show_settings_page(PAGES.iter().position(|page| *page == section).unwrap());
+        let geo = a.settings_geometry().unwrap();
+        let sample = geo.font_sample.expect("font sample");
+        assert!(sample.h > 0.0 && sample.bottom() <= geo.list.y);
+        if let Some(bar) = geo.scheme_bar { assert!(sample.y >= bar.current.bottom()); }
+    }
 }
 
 #[test]
@@ -159,10 +219,14 @@ fn restart_button_tracks_startup_changes_and_uses_the_restart_effect() {
     assert!(a.settings_geometry().unwrap().restart.is_none());
     typed(&mut a, "terminal.open-on-start");
     key(&mut a, Key::Enter);
+    key(&mut a, Key::Home);
+    key(&mut a, Key::Enter);
     assert!(!saved(&mut a).unwrap().terminal.open_on_start);
     let r = a.settings_geometry().unwrap().restart.unwrap();
     a.settings_click(r.x + 4.0, r.y + 4.0);
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Restart)));
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::End);
     key(&mut a, Key::Enter);
     assert!(a.settings_geometry().unwrap().restart.is_none());
 }
@@ -175,6 +239,8 @@ fn loading_a_newer_config_warns_and_settings_cannot_edit_it() {
     assert!(a.tab_toast.as_ref().unwrap().text.contains("42"));
     a.run(Action::Settings);
     typed(&mut a, "terminal.open-on-start");
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::Home);
     key(&mut a, Key::Enter);
     assert!(saved(&mut a).is_none());
     assert_eq!(a.config(), &newer);
@@ -190,13 +256,16 @@ fn color_swatches_accept_only_complete_hex_colors() {
 }
 
 #[test]
-fn clicking_a_segment_selects_its_value_without_cycling() {
+fn cursor_shape_can_be_picked_directly_from_its_dropdown() {
     let mut a = app();
     a.chrome = a.tab_chrome();
     a.run(Action::Settings);
     typed(&mut a, "cursor shape");
     let row = a.settings_geometry().unwrap().rows.into_iter().find(|r| matches!(r.kind, RowKind::Item(0))).unwrap();
     a.settings_click(row.control.right() - 2.0, row.control.y + 5.0);
+    assert!(saved(&mut a).is_none());
+    let choice = a.settings_geometry().unwrap().suggestions.iter().find(|(index, _)| *index == 2).unwrap().1;
+    a.settings_click(choice.x + 2.0, choice.y + 2.0);
     assert_eq!(saved(&mut a).unwrap().terminal.cursor, crate::config::CursorStyle::Underline);
     key(&mut a, Key::Left);
     assert_eq!(saved(&mut a).unwrap().terminal.cursor, crate::config::CursorStyle::Beam);
@@ -335,21 +404,69 @@ fn config_page_reports_disk_status_and_runs_file_actions() {
 #[test]
 fn application_page_opens_the_notes_and_checks_for_updates_in_place() {
     let mut a = app();
+    a.chrome = a.tab_chrome();
     a.run(Action::Settings);
     let page = a.settings.as_ref().unwrap();
-    let rows: Vec<_> = page.shown.iter().map(|&i| &SETTINGS[i]).collect();
-    assert_eq!(rows[..5].iter().map(|s| s.key).collect::<Vec<_>>(), ["action.whats-new", "action.check-for-updates", "updates.check-automatically", "action.open-log", "action.open-config-file"]);
-    key(&mut a, Key::Enter);
+    let keys: Vec<_> = page.shown.iter().map(|&i| SETTINGS[i].key).collect();
+    assert_eq!(keys[..4], APPLICATION_ACTIONS);
+    assert_eq!(keys[4], "appearance.language");
+    assert_eq!(keys[keys.len() - 2..], ACCESSIBILITY_SETTINGS);
+    let geo = a.settings_geometry().unwrap();
+    let about = geo.about.unwrap();
+    let link = |n| geo.rows.iter().find(|row| row.kind == RowKind::Item(n)).unwrap().control;
+    assert!(link(0).x >= about.x && link(0).right() <= about.right());
+    assert!(link(1).x >= about.right());
+    assert!(geo.rows.iter().any(|row| row.kind == RowKind::Section(APPLICATION_SETTINGS)));
+    assert!(geo.rows.iter().any(|row| row.kind == RowKind::Section(ACCESSIBILITY)));
+    for (n, prefix) in [(1, "https://github.com/brano-san/Aster/issues/new?body="), (2, "https://github.com/brano-san/Aster")] {
+        let r = link(n);
+        a.settings_click(r.x + 8.0, r.y + 8.0);
+        let effects = a.take_effects();
+        assert!(effects.iter().any(|e| matches!(e, Effect::Open(target) if if n == 1 { target.starts_with(prefix) } else { target == prefix })));
+    }
+    let r = link(3);
+    a.settings_click(r.x + 8.0, r.y + 8.0);
     let url = concat!("https://github.com/brano-san/Aster/releases/tag/v", env!("CARGO_PKG_VERSION"));
     assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Open(target) if target == url)));
-    a.settings.as_mut().unwrap().selected = 1;
+    a.settings.as_mut().unwrap().selected = 0;
     key(&mut a, Key::Enter);
     let effects = a.take_effects();
     assert!(effects.iter().any(|e| matches!(e, Effect::Update(crate::update::UpdateRequest::Check { manual: true }))));
     assert!(!effects.iter().any(|e| matches!(e, Effect::Open(_))));
-    a.settings.as_mut().unwrap().selected = 2;
+    key(&mut a, Key::Enter);
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Update(_))));
+    a.settings.as_mut().unwrap().selected = keys.iter().position(|&key| key == "updates.check-automatically").unwrap();
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::Home);
     key(&mut a, Key::Enter);
     assert!(!saved(&mut a).unwrap().updates.check_automatically);
+
+    use crate::update::{Release, UpdateEvent, UpdateRequest};
+    let release = Release { version: "9.1.0".into(), notes: String::new(), url: String::new(), signature: String::new() };
+    a.on_update(UpdateEvent::Checked { manual: true, found: Ok(Some(release.clone())) });
+    assert_eq!(a.application_update_label(), t("Update"));
+    a.settings.as_mut().unwrap().selected = 0;
+    key(&mut a, Key::Enter);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Update(UpdateRequest::Install(target)) if *target == release)));
+    assert_eq!(a.application_update_label(), t("Downloading…"));
+}
+
+#[test]
+fn application_overview_stacks_on_narrow_windows_and_leaves_room_for_search_results() {
+    let mut page = SettingsPage::new();
+    let viewport = Rect::new(0.0, 0.0, 500.0, 600.0);
+    let geo = geometry(viewport, 1.0, &page);
+    let about = geo.about.unwrap();
+    assert_eq!(about.w, geo.list.w);
+    for row in &geo.rows[1..APPLICATION_ACTIONS.len()] {
+        assert!(row.rect.y >= about.bottom());
+        assert_eq!(row.rect.w, about.w);
+    }
+    page.query = "github".into();
+    page.refilter();
+    let searched = geometry(viewport, 1.0, &page);
+    assert!(searched.about.is_none());
+    assert!(page.shown.iter().any(|&i| SETTINGS.get(i).is_some_and(|setting| setting.key == "action.open-repository")));
 }
 
 #[test]
@@ -359,6 +476,8 @@ fn autostart_is_off_by_default_and_can_be_toggled_from_application_settings() {
     a.run(Action::Settings);
     let page = a.settings.as_mut().unwrap();
     page.selected = page.shown.iter().position(|&i| SETTINGS[i].key == "system.autostart").unwrap();
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::End);
     key(&mut a, Key::Enter);
     assert!(saved(&mut a).unwrap().system.autostart);
 }
@@ -414,7 +533,8 @@ fn the_query_filters_by_every_word_across_label_hint_and_section() {
         page.profiles_advanced = false;
         for (k, name) in PAGES.iter().enumerate() {
             page.show_page(k);
-            assert!(page.shown.iter().all(|&i| page.section(i) == *name), "{name} shows only its own items");
+            assert!(page.shown.iter().all(|&i| page.section(i) == *name
+                || *name == SYSTEM && SETTINGS.get(i).is_some_and(|setting| ACCESSIBILITY_SETTINGS.contains(&setting.key))), "{name} shows only its own items");
             listed.extend(page.shown.iter().copied().filter(|&i| i < SETTINGS.len()));
             if *name == PROFILES {
                 page.profiles_advanced = true;
@@ -457,10 +577,13 @@ fn install_action_is_visible_only_for_an_unpacked_nonportable_copy() {
 }
 
 #[test]
-fn enter_toggles_a_switch_and_saves_the_config() {
+fn boolean_options_save_only_after_choosing_an_item() {
     let mut a = app();
     a.run(Action::Settings);
     typed(&mut a, "blinking");
+    key(&mut a, Key::Enter);
+    assert!(a.config().terminal.cursor_blink);
+    key(&mut a, Key::Home);
     key(&mut a, Key::Enter);
     assert!(!a.config().terminal.cursor_blink);
     assert_eq!(saved(&mut a).map(|c| c.terminal.cursor_blink), Some(false));
@@ -592,13 +715,15 @@ fn moving_the_selection_scrolls_it_into_view() {
 }
 
 #[test]
-fn clicking_a_switch_row_toggles_it() {
+fn clicking_a_boolean_option_applies_it() {
     let mut a = app();
     a.chrome = a.tab_chrome();
     a.run(Action::Settings);
     typed(&mut a, "copy on select");
     let row = a.settings_geometry().unwrap().rows.into_iter().find(|r| matches!(r.kind, RowKind::Item(_))).unwrap();
-    a.settings_click(row.rect.x + 20.0, row.rect.y + 10.0);
+    a.settings_click(row.control.x + 20.0, row.control.y + 10.0);
+    let off = a.settings_geometry().unwrap().suggestions[0].1;
+    a.settings_click(off.x + 5.0, off.y + 5.0);
     assert!(!a.config().terminal.copy_on_select);
 }
 
@@ -698,6 +823,76 @@ fn choose_template(a: &mut App, name: &str) {
     key(a, Key::Enter);
     typed(a, name);
     key(a, Key::Enter);
+}
+
+#[test]
+fn profile_choices_commit_only_after_accepting_the_highlighted_option() {
+    let mut a = app();
+    let mut config = a.config().clone();
+    config.groups.extend(["Build", "Prod", "Test"].map(|name| crate::profile::ProfileGroup { name: name.into(), ..Default::default() }));
+    a.set_config(config);
+    choose_template(&mut a, "Local shell");
+    focus_field(&mut a, "General", "Name");
+    typed(&mut a, "Terminal");
+    focus_field(&mut a, "General", "Group");
+
+    key(&mut a, Key::Enter);
+    key(&mut a, Key::End);
+    let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
+    assert!(editor.tabs[editor.tab].fields[editor.focus].value.is_empty());
+    key(&mut a, Key::Escape);
+
+    key(&mut a, Key::Space);
+    key(&mut a, Key::End);
+    key(&mut a, Key::Up);
+    key(&mut a, Key::Enter);
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(saved(&mut a).unwrap().profiles[0].group.as_deref(), Some("Prod"));
+}
+
+#[test]
+fn profile_on_off_fields_use_the_same_dropdown_as_other_choices() {
+    let mut a = app();
+    choose_template(&mut a, "Local shell");
+    focus_field(&mut a, "General", "Name");
+    typed(&mut a, "Private");
+    focus_field(&mut a, "General", "Hidden");
+    key(&mut a, Key::Enter);
+    let editor = a.settings.as_ref().unwrap().editor.as_ref().unwrap();
+    assert_eq!(editor.tabs[editor.tab].fields[editor.focus].value, "false");
+    key(&mut a, Key::End);
+    key(&mut a, Key::Enter);
+    a.on_event(ctrl(Key::Enter));
+    assert!(saved(&mut a).unwrap().profiles[0].hidden);
+}
+
+#[test]
+fn an_editable_profile_choice_keeps_text_entry_and_accepts_a_mouse_selection() {
+    use crate::profiles_page::layout::field_control;
+    let mut a = app();
+    choose_template(&mut a, "Serial port");
+    typed(&mut a, "COM42");
+    focus_field(&mut a, "Serial", "Speed");
+    a.chrome = a.tab_chrome();
+    let area = a.settings_geometry().unwrap().page;
+    let page = a.settings.as_ref().unwrap();
+    let layout = page.profile_layout(area, 1.0).unwrap();
+    let editor = page.editor.as_ref().unwrap();
+    let slot = layout.fields.iter().find(|(i, _)| *i == editor.focus).unwrap().1;
+    let field = field_control(slot, 1.0);
+    a.settings_click(field.x + 12.0, field.y + 10.0);
+    typed(&mut a, "12345");
+    assert!(a.settings.as_ref().unwrap().profile_choice().is_none());
+
+    a.settings_click(field.right() - 12.0, field.y + 10.0);
+    let page = a.settings.as_ref().unwrap();
+    let editor = page.editor.as_ref().unwrap();
+    assert_eq!(editor.tabs[editor.tab].fields[editor.focus].value, "12345");
+    let (focus, open) = page.profile_choice().unwrap();
+    let (_, row) = layout.choice_rows(1.0, focus, open).into_iter().find(|(i, _)| open.options[*i].0 == "?").unwrap();
+    a.settings_click(row.x + 12.0, row.y + 10.0);
+    a.on_event(ctrl(Key::Enter));
+    assert_eq!(saved(&mut a).unwrap().profiles[0].serial.as_deref(), Some("COM42:?"));
 }
 
 #[test]

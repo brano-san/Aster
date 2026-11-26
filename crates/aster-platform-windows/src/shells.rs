@@ -59,8 +59,15 @@ fn pwsh() -> Option<PathBuf> {
     reg_string(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\pwsh.exe", "")
         .map(PathBuf::from)
         .filter(|p| p.is_file())
+        .or_else(|| reg_string(HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\pwsh.exe", "").map(PathBuf::from).filter(|p| p.is_file()))
+        .or_else(|| env_path("LOCALAPPDATA", r"Microsoft\WindowsApps\pwsh.exe"))
         .or_else(|| candidates.into_iter().find(|p| p.is_file()))
+        .or_else(|| env_path("ProgramFiles(x86)", r"PowerShell\7\pwsh.exe"))
         .or_else(|| on_path("pwsh.exe"))
+}
+
+fn env_path(variable: &str, path: &str) -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os(variable)?).join(path)).filter(|p| p.is_file())
 }
 
 fn git_bash() -> Option<PathBuf> {
@@ -117,9 +124,10 @@ pub fn detect() -> Vec<Profile> {
     if let Some(p) = pwsh() {
         out.push(powershell("local:pwsh", "PowerShell", &p));
     }
-    let windows_ps = sys.join(r"WindowsPowerShell\v1.0\powershell.exe");
-    if windows_ps.is_file() {
-        out.push(powershell("local:powershell", "Windows PowerShell", &windows_ps));
+    let windows_ps = [sys.join(r"WindowsPowerShell\v1.0\powershell.exe"), sys.join("powershell.exe")]
+        .into_iter().find(|p| p.is_file()).or_else(|| on_path("powershell.exe"));
+    if let Some(windows_ps) = &windows_ps {
+        out.push(powershell("local:powershell", "Windows PowerShell", windows_ps));
     }
     let mut cmd = Profile::new("local:cmd", "CMD", &path_str(&sys.join("cmd.exe")), &[]);
     cmd.icon = Some("cmd".into());
@@ -140,8 +148,48 @@ pub fn detect() -> Vec<Profile> {
     }
     out.extend(cygwin());
     out.extend(msys2(&sys));
-    out.extend(visual_studio(&sys));
+    let vs_roots: Vec<_> = ["ProgramFiles", "ProgramFiles(x86)"].into_iter().filter_map(std::env::var_os)
+        .map(|root| PathBuf::from(root).join("Microsoft Visual Studio")).collect();
+    out.extend(visual_studio(&sys, &vs_roots));
+    if let Some(root) = std::env::var_os("CMDER_ROOT") {
+        out.extend(cmder(&sys, Path::new(&root), windows_ps.as_deref()));
+    }
+    if let Some(profile) = clink(&sys) {
+        out.push(profile);
+    }
     out
+}
+
+fn cmder(sys: &Path, root: &Path, windows_ps: Option<&Path>) -> Vec<Profile> {
+    let vendor = root.join("vendor");
+    let init = vendor.join("init.bat");
+    let mut profiles = Vec::new();
+    if init.is_file() {
+        let mut profile = Profile::new("local:cmder", "Cmder", &path_str(&sys.join("cmd.exe")), &["/k", &path_str(&init)]);
+        profile.icon = Some("cmd".into());
+        profile.env.insert("TERM".into(), "cygwin".into());
+        profiles.push(profile);
+    }
+    let script = vendor.join("profile.ps1");
+    if let Some(exe) = windows_ps.filter(|_| script.is_file()) {
+        let command = encode_command(&format!(". '{}'\n{POWERSHELL_HOOK}", path_str(&script).replace('\'', "''")));
+        let mut profile = Profile::new("local:cmder-powershell", "Cmder PowerShell", &path_str(exe), &["-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand", &command]);
+        profile.icon = Some("powershell".into());
+        profiles.push(profile);
+    }
+    profiles
+}
+
+fn clink(sys: &Path) -> Option<Profile> {
+    let arch_exe = match std::env::consts::ARCH { "aarch64" => "clink_arm64.exe", "x86" => "clink_x86.exe", _ => "clink_x64.exe" };
+    let exe = ["clink.exe", arch_exe].into_iter().find_map(|name| on_path(name).or_else(|| {
+        let path = format!(r"clink\{name}");
+        env_path("ProgramFiles(x86)", &path).or_else(|| env_path("ProgramFiles", &path))
+    }))?;
+    let mut profile = Profile::new("local:clink", "CMD (Clink)", &path_str(&sys.join("cmd.exe")), &["/k", &path_str(&exe), "inject"]);
+    profile.icon = Some("cmd".into());
+    profile.env.insert("WT_SESSION".into(), "0".into());
+    Some(profile)
 }
 
 fn cygwin() -> Vec<Profile> {
@@ -177,13 +225,17 @@ fn msys2(sys: &Path) -> Vec<Profile> {
         .collect()
 }
 
-fn visual_studio(sys: &Path) -> Vec<Profile> {
-    let roots: Vec<PathBuf> = ["ProgramFiles", "ProgramFiles(x86)"].iter().filter_map(std::env::var_os).map(|p| PathBuf::from(p).join("Microsoft Visual Studio")).collect();
+fn visual_studio(sys: &Path, roots: &[PathBuf]) -> Vec<Profile> {
+    let mut versions: Vec<_> = roots.iter().filter_map(|root| std::fs::read_dir(root).ok()).flatten().filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())).collect();
+    versions.sort_unstable_by(|a, b| b.cmp(a));
+    versions.dedup();
     let cmd = path_str(&sys.join("cmd.exe"));
     let mut out = Vec::new();
-    for version in ["2022", "2019", "2017"] {
+    for version in versions {
         for edition in ["Enterprise", "Professional", "Community", "BuildTools"] {
-            let Some(bat) = roots.iter().map(|r| r.join(version).join(edition).join(r"Common7\Tools\VsDevCmd.bat")).find(|p| p.is_file()) else { continue };
+            let Some(bat) = roots.iter().map(|r| r.join(&version).join(edition).join(r"Common7\Tools\VsDevCmd.bat")).find(|p| p.is_file()) else { continue };
             let mut p = Profile::new(&format!("local:vs{version}:{}", edition.to_lowercase()), &format!("Developer Prompt for VS {version}"), &cmd, &["/k", &path_str(&bat)]);
             p.icon = Some("vs".into());
             out.push(p);

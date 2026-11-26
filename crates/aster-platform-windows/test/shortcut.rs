@@ -16,6 +16,12 @@ fn saves_refreshes_and_removes_a_shortcut_with_the_app_id() {
     assert!(update(&shortcut, &first, Some(true)).unwrap());
     let link = load(&shortcut).unwrap();
     assert!(same_path(&target(&link).unwrap(), &first));
+    let mut icon = [0; 32768];
+    let mut icon_index = -1;
+    unsafe { link.GetIconLocation(&mut icon, &mut icon_index).unwrap() };
+    let icon_end = icon.iter().position(|&unit| unit == 0).unwrap();
+    assert!(same_path(&PathBuf::from(OsString::from_wide(&icon[..icon_end])), &first));
+    assert_eq!(icon_index, 0);
     let store: IPropertyStore = link.cast().unwrap();
     let app_id = unsafe { store.GetValue(&PKEY_AppUserModel_ID).unwrap() };
     assert_eq!(app_id.to_string(), unsafe { APP_ID.to_string().unwrap() });

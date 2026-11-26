@@ -159,6 +159,28 @@ fn include_relative_and_home() {
 }
 
 #[test]
+fn include_globs_discover_nested_hosts_and_apply_in_filename_order() {
+    let root = std::env::temp_dir().join(format!("aster-ssh-includes-{}", std::process::id()));
+    let conf = root.join("conf.d");
+    std::fs::create_dir_all(&conf).unwrap();
+    std::fs::write(conf.join("20-second.conf"), "Host build\n  Port 2202\n").unwrap();
+    std::fs::write(conf.join("10-first.conf"), "Host build\n  Port 2201\nInclude more.conf\n").unwrap();
+    std::fs::write(root.join("more.conf"), "Host archive\n  User backup\n").unwrap();
+    let text = "Include conf.d/[12]*.conf conf.d/absent?.cfg\n";
+    let read = |path: &Path| std::fs::read_to_string(path).ok();
+    let entries = parse(text, &root, &root, &read);
+    let build = resolve(text, &root, &root, &read, "build");
+    for path in [conf.join("20-second.conf"), conf.join("10-first.conf"), root.join("more.conf")] {
+        std::fs::remove_file(path).unwrap();
+    }
+    std::fs::remove_dir(conf).unwrap();
+    std::fs::remove_dir(root).unwrap();
+    assert_eq!(aliases(&entries), ["build", "archive"]);
+    assert_eq!(build.port, Some(2201));
+    assert_eq!(entries[1].user.as_deref(), Some("backup"));
+}
+
+#[test]
 fn include_inline_inside_block() {
     let entries = run(
         "Host a\n  Include extra\n  Port 5\n",

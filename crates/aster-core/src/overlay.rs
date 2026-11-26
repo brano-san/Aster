@@ -9,6 +9,7 @@ use std::time::Instant;
 pub enum OverlayKind {
     Commands,
     Profiles,
+    TabProfiles,
     PaneProfile(PaneId),
     ProfileCreate,
     ProfileTemplates,
@@ -22,7 +23,7 @@ pub enum OverlayKind {
 
 impl OverlayKind {
     pub(crate) fn is_profile_picker(self) -> bool {
-        matches!(self, Self::Profiles | Self::PaneProfile(_))
+        matches!(self, Self::Profiles | Self::TabProfiles | Self::PaneProfile(_))
     }
 
     pub(crate) fn scrolls_smoothly(self) -> bool {
@@ -75,6 +76,10 @@ fn quick_pick(label: String, kind: &str, value: String) -> Pick {
 }
 
 impl Overlay {
+    pub(crate) fn tab_anchor(&self, button: aster_gfx::render::Rect) -> Option<aster_gfx::render::Rect> {
+        (self.kind == OverlayKind::TabProfiles && button.w > 0.0 && button.h > 0.0).then_some(button)
+    }
+
     pub fn new(kind: OverlayKind, items: Vec<Pick>) -> Self {
         let base = items.len();
         let mut o = Self { kind, opened_at: Instant::now(), items, query: String::new(), shown: Vec::new(), selected: 0, scroll: 0, scroll_offset: None, quick_provider: None, quick_ssh: false, base };
@@ -106,6 +111,7 @@ impl Overlay {
         match self.kind {
             OverlayKind::Commands => t("Type a command"),
             OverlayKind::Profiles => t("Select a profile or enter an address"),
+            OverlayKind::TabProfiles => t("Select a profile for the new tab"),
             OverlayKind::PaneProfile(_) => t("Select a profile for this pane"),
             OverlayKind::ProfileCreate => t("Create"),
             OverlayKind::ProfileTemplates => t("Select a profile template"),
@@ -154,7 +160,7 @@ impl Overlay {
             scored.sort_by(|a, b| items[a.1].rank.cmp(&items[b.1].rank).then(b.0.cmp(&a.0)).then(a.1.cmp(&b.1)));
         }
         self.shown = scored.into_iter().map(|(_, i, r)| (i, r)).collect();
-        if profiles {
+        if profiles && self.kind != OverlayKind::TabProfiles {
             if let Some((target, explicit)) = QuickTarget::parse(&self.query, self.quick_provider, self.quick_ssh) {
                 self.items.push(quick_pick(tf("Connect to {target}", &[("target", &target.label())]), target.provider_label(), format!("{QUICK}{}", target.value())));
                 let at = if explicit { 0 } else { self.shown.len() };

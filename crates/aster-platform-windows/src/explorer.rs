@@ -22,8 +22,9 @@ fn set_verbs(places: &[(&str, &str)], verb: &str, label: &str, enabled: bool) ->
     }
     let Ok(exe) = std::env::current_exe() else { return false };
     let exe = exe.to_string_lossy();
+    let icon = format!("\"{exe}\",0");
     places.iter().all(|(path, arg)| {
-        shell_registry::set(path, &[(None, label), (Some("Icon"), &exe)])
+        shell_registry::set(path, &[(None, label), (Some("Icon"), &icon)])
             && shell_registry::set(&format!(r"{path}\command"), &[(None, &format!("\"{exe}\" {verb} \"{arg}\""))])
     })
 }

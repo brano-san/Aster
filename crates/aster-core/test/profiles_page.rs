@@ -163,7 +163,7 @@ fn editor_geometry_keeps_the_focused_field_and_actions_visible() {
 #[test]
 fn group_defaults_and_profile_actions_use_their_drawn_hit_areas() {
     use aster_gfx::render::Rect;
-    use layout::{choice_step, editor_layout, row_action, EditorHit};
+    use layout::{choice_trigger, editor_layout, field_control, row_action, EditorHit};
     let area = Rect::new(0.0, 36.0, 1000.0, 600.0);
     let panel = editor_layout(area, 1.0, 0, 8, 4);
     let heading = panel.group_defaults.unwrap();
@@ -175,9 +175,10 @@ fn group_defaults_and_profile_actions_use_their_drawn_hit_areas() {
         } else {
             assert!(r.bottom() <= heading.y);
         }
-        assert_eq!(choice_step(r, 1.0, r.x + 10.0), 0);
-        assert_eq!(choice_step(r, 1.0, r.right() - 32.0), -1);
-        assert_eq!(choice_step(r, 1.0, r.right() - 9.0), 1);
+        let control = field_control(r, 1.0);
+        let arrow = choice_trigger(control, 1.0);
+        assert!(arrow.contains(control.right() - 9.0, control.y + 5.0));
+        assert!(!arrow.contains(control.x + 10.0, control.y + 5.0));
     }
     let row = Rect::new(230.0, 80.0, 760.0, 36.0);
     let action = row_action(row, 1.0);

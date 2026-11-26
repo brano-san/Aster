@@ -98,25 +98,26 @@ impl ProfileEditor {
     }
 
     pub(super) fn cycle_field(&mut self, backwards: bool) {
+        let field = self.focused_field();
+        if field.id == Field::AlgorithmCheck { return self.toggle_algorithm(); }
+        if let Some(value) = field.stepped_choice(backwards) { self.apply_field_choice(value); }
+    }
+
+    pub(super) fn apply_field_choice(&mut self, value: String) {
         let fields = &mut self.tabs[self.tab].fields;
         let field = &mut fields[self.focus];
+        if value == field.value { return; }
+        let previous = std::mem::replace(&mut field.value, value);
         if field.id == Field::AlgorithmCategory {
-            field.cycle(backwards);
             self.populate_algorithm_fields();
             return;
         }
-        if field.id == Field::AlgorithmCheck { return self.toggle_algorithm(); }
         if field.id == Field::ForwardType {
-            field.cycle(backwards);
             let dynamic = field.value == "dynamic";
             fields[self.focus + 2].editable = !dynamic;
             return;
         }
-        if field.id != Field::ProxyMethod {
-            return field.cycle(backwards);
-        }
-        let previous = field.value.clone();
-        field.cycle(backwards);
+        if field.id != Field::ProxyMethod { return; }
         let next = field.value.clone();
         let index = self.focus + 1;
         if fields.get(index).is_some_and(|f| f.id == Field::ProxyTarget) {

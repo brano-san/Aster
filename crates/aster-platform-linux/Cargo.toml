@@ -13,6 +13,7 @@ aster-platform.workspace = true
 aster-proto.workspace = true
 tracing.workspace = true
 libc = "0.2"
+png = "0.17"
 glutin = { version = "0.32", default-features = false, features = ["egl", "wayland", "x11"] }
 glow = "0.18"
 winit = { version = "=0.31.0-beta.4", default-features = false, features = ["wayland", "wayland-dlopen", "x11"] }

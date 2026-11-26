@@ -51,6 +51,7 @@ pub(crate) enum Header {
     Ungrouped,
     Builtin,
     Imported,
+    ImportedFile,
     Serial,
 }
 
@@ -65,6 +66,7 @@ impl Header {
             Self::Ungrouped => t("Ungrouped"),
             Self::Builtin => t("Built-in"),
             Self::Imported => t("From ~/.ssh/config"),
+            Self::ImportedFile => t("From ssh-profiles.yaml"),
             Self::Serial => t("Serial ports"),
         }
     }
@@ -98,6 +100,8 @@ fn profile_header(groups: &[ProfileGroup], row: &ProfileRow) -> Header {
         group.map_or(Header::Ungrouped, |g| Header::Group(group_key(g).into()))
     } else if row.id.starts_with("ssh:") {
         Header::Imported
+    } else if row.id.starts_with("file-config:") {
+        Header::ImportedFile
     } else if row.id.starts_with("serial:") {
         Header::Serial
     } else {
@@ -137,7 +141,7 @@ pub(crate) fn tree(groups: &[ProfileGroup], profiles: &[ProfileRow], collapsed: 
         }
     }
     rows.push(TreeRow { kind: TreeKind::NewGroup, depth: 0 });
-    for header in [Header::Ungrouped, Header::Builtin, Header::Imported, Header::Serial] {
+    for header in [Header::Ungrouped, Header::Builtin, Header::Imported, Header::ImportedFile, Header::Serial] {
         let ungrouped = header == Header::Ungrouped;
         if let Some(profiles) = members.remove(&header) {
             rows.push(TreeRow { kind: TreeKind::Header(header), depth: 0 });
@@ -214,6 +218,25 @@ pub(crate) fn reveal_profile(id: &str, groups: &[ProfileGroup], profiles: &[Prof
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChoiceMenu {
+    pub options: Vec<(String, String)>,
+    pub index: usize,
+    pub first: usize,
+}
+
+impl ChoiceMenu {
+    fn new(options: Vec<(String, String)>, value: &str) -> Self {
+        let index = options.iter().position(|(key, _)| key == value).unwrap_or(0);
+        Self { options, index, first: index.saturating_sub(3) }
+    }
+
+    fn step(&mut self, delta: isize, visible: usize) {
+        self.index = self.index.saturating_add_signed(delta).min(self.options.len() - 1);
+        self.first = self.first.min(self.index).max((self.index + 1).saturating_sub(visible));
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GroupEditor {
     pub original: Option<usize>,
     original_key: Option<String>,
@@ -221,6 +244,7 @@ pub(crate) struct GroupEditor {
     pub defaults: BTreeMap<String, ProfileDefaults>,
     pub focus: usize,
     pub error: String,
+    pub choice: Option<ChoiceMenu>,
 }
 
 impl GroupEditor {
@@ -235,6 +259,7 @@ impl GroupEditor {
             defaults: group.map(|g| g.defaults.clone()).unwrap_or_default(),
             focus: 0,
             error: String::new(),
+            choice: None,
         }
     }
 
@@ -248,6 +273,10 @@ impl GroupEditor {
 
     pub(crate) fn parent_label<'a>(&'a self, groups: &'a [ProfileGroup]) -> &'a str {
         if self.fields[1].is_empty() { t("No parent group") } else { resolve(groups, &self.fields[1]).map_or(&self.fields[1], |i| &groups[i].name) }
+    }
+
+    fn open_parent_choice(&mut self, groups: &[ProfileGroup]) {
+        self.choice = Some(ChoiceMenu::new(self.parent_choices(groups), &self.fields[1]));
     }
 
     pub(crate) fn cycle_parent(&mut self, groups: &[ProfileGroup], step: isize) {

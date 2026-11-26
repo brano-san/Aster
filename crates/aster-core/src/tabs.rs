@@ -64,7 +64,7 @@ impl Chrome {
         let settings_span = if span - margin - plus_span >= row { row } else { 0.0 };
         let remaining = span - margin - plus_span - settings_span;
         let menu_width = (24.0 * s).round();
-        let menu_span = if appearance.tab_menu_button && tabs > 0 && remaining >= menu_width { menu_width } else { 0.0 };
+        let menu_span = if appearance.tab_menu_button && remaining >= menu_width { menu_width } else { 0.0 };
         let gap = (4.0 * s).round().min(remaining - menu_span);
         let available = (remaining - menu_span - gap - (12.0 * s).round()).max(0.0);
         let pin_width = (48.0 * s).round();

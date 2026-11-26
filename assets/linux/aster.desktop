@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Aster
+Comment=Terminal emulator
+Exec=aster
+Icon=aster
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=aster
+X-TerminalArgExec=-e
+X-TerminalArgDir=--working-directory
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New window
+Name[ru]=Новое окно
+Exec=aster

@@ -60,8 +60,12 @@ jobs:
             exit 1
           fi
           name="aster-$version-x86_64-linux"
-          mkdir -p "target/packages/$name"
-          cp target/dist/aster LICENSE README.md "target/packages/$name/"
+          package="target/packages/$name"
+          mkdir -p "$package/share/applications" "$package/share/icons/hicolor/128x128/apps"
+          cp target/dist/aster LICENSE README.md "$package/"
+          cp assets/linux/aster.desktop "$package/share/applications/"
+          cp -R assets/linux/hicolor/. "$package/share/icons/hicolor/"
+          cp assets/aster-128.png "$package/share/icons/hicolor/128x128/apps/aster.png"
           tar -C target/packages -czf "target/packages/$name.tar.gz" "$name"
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v7

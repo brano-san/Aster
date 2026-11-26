@@ -27,6 +27,13 @@ pub fn migrate(mut value: Value, from: u32) -> Value {
         }
     }
     if from <= CURRENT {
+        if let Some(terminal) = value.get_mut("terminal").and_then(Value::as_table_mut) {
+            if let Some(padding) = terminal.remove("padding") {
+                for key in ["padding-top", "padding-bottom", "padding-right", "padding-left"] {
+                    terminal.entry(key).or_insert_with(|| padding.clone());
+                }
+            }
+        }
         for (old_section, old_key, section, key) in [
             ("terminal", "environment", "terminal", "env"),
             ("appearance", "last-tab-closes-window", "terminal", "close-window-with-last-tab"),

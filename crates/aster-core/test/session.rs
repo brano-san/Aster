@@ -65,9 +65,16 @@ fn tabs_splits_profiles_folders_and_buffers_survive_a_restart() {
     assert!(launched.iter().all(|l| l.2.as_deref() == Some(r"D:\work")), "{launched:?}");
     {
         let mut t = fresh.panes.get(&fresh.layout.panes[0].0).unwrap().terminal.lock();
+        assert_eq!(t.screen_text(), "");
         t.feed(b"prompt>");
-        assert_eq!(t.screen_text(), "hello from before\nsecond line\nprompt>", "the new shell starts below the restored text");
+        assert_eq!(t.screen_text(), "prompt>");
+        assert_eq!(t.prompt_line().0, "prompt>");
+        assert_eq!(t.history(), 2);
     }
+    let pane = fresh.layout.panes[0];
+    fresh.on_event(Event::MouseMove { x: pane.1.x + 20.0, y: pane.1.y + 40.0 });
+    fresh.on_event(Event::Wheel { dx: 0.0, dy: 1.0 });
+    assert_eq!(fresh.terminal(pane.0).unwrap().lock().screen_text(), "hello from before\nsecond line\nprompt>");
     fresh.activate(1);
     fresh.frame(&mut g2, false);
     let tab_b = spawns(&fresh.take_effects());
@@ -107,7 +114,11 @@ fn checkpoint_keeps_host_ids_and_restores_saved_text_only_on_fallback() {
         assert_eq!(restored.pane_host_id(pane), Some(u64::MAX));
         assert_eq!(restored.terminal(pane).unwrap().lock().screen_text(), "");
         restored.finish_pane_restore(pane, reattached);
-        assert_eq!(restored.terminal(pane).unwrap().lock().screen_text(), if reattached { "" } else { "saved text" });
+        let mut terminal = restored.terminal(pane).unwrap().lock();
+        assert_eq!(terminal.screen_text(), "");
+        assert_eq!(terminal.history(), usize::from(!reattached));
+        terminal.scroll(aster_vt::Scroll::Top);
+        assert_eq!(terminal.screen_text(), if reattached { "" } else { "saved text" });
     }
 }
 

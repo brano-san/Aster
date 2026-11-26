@@ -19,6 +19,8 @@ aster-proto.workspace = true
 aster-vault.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng = "0.10"
+sha2 = "0.11"
 toml.workspace = true
 aster-vt.workspace = true
 crossbeam-channel.workspace = true
@@ -33,6 +35,9 @@ zip.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 aster-platform-windows.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+cc = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 aster-platform-linux.workspace = true

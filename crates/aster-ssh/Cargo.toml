@@ -10,6 +10,7 @@ license.workspace = true
 aster-proto.workspace = true
 crossbeam-channel.workspace = true
 getrandom = "0.4"
+glob = "0.3.4"
 russh = { workspace = true, features = ["ring", "rsa", "flate2"] }
 russh-sftp.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "process", "io-util", "time", "sync", "macros", "fs"] }

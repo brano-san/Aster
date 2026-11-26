@@ -1,5 +1,5 @@
 use aster_gfx::render::Rect;
-use super::editor::ProfileEditor;
+use super::{editor::ProfileEditor, ChoiceMenu};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EditorHit {
@@ -33,6 +33,21 @@ impl EditorLayout {
         self.tabs.iter().position(|r| r.contains(x, y)).map(EditorHit::Tab)
             .or_else(|| self.fields.iter().find(|(_, r)| r.contains(x, y)).map(|(i, _)| EditorHit::Field(*i)))
     }
+
+    pub fn choice_rows(&self, s: f32, focus: usize, menu: &ChoiceMenu) -> Vec<(usize, Rect)> {
+        let Some(&(_, slot)) = self.fields.iter().find(|(i, _)| *i == focus) else { return Vec::new() };
+        let anchor = field_control(slot, s);
+        let limits = self.frame.inset(4.0 * s, 4.0 * s);
+        let height = (26.0 * s).round().max(1.0);
+        let below = ((limits.bottom() - anchor.bottom()) / height) as usize;
+        let above = ((anchor.y - limits.y) / height) as usize;
+        let wanted = menu.options.len().min(8);
+        let flip = below < wanted && above > below;
+        let visible = wanted.min(if flip { above } else { below });
+        let first = menu.first.min(menu.index).min(menu.options.len() - visible).max((menu.index + 1).saturating_sub(visible));
+        let top = if flip { anchor.y - visible as f32 * height } else { anchor.bottom() };
+        (0..visible).map(|i| (first + i, Rect::new(anchor.x, top + i as f32 * height, anchor.w, height))).collect()
+    }
 }
 
 pub(crate) fn row_action(row: Rect, s: f32) -> Rect {
@@ -40,8 +55,12 @@ pub(crate) fn row_action(row: Rect, s: f32) -> Rect {
     Rect::new(row.right() - 90.0 * s, row.y + (row.h - h) / 2.0, 78.0 * s, h).snap()
 }
 
-pub(crate) fn choice_step(slot: Rect, s: f32, x: f32) -> isize {
-    if x >= slot.right() - 24.0 * s { 1 } else if x >= slot.right() - 48.0 * s { -1 } else { 0 }
+pub(crate) fn field_control(slot: Rect, s: f32) -> Rect {
+    Rect::new(slot.x, slot.y + 21.0 * s, slot.w, 31.0 * s).snap()
+}
+
+pub(crate) fn choice_trigger(control: Rect, s: f32) -> Rect {
+    Rect::new(control.right() - 28.0 * s, control.y, 28.0 * s, control.h)
 }
 
 pub(crate) fn editor_layout(area: Rect, s: f32, tabs: usize, fields: usize, focus: usize) -> EditorLayout {

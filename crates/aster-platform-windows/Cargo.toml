@@ -18,16 +18,25 @@ crc32fast.workspace = true
 getrandom.workspace = true
 tracing.workspace = true
 windows-core.workspace = true
+windows-collections = "0.3"
+windows-future = "0.3"
+windows-numerics = "0.3"
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Data_Xml_Dom",
     "Foundation",
+    "Graphics_Effects",
+    "System",
+    "UI_Composition_Core",
+    "UI_Composition_Desktop",
     "UI_Notifications",
     "Win32_Devices_Communication",
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_DirectComposition",
@@ -67,5 +76,7 @@ features = [
     "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
     "Win32_UI_WindowsAndMessaging",
 ]

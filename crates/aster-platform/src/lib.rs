@@ -145,7 +145,7 @@ pub trait Window {
     fn set_timer(&self, ms: u32);
     fn request_attention(&self);
     fn notify(&self, _notification: aster_core::notifications::Notification) {}
-    fn set_surface(&self, backdrop: aster_core::config::Backdrop) -> Surface;
+    fn set_surface(&self, backdrop: aster_core::config::Backdrop, blur: f32) -> Surface;
     fn set_visible(&self, visible: bool);
     fn is_visible(&self) -> bool;
     fn is_foreground(&self) -> bool;

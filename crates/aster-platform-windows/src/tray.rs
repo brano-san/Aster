@@ -39,6 +39,7 @@ impl Command {
 
 pub struct Tray {
     data: NOTIFYICONDATAW,
+    owns_icon: bool,
     enabled: Cell<bool>,
     pub installed: Cell<bool>,
     balloons: RefCell<BTreeMap<u16, Balloon>>,
@@ -65,14 +66,21 @@ fn copy_text(text: &str, dest: &mut [u16]) {
 
 impl Tray {
     pub fn new(hub: HWND, instance: HINSTANCE) -> Self {
-        let icon = unsafe { LoadIconW(Some(instance), PCWSTR(1 as _)).or_else(|_| LoadIconW(None, IDI_APPLICATION)) };
+        let small = unsafe {
+            LoadImageW(Some(instance), crate::APP_ICON, IMAGE_ICON,
+                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), IMAGE_FLAGS(0))
+        }.map(|handle| HICON(handle.0));
+        let owns_icon = small.is_ok();
+        let icon = small.or_else(|_| unsafe {
+            LoadIconW(Some(instance), crate::APP_ICON).or_else(|_| LoadIconW(None, IDI_APPLICATION))
+        });
         let mut tip = [0u16; 128];
         for (unit, letter) in tip.iter_mut().zip("Aster".encode_utf16()) {
             *unit = letter;
         }
         let data = NOTIFYICONDATAW { cbSize: size_of::<NOTIFYICONDATAW>() as u32, hWnd: hub, uID: ICON_ID, uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
             uCallbackMessage: CALLBACK, hIcon: icon.unwrap_or_default(), szTip: tip, Anonymous: NOTIFYICONDATAW_0 { uVersion: NOTIFYICON_VERSION_4 }, ..Default::default() };
-        Self { data, enabled: Cell::new(false), installed: Cell::new(false), balloons: RefCell::default(), next_balloon: Cell::new(2) }
+        Self { data, owns_icon, enabled: Cell::new(false), installed: Cell::new(false), balloons: RefCell::default(), next_balloon: Cell::new(2) }
     }
 
     pub fn balloon(&self, window: WindowId, notification: Notification) {
@@ -189,6 +197,9 @@ impl Drop for Tray {
         self.set_enabled(false);
         for balloon in self.balloons.get_mut().values() {
             unsafe { let _ = Shell_NotifyIconW(NIM_DELETE, &balloon.data); }
+        }
+        if self.owns_icon {
+            unsafe { let _ = DestroyIcon(self.data.hIcon); }
         }
     }
 }

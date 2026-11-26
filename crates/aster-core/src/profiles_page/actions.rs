@@ -1,6 +1,6 @@
 use super::editor::ProfileEditor;
-use super::layout::{choice_step, editor_layout, row_action, EditorHit};
-use super::{delete_group, kind_label, GroupEditor, Header, TreeKind, KINDS};
+use super::layout::{choice_trigger, editor_layout, field_control, profile_editor_layout, row_action, EditorHit, EditorLayout};
+use super::{delete_group, kind_label, ChoiceMenu, GroupEditor, Header, TreeKind, KINDS};
 use crate::app::{App, Effect, SETTINGS_PANE};
 use crate::config::Config;
 use crate::i18n::{t, tf};
@@ -33,6 +33,28 @@ pub(crate) fn profile_icons() -> Vec<Pick> {
 }
 
 impl SettingsPage {
+    pub(crate) fn profile_layout(&self, area: Rect, s: f32) -> Option<EditorLayout> {
+        if let Some(editor) = &self.editor {
+            Some(profile_editor_layout(area, s, editor))
+        } else {
+            self.group_editor.as_ref().map(|group| editor_layout(area, s, 0, 8, group.focus))
+        }
+    }
+
+    pub(crate) fn profile_choice(&self) -> Option<(usize, &ChoiceMenu)> {
+        if let Some(editor) = &self.editor {
+            editor.choice.as_ref().map(|menu| (editor.focus, menu))
+        } else {
+            let group = self.group_editor.as_ref()?;
+            group.choice.as_ref().map(|menu| (group.focus, menu))
+        }
+    }
+
+    fn profile_choice_slot(&mut self) -> Option<&mut Option<ChoiceMenu>> {
+        if let Some(editor) = &mut self.editor { Some(&mut editor.choice) }
+        else { self.group_editor.as_mut().map(|group| &mut group.choice) }
+    }
+
     fn select_tree(&mut self, kind: &TreeKind) {
         if let Some(at) = self.shown.iter().position(|&i| self.tree_at(i).is_some_and(|r| &r.kind == kind)) {
             self.selected = at;
@@ -376,9 +398,54 @@ impl App {
         self.persist_profiles(config);
     }
 
+    fn step_profile_choice(&mut self, delta: isize) {
+        let visible = self.settings_geometry().and_then(|geo| {
+            let page = self.settings.as_ref()?;
+            let (focus, menu) = page.profile_choice()?;
+            let s = self.ui();
+            Some(page.profile_layout(geo.page, s)?.choice_rows(s, focus, menu).len().max(1))
+        }).unwrap_or(1);
+        if let Some(menu) = self.settings.as_mut().and_then(SettingsPage::profile_choice_slot).and_then(Option::as_mut) {
+            menu.step(delta, visible);
+        }
+        self.dirty = true;
+    }
+
+    fn accept_profile_choice(&mut self, index: usize) {
+        let Some(page) = self.settings.as_mut() else { return };
+        let Some(menu) = page.profile_choice_slot().and_then(Option::take) else { return };
+        let Some((value, _)) = menu.options.into_iter().nth(index) else { return };
+        if let Some(editor) = &mut page.editor {
+            editor.accept_choice(value);
+        } else if let Some(group) = &mut page.group_editor {
+            group.fields[1] = value;
+            group.error.clear();
+        }
+    }
+
     pub(crate) fn profile_modal_key(&mut self, key: Key, mods: Mods) {
+        let save = mods.ctrl && matches!(key, Key::Enter | Key::Char('S'));
+        if let Some(index) = self.settings.as_ref().and_then(SettingsPage::profile_choice).map(|(_, menu)| menu.index) {
+            if save || matches!(key, Key::Escape | Key::Tab) {
+                if let Some(choice) = self.settings.as_mut().and_then(SettingsPage::profile_choice_slot) {
+                    *choice = None;
+                }
+                if key == Key::Escape { return; }
+            } else {
+                return match key {
+                    Key::Enter => self.accept_profile_choice(index),
+                    Key::Up => self.step_profile_choice(-1),
+                    Key::Down => self.step_profile_choice(1),
+                    Key::PageUp => self.step_profile_choice(-8),
+                    Key::PageDown => self.step_profile_choice(8),
+                    Key::Home => self.step_profile_choice(isize::MIN),
+                    Key::End => self.step_profile_choice(isize::MAX),
+                    _ => {}
+                };
+            }
+        }
         if key == Key::Escape { return self.close_profile_modal(); }
-        if mods.ctrl && matches!(key, Key::Enter | Key::Char('S')) { return self.save_profile_modal(); }
+        if save { return self.save_profile_modal(); }
         if mods.ctrl && key == Key::Char('V') {
             if self.settings.as_ref().and_then(|p| p.editor.as_ref()).is_some_and(ProfileEditor::password_focused) {
                 self.vault_input_id = self.vault_input_id.wrapping_add(1);
@@ -389,15 +456,24 @@ impl App {
         self.vault_input_id = self.vault_input_id.wrapping_add(1);
         let Some(page) = &mut self.settings else { return };
         if key != Key::Delete { page.deleting = None; page.notice = None; }
+        let open_choice = |editable: bool| (mods == Mods::NONE && (key == Key::Enter || key == Key::Space && !editable)) || key == Key::Down && mods.alt;
         if let Some(editor) = &mut page.editor {
             if matches!(key, Key::Enter | Key::Space) {
                 if let Some(action) = editor.ssh_action(key == Key::Enter) { return self.ssh_editor_action(action); }
                 if editor.focuses_icon() { return self.open_overlay(OverlayKind::ProfileIcons); }
             }
+            let field = editor.focused_field();
+            if field.has_dropdown() && open_choice(field.editable) && !(key == Key::Enter && field.in_login_step()) {
+                return editor.open_choice();
+            }
             editor.key(key, mods);
             return;
         }
         let Some(group) = &mut page.group_editor else { return };
+        if group.focus == 1 && open_choice(false) {
+            group.open_parent_choice(&page.groups);
+            return;
+        }
         match key {
             Key::Tab if mods.shift => group.focus = (group.focus + 7) % 8,
             Key::Tab => group.focus = (group.focus + 1) % 8,
@@ -405,7 +481,7 @@ impl App {
             Key::Down => group.focus = (group.focus + 1).min(7),
             Key::Enter if group.focus >= 4 => { let kind = KINDS[group.focus - 4]; self.open_defaults(kind); }
             Key::Delete if group.focus >= 4 => { let kind = KINDS[group.focus - 4]; self.reset_defaults(kind); }
-            Key::Left | Key::Right | Key::Enter | Key::Space if group.focus == 1 => {
+            Key::Left | Key::Right if group.focus == 1 => {
                 group.cycle_parent(&page.groups, if key == Key::Left { -1 } else { 1 });
             }
             Key::Enter => group.focus = (group.focus + 1).min(7),
@@ -420,11 +496,15 @@ impl App {
     pub(crate) fn profile_modal_click(&mut self, area: Rect, x: f32, y: f32) -> bool {
         let s = self.ui();
         let Some(page) = &mut self.settings else { return false };
-        let layout = if let Some(e) = &page.editor {
-            super::layout::profile_editor_layout(area, s, e)
-        } else if let Some(g) = &page.group_editor {
-            editor_layout(area, s, 0, 8, g.focus)
-        } else { return false };
+        let Some(layout) = page.profile_layout(area, s) else { return false };
+        if let Some((focus, menu)) = page.profile_choice() {
+            if let Some((index, _)) = layout.choice_rows(s, focus, menu).into_iter().find(|(_, row)| row.contains(x, y)) {
+                self.accept_profile_choice(index);
+            } else if let Some(choice) = page.profile_choice_slot() {
+                *choice = None;
+            }
+            return true;
+        }
         page.notice = None;
         page.deleting = None;
         self.vault_input_id = self.vault_input_id.wrapping_add(1);
@@ -433,17 +513,17 @@ impl App {
             Some(EditorHit::Save) => self.save_profile_modal(),
             Some(EditorHit::Tab(i)) => { if let Some(e) = &mut page.editor { e.select_tab(i); } }
             Some(EditorHit::Field(i)) => {
-                let step = layout.fields.iter().find(|(index, _)| *index == i).map_or(0, |(_, r)| choice_step(*r, s, x));
                 if let Some(e) = &mut page.editor {
                     e.focus = i;
                     if let Some(action) = e.ssh_action(false) { self.ssh_editor_action(action); }
                     else if e.focuses_icon() { self.open_overlay(OverlayKind::ProfileIcons); }
-                    else if e.tabs[e.tab].fields[i].is_button() { e.activate(i); }
-                    else if step != 0 { e.key(if step < 0 { Key::Left } else { Key::Right }, Mods::NONE); }
-                    else { e.activate(i); }
+                    else if e.focused_field().has_dropdown() {
+                        let arrow = layout.fields.iter().find(|(index, _)| *index == i).is_some_and(|(_, slot)| choice_trigger(field_control(*slot, s), s).contains(x, y));
+                        if arrow || !e.focused_field().editable { e.open_choice(); }
+                    } else { e.activate(i); }
                 } else if let Some(g) = &mut page.group_editor {
                     g.focus = i;
-                    if i == 1 { g.cycle_parent(&page.groups, if step < 0 { -1 } else { 1 }); }
+                    if i == 1 { g.open_parent_choice(&page.groups); }
                     if i >= 4 { self.open_defaults(KINDS[i - 4]); }
                 }
             }
@@ -453,6 +533,10 @@ impl App {
     }
 
     pub(crate) fn profile_modal_wheel(&mut self, dy: f32) -> bool {
+        if self.settings.as_ref().and_then(SettingsPage::profile_choice).is_some() {
+            self.step_profile_choice(-(dy.signum() as isize) * 3);
+            return true;
+        }
         let Some(page) = &mut self.settings else { return false };
         let (focus, count) = if let Some(e) = &mut page.editor {
             (&mut e.focus, e.tabs[e.tab].fields.len())

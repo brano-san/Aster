@@ -12,7 +12,7 @@ fn io_error(error: io::Error) -> PlatformError {
     PlatformError::new(error.raw_os_error().unwrap_or_default().into(), error.to_string())
 }
 
-fn notify(path: &Path, event: SHCNE_ID) {
+pub(crate) fn notify(path: &Path, event: SHCNE_ID) {
     let path = HSTRING::from(path);
     unsafe { SHChangeNotify(event, SHCNF_PATHW, Some(path.as_ptr().cast()), None) };
 }

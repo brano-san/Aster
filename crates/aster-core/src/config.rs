@@ -181,7 +181,10 @@ pub struct Terminal {
     pub minimum_contrast_ratio: f32,
     pub font_size: f32,
     pub line_padding: f32,
-    pub padding: f32,
+    pub padding_top: f32,
+    pub padding_bottom: f32,
+    pub padding_right: f32,
+    pub padding_left: f32,
     pub scrollback_lines: usize,
     pub cursor: CursorStyle,
     pub cursor_blink: bool,
@@ -228,7 +231,10 @@ impl Default for Terminal {
             minimum_contrast_ratio: 1.0,
             font_size: 14.0,
             line_padding: 0.0,
-            padding: 6.0,
+            padding_top: 6.0,
+            padding_bottom: 6.0,
+            padding_right: 6.0,
+            padding_left: 6.0,
             scrollback_lines: 25_000,
             cursor: CursorStyle::Block,
             cursor_blink: true,
@@ -259,7 +265,7 @@ impl Default for Terminal {
             persistent_sessions: false,
             open_on_start: true,
             confirm_close: true,
-            close_window_with_last_tab: true,
+            close_window_with_last_tab: false,
             recent_profiles: 3,
         };
         crate::config_defaults::apply_os_defaults(&mut terminal);
@@ -343,6 +349,7 @@ pub struct Appearance {
     pub background_image_fit: crate::background::Fit,
     pub density: f32,
     pub opacity: f32,
+    pub background_blur: f32,
     pub backdrop: Backdrop,
     pub dock: Dock,
     pub dock_fill: f32,
@@ -381,6 +388,7 @@ impl Default for Appearance {
             background_image_fit: Default::default(),
             density: 1.0,
             opacity: 1.0,
+            background_blur: 0.0,
             backdrop: Backdrop::None,
             dock: Dock::Off,
             dock_fill: 0.5,
@@ -558,7 +566,8 @@ fn format_error(text: &str, e: toml::de::Error) -> String {
 
 impl Config {
     pub(crate) fn profile_in_picker(&self, profile: &Profile) -> bool {
-        !self.profile_hidden(profile) && (self.picker.show_builtin_profiles || !profile.builtin || profile.id.starts_with("ssh:") || profile.id.starts_with("serial:"))
+        !self.profile_hidden(profile) && (self.picker.show_builtin_profiles || !profile.builtin
+            || ["ssh:", "file-config:", "serial:"].iter().any(|prefix| profile.id.starts_with(prefix)))
     }
 
     pub fn profile_hidden(&self, profile: &Profile) -> bool {

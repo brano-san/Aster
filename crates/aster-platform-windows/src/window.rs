@@ -45,6 +45,8 @@ struct HubQueue {
     tx: mpsc::Sender<HubEvent>,
 }
 
+type SharedBlurHost = Rc<RefCell<Option<crate::blur::BlurHost>>>;
+
 impl HubQueue {
     fn post(&self, event: HubEvent) {
         if self.tx.send(event).is_ok() {
@@ -78,6 +80,8 @@ pub struct Win32Window {
     dock_spec: Cell<Option<DockSpec>>,
     dock_slide: Cell<Option<DockSlide>>,
     positioning: Cell<bool>,
+    background_blur: RefCell<Option<crate::blur::BackgroundBlur>>,
+    blur_host: SharedBlurHost,
     pub(crate) sync: Rc<FrameSync>,
 }
 
@@ -105,7 +109,7 @@ impl Win32Window {
         }
     }
 
-    fn new(id: WindowId, hub: HWND, queue: HubQueue) -> Self {
+    fn new(id: WindowId, hub: HWND, queue: HubQueue, blur_host: SharedBlurHost) -> Self {
         Self {
             id,
             hub,
@@ -124,12 +128,39 @@ impl Win32Window {
             dock_spec: Cell::new(None),
             dock_slide: Cell::new(None),
             positioning: Cell::new(false),
+            background_blur: RefCell::new(None),
+            blur_host,
             sync: Rc::new(FrameSync::default()),
         }
     }
 
     pub(crate) fn hwnd(&self) -> HWND {
         self.hwnd.get()
+    }
+
+    fn apply_background_blur(&self, amount: f32) -> bool {
+        let mut blur = self.background_blur.borrow_mut();
+        if amount == 0.0 {
+            blur.take();
+            return false;
+        }
+        let result: windows::core::Result<()> = (|| {
+            if let Some(blur) = blur.as_ref() {
+                return blur.set_amount(amount);
+            }
+            let mut host = self.blur_host.borrow_mut();
+            if host.is_none() {
+                *host = Some(crate::blur::BlurHost::new()?);
+            }
+            *blur = Some(crate::blur::BackgroundBlur::new(host.as_ref().unwrap(), self.hwnd(), amount)?);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            blur.take();
+            tracing::debug!("background blur unavailable: {error}");
+            return false;
+        }
+        true
     }
 
     fn full(&self) -> bool {
@@ -264,16 +295,18 @@ impl Window for Win32Window {
         }
     }
 
-    fn set_surface(&self, backdrop: aster_core::config::Backdrop) -> aster_platform::Surface {
+    fn set_surface(&self, backdrop: aster_core::config::Backdrop, blur: f32) -> aster_platform::Surface {
         use aster_core::config::Backdrop;
         use windows::Win32::Graphics::Dwm::{DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE};
         let h = self.hwnd();
+        // System materials can mask the host backdrop. Restore the user's choice when blur is off.
+        let backdrop = if self.apply_background_blur(blur) { Backdrop::None } else { backdrop };
         let kind = match backdrop {
             Backdrop::None => DWMSBT_NONE,
             Backdrop::Mica => DWMSBT_MAINWINDOW,
             Backdrop::Acrylic => DWMSBT_TRANSIENTWINDOW,
         };
-        let applied = unsafe { DwmSetWindowAttribute(h, DWMWA_SYSTEMBACKDROP_TYPE, &kind as *const _ as _, 4).is_ok() };
+        let applied = unsafe { DwmSetWindowAttribute(h, DWMWA_SYSTEMBACKDROP_TYPE, &kind as *const _ as _, size_of_val(&kind) as u32).is_ok() };
         aster_platform::Surface { translucent: true, backdrop: applied && backdrop != Backdrop::None }
     }
 
@@ -576,6 +609,7 @@ struct Shared<H> {
     hinst: HINSTANCE,
     hub: HWND,
     wake_pending: Arc<AtomicBool>,
+    blur_host: SharedBlurHost,
 }
 
 impl<H: WindowHandler<Win32>> Node<H> {
@@ -674,7 +708,7 @@ impl<H: WindowHandler<Win32>> Shared<H> {
     unsafe fn open(&self, opts: WindowOptions) -> Result<(), PlatformError> {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
-        let node = Rc::new(Node { window: Win32Window::new(id, self.hub, self.queue.clone()), queue: RefCell::default(), ready: Cell::new(false), focused_at: Cell::new(None), shared: self });
+        let node = Rc::new(Node { window: Win32Window::new(id, self.hub, self.queue.clone(), self.blur_host.clone()), queue: RefCell::default(), ready: Cell::new(false), focused_at: Cell::new(None), shared: self });
         let sys = GetDpiForSystem() as f32 / 96.0;
         let title = wide(&opts.title);
         let hidden = crate::d3d::hidden();
@@ -968,7 +1002,7 @@ impl WindowSystem for Win32 {
                 lpfnWndProc: Some(wndproc::<H>),
                 hInstance: self.hinst,
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-                hIcon: LoadIconW(Some(self.hinst), PCWSTR(1 as _)).unwrap_or_default(),
+                hIcon: LoadIconW(Some(self.hinst), crate::APP_ICON).unwrap_or_default(),
                 lpszClassName: WINDOW_CLASS,
                 ..Default::default()
             };
@@ -989,6 +1023,7 @@ impl WindowSystem for Win32 {
                 hinst: self.hinst,
                 hub: self.hub,
                 wake_pending: self.wake_pending.clone(),
+                blur_host: Rc::default(),
             };
             HUB.set(Some((&shared as *const Shared<H> as *const (), hub_dispatch::<H> as HubDispatch)));
             let result = shared.open(first).and_then(|()| message_loop(&shared));

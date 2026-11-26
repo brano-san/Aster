@@ -136,12 +136,10 @@ fn collect(
                     continue;
                 }
                 for token in tokenize(rest) {
-                    if token.contains('*') || token.contains('?') {
-                        continue;
-                    }
-                    let path = resolve_path(&token, ssh_dir, home);
-                    if let Some(content) = read(&path) {
-                        collect(&content, ssh_dir, home, read, depth + 1, blocks);
+                    for path in include_paths(&token, ssh_dir, home) {
+                        if let Some(content) = read(&path) {
+                            collect(&content, ssh_dir, home, read, depth + 1, blocks);
+                        }
                     }
                 }
             }
@@ -203,6 +201,21 @@ fn resolve_path(token: &str, ssh_dir: &Path, home: &Path) -> PathBuf {
     } else {
         ssh_dir.join(token)
     }
+}
+
+fn include_paths(token: &str, ssh_dir: &Path, home: &Path) -> Vec<PathBuf> {
+    if !token.contains(['*', '?', '[']) {
+        return vec![resolve_path(token, ssh_dir, home)];
+    }
+    let pattern = if Path::new(token).is_absolute() {
+        token.to_owned()
+    } else {
+        let (base, relative) = token.strip_prefix("~/").map_or((ssh_dir, token), |path| (home, path));
+        let Some(base) = base.to_str() else { return Vec::new() };
+        Path::new(&glob::Pattern::escape(base)).join(relative).to_string_lossy().into_owned()
+    };
+    let options = glob::MatchOptions { require_literal_leading_dot: true, ..glob::MatchOptions::new() };
+    glob::glob_with(&pattern, options).into_iter().flatten().filter_map(Result::ok).filter(|path| path.is_file()).collect()
 }
 
 fn is_plain(pattern: &str) -> bool {

@@ -1,4 +1,5 @@
 use crate::config::Config;
+use super::ChoiceMenu;
 use crate::i18n::{t, tf};
 use crate::input::{Key, Mods};
 use crate::profile::{group_path, LoginStep, OnExit, Profile, ProfileDefaults, SshOptions, Stream};
@@ -92,6 +93,12 @@ impl std::fmt::Debug for EditorField {
 impl EditorField {
     pub fn is_icon(&self) -> bool { self.id == Field::Icon }
 
+    pub(crate) fn has_dropdown(&self) -> bool {
+        !self.choices.is_empty() && self.checked().is_none()
+    }
+
+    pub(super) fn in_login_step(&self) -> bool { self.id.is_step() }
+
     pub fn list_hint(&self) -> Option<&'static str> {
         if self.id.is_step() {
             Some(t("Enter add step  ·  Del remove step  ·  Ctrl+Enter save"))
@@ -106,10 +113,6 @@ impl EditorField {
         } else { None }
     }
 
-    pub fn switch(&self) -> Option<bool> {
-        (self.choices.len() == 2 && self.choices[0].0 == "false" && self.choices[1].0 == "true").then(|| self.value == "true")
-    }
-
     pub fn display(&self) -> &str {
         if self.id == Field::ForwardDestination && !self.editable { return ""; }
         if self.id == Field::Color { return &self.value; }
@@ -117,13 +120,12 @@ impl EditorField {
         self.choices.iter().find(|(k, _)| k == &self.value).map_or(&self.value, |(_, v)| v)
     }
 
-    fn cycle(&mut self, backwards: bool) {
-        if self.choices.is_empty() { return; }
+    fn stepped_choice(&self, backwards: bool) -> Option<String> {
         let len = self.choices.len();
         let next = self.choices.iter().position(|(k, _)| *k == self.value).map_or(0, |i| {
             (i + if backwards { len - 1 } else { 1 }) % len
         });
-        self.value.clone_from(&self.choices[next].0);
+        self.choices.get(next).map(|(key, _)| key.clone())
     }
 }
 
@@ -144,6 +146,7 @@ pub struct ProfileEditor {
     pub tab: usize,
     pub focus: usize,
     pub tabs: Vec<EditorTab>,
+    pub(crate) choice: Option<ChoiceMenu>,
     source: Profile,
     defaults: Option<ProfileDefaults>,
     kind: &'static str,
@@ -247,7 +250,7 @@ impl ProfileEditor {
         if matches!(kind, "ssh" | "serial" | "socket") { tabs.push(stream_tab(p.stream.as_ref())); }
         tabs.push(EditorTab::new("Colors", vec![scheme]));
         let algorithm_options = p.ssh_options.as_ref().and_then(|s| s.algorithms.clone()).unwrap_or_default();
-        let mut editor = Self { original, error: None, tab: 0, focus: 0, tabs, source: p, defaults, kind, groups: config.groups.clone(), global: config.profile_defaults.clone(), jump_choices: Vec::new(), proxy_arguments: BTreeMap::new(), algorithm_catalog: Default::default(), algorithm_options };
+        let mut editor = Self { original, error: None, tab: 0, focus: 0, tabs, choice: None, source: p, defaults, kind, groups: config.groups.clone(), global: config.profile_defaults.clone(), jump_choices: Vec::new(), proxy_arguments: BTreeMap::new(), algorithm_catalog: Default::default(), algorithm_options };
         editor.set_jump_profiles(&config.profiles);
         editor
     }
@@ -255,7 +258,7 @@ impl ProfileEditor {
     pub(crate) fn global_environment(env: &BTreeMap<String, String>) -> Self {
         Self {
             original: None, error: None, tab: 0, focus: 0, tabs: vec![EditorTab::new("Environment variables", env_fields(env).collect())],
-            source: Profile::default(), defaults: None, kind: "environment", groups: Vec::new(), global: BTreeMap::new(),
+            choice: None, source: Profile::default(), defaults: None, kind: "environment", groups: Vec::new(), global: BTreeMap::new(),
             jump_choices: Vec::new(), proxy_arguments: BTreeMap::new(), algorithm_catalog: Default::default(), algorithm_options: Default::default(),
         }
     }
@@ -295,7 +298,21 @@ impl ProfileEditor {
     }
 
     pub fn select_tab(&mut self, index: usize) {
-        if index < self.tabs.len() { self.tab = index; self.focus = 0; }
+        if index < self.tabs.len() { self.tab = index; self.focus = 0; self.choice = None; }
+    }
+
+    pub(super) fn focused_field(&self) -> &EditorField { &self.tabs[self.tab].fields[self.focus] }
+
+    pub(super) fn open_choice(&mut self) {
+        let field = self.focused_field();
+        self.choice = Some(ChoiceMenu::new(field.choices.clone(), &field.value));
+    }
+
+    pub(super) fn accept_choice(&mut self, value: String) {
+        if self.focused_field().choices.iter().any(|(key, _)| key == &value) {
+            self.apply_field_choice(value);
+            self.error = None;
+        }
     }
 
     pub(crate) fn focuses_icon(&self) -> bool {
@@ -312,11 +329,12 @@ impl ProfileEditor {
         if let Some(field) = self.tabs[self.tab].fields.get_mut(index) {
             self.focus = index;
             if field.id == Field::AddForward { self.add_forward(); }
-            else if !field.editable { self.cycle_field(false); }
+            else if field.checked().is_some() { self.cycle_field(false); }
         }
     }
 
     pub fn insert(&mut self, text: &str) {
+        if self.choice.is_some() { return; }
         let field = &mut self.tabs[self.tab].fields[self.focus];
         if field.editable {
             field.value.extend(text.chars().filter(|c| !c.is_control()));
@@ -365,7 +383,6 @@ impl ProfileEditor {
                     self.focus = self.focus.min(fields.len() - 1);
                 }
             }
-            Key::Enter if !field.choices.is_empty() => self.cycle_field(false),
             Key::Enter if field.id == Field::AlgorithmCheck => self.cycle_field(false),
             Key::Enter => self.focus = (self.focus + 1) % len,
             Key::Backspace if field.editable => {

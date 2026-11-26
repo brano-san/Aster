@@ -58,6 +58,7 @@ pub struct LinuxWindow {
     dock_slide: Cell<Option<DockSlide>>,
     position: Cell<Option<(i32, i32)>>,
     translucent: bool,
+    blur_requested: Cell<bool>,
 }
 
 impl LinuxWindow {
@@ -236,7 +237,12 @@ impl Window for LinuxWindow {
         self.timer.set(Some(Instant::now() + Duration::from_millis(ms.into())));
     }
 
-    fn set_surface(&self, _backdrop: aster_core::config::Backdrop) -> aster_platform::Surface {
+    fn set_surface(&self, _backdrop: aster_core::config::Backdrop, blur: f32) -> aster_platform::Surface {
+        // Wayland clients request blur and leave its radius to the compositor.
+        let requested = self.translucent && blur > 0.0 && self.is_wayland();
+        if self.blur_requested.replace(requested) != requested {
+            self.raw.set_blur(requested);
+        }
         aster_platform::Surface { translucent: self.translucent, backdrop: false }
     }
 
@@ -595,6 +601,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
     fn open(&mut self, el: &dyn ActiveEventLoop, opts: WindowOptions) {
         let mut attrs = WindowAttributes::default()
             .with_title(opts.title)
+            .with_window_icon(crate::desktop::window_icon())
             .with_decorations(false)
             .with_min_surface_size(LogicalSize::new(MIN_SIZE.0, MIN_SIZE.1))
             .with_theme(Some(if opts.dark { Theme::Dark } else { Theme::Light }));
@@ -645,6 +652,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
             dock_slide: Cell::new(None),
             position: Cell::new(None),
             translucent,
+            blur_requested: Cell::new(false),
         };
         self.nodes.push(Node { window, last_click: None, pointer: (0.0, 0.0) });
         let node = self.nodes.last().expect("node");

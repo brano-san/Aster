@@ -204,7 +204,7 @@ fn every_label_drawn_from_constants_has_a_russian_entry() {
     texts.extend(crate::paste::BUTTONS.iter().map(|b| b.to_string()));
     for s in SETTINGS {
         texts.extend([s.section, s.label, s.hint].map(str::to_owned));
-        if let Control::Choice(options) | Control::Segments(options) = s.control {
+        if let Control::Choice(options) = s.control {
             texts.extend(options.iter().map(|(_, l)| l.to_string()));
         }
         if let Control::Run { label, .. } = s.control {

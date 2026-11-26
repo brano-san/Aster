@@ -5,6 +5,7 @@ use crate::keys::{encode_alt_char, encode_key, encode_mouse, paste_bytes, MouseA
 use crate::overlay::{Overlay, OverlayKind, Pick};
 use crate::panes::{neighbor, Axis, Layout, Node, PaneId, Side};
 use crate::profile::{ExitDecision, OnExit, Profile};
+use crate::settings::Scrollbar;
 use crate::theme::Theme;
 use crate::view::{self, Chrome};
 use aster_gfx::render::Rect;
@@ -121,7 +122,7 @@ pub enum Effect {
     Notify(crate::notifications::Notification),
     ProbeCommand { request: u64, pids: Vec<u32> },
     Beep,
-    Surface(crate::config::Backdrop),
+    Surface { backdrop: crate::config::Backdrop, blur: f32 },
     LoadBackgroundImage { revision: u64, path: String },
     Progress(Option<Progress>),
     Files { pane: PaneId, request: crate::files::FileRequest },
@@ -149,6 +150,14 @@ pub enum Effect {
     ImeArea(Rect),
     Update(crate::update::UpdateRequest),
     Extension(crate::extensions::Request),
+}
+
+fn effective_background_blur(appearance: &crate::config::Appearance) -> f32 {
+    if appearance.opacity < 1.0 && appearance.background_blur > 0.0 {
+        appearance.background_blur.min(1.0)
+    } else {
+        0.0
+    }
 }
 
 pub(crate) struct Pane {
@@ -197,17 +206,17 @@ impl Tab {
 pub(crate) enum Drag {
     None,
     Select { pane: PaneId, open_link: bool },
+    TerminalScrollbar { pane: PaneId, grab: f32 },
     Report { pane: PaneId, button: MouseButton },
     Splitter { path: Vec<bool>, axis: Axis, span: Rect },
     Tab { index: usize, start: (f32, f32), grab: (f32, f32), moved: bool },
     Pane { pane: PaneId, start: (f32, f32), moved: bool },
     Button(HitArea),
     TabClose(usize),
-    TabMenu,
+    TabProfiles,
     SettingsButton,
     SidebarResize { width: f32 },
     Plus,
-    SettingsSlider { item: usize, track: Rect, x: f32 },
     SettingsScrollbar { page: usize, grab: f32 },
 }
 
@@ -477,7 +486,7 @@ impl App {
         app.restyle();
         app.apply_language();
         app.sync_profile_sidebar();
-        app.effects.push(Effect::Surface(app.config.appearance.backdrop));
+        app.effects.push(Effect::Surface { backdrop: app.config.appearance.backdrop, blur: effective_background_blur(&app.config.appearance) });
         app.request_background_image();
         app
     }
@@ -802,8 +811,9 @@ impl App {
         let activity_changed = self.config.notifications.activity != config.notifications.activity
             || self.config.notifications.activity_silence_seconds != config.notifications.activity_silence_seconds;
         self.mru.cancel();
-        if config.appearance.backdrop != self.config.appearance.backdrop {
-            self.effects.push(Effect::Surface(config.appearance.backdrop));
+        let blur = effective_background_blur(&config.appearance);
+        if config.appearance.backdrop != self.config.appearance.backdrop || blur != effective_background_blur(&self.config.appearance) {
+            self.effects.push(Effect::Surface { backdrop: config.appearance.backdrop, blur });
         }
         let sync_changed = !self.config.sync.same_store(&config.sync) || self.config.sync.ready() != config.sync.ready();
         self.config = config;
@@ -1475,6 +1485,8 @@ impl App {
                 }
             }
             ReportProblem => self.effects.push(Effect::Open(report_url())),
+            OpenRepository => self.effects.push(Effect::Open("https://github.com/brano-san/Aster".into())),
+            HelpTranslate => self.effects.push(Effect::Open("https://github.com/brano-san/Aster/tree/HEAD/crates/aster-core/locales".into())),
             DebugCopyState => {
                 if let Some(terminal) = self.focused_terminal() {
                     self.effects.push(Effect::SetClipboard(terminal.lock().debug_dump()));
@@ -1670,6 +1682,7 @@ impl App {
         let items = match kind {
             OverlayKind::Commands => self.command_picks(),
             OverlayKind::Profiles => self.profile_picks(),
+            OverlayKind::TabProfiles => self.filtered_profile_picks(crate::picker::ProfileFilter::TabMenu),
             OverlayKind::PaneProfile(_) => self.filtered_profile_picks(crate::picker::ProfileFilter::SinglePane),
             OverlayKind::ProfileCreate => crate::profiles_page::profile_creation(),
             OverlayKind::ProfileTemplates => crate::profiles_page::profile_templates(),
@@ -1739,7 +1752,7 @@ impl App {
             }
             OverlayKind::Profiles if value == crate::overlay::MANAGE => self.run(Action::ManageProfiles),
             OverlayKind::Profiles if value == crate::overlay::CLEAR_RECENT => self.run(Action::ClearRecentProfiles),
-            OverlayKind::Profiles => {
+            OverlayKind::Profiles | OverlayKind::TabProfiles => {
                 self.open_profile_by_id(value.strip_prefix(crate::picker::RECENT).unwrap_or(&value));
             }
             OverlayKind::PaneProfile(pane) => self.request_pane_profile(pane, value),
@@ -2377,9 +2390,64 @@ impl App {
         self.layout.panes.iter().find(|(_, r)| r.contains(x, y)).copied()
     }
 
+    fn terminal_scrollbar_track(&self, rect: Rect) -> Rect {
+        let s = self.ui();
+        let inset = (2.0 * s).round();
+        let width = (10.0 * s).round().min((rect.w - inset).max(0.0));
+        let track = rect.inset(0.0, (4.0 * s).round());
+        Rect::new(track.right() - inset - width, track.y, width, track.h)
+    }
+
+    pub(crate) fn terminal_scrollbar(&self, rect: Rect, terminal: &Terminal) -> Option<Scrollbar> {
+        let s = self.ui();
+        let track = self.terminal_scrollbar_track(rect);
+        let width = (4.0 * s).round();
+        if track.w < width { return None; }
+        Scrollbar::for_viewport(track, width, (24.0 * s).round(), terminal.size().rows as f32, terminal.history() as f32)
+    }
+
+    fn terminal_scrollbar_at(&self, x: f32, y: f32) -> Option<(PaneId, Scrollbar, f32)> {
+        let (pane, rect) = self.pane_at(x, y)?;
+        let rect = self.pane_terminal_rect(pane, rect);
+        if !self.terminal_scrollbar_track(rect).contains(x, y)
+            || self.search.as_ref().is_some_and(|bar| bar.pane == pane && bar.count > 0 && !bar.error)
+        {
+            return None;
+        }
+        let terminal = self.panes.get(&pane)?.terminal.lock();
+        let bar = self.terminal_scrollbar(rect, &terminal)?;
+        let scroll = terminal.history().saturating_sub(terminal.display_offset()) as f32;
+        Some((pane, bar, scroll))
+    }
+
+    fn start_terminal_scrollbar_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some((pane, bar, scroll)) = self.terminal_scrollbar_at(x, y) else { return false };
+        let thumb = bar.thumb(scroll);
+        let in_thumb = (thumb.y..thumb.bottom()).contains(&y);
+        let grab = if in_thumb { y - bar.thumb_top(scroll) } else { thumb.h / 2.0 };
+        self.drag = Drag::TerminalScrollbar { pane, grab };
+        self.hover_link = None;
+        self.dirty = true;
+        if !in_thumb { self.drag_terminal_scrollbar(pane, grab, y); }
+        true
+    }
+
+    fn drag_terminal_scrollbar(&mut self, pane: PaneId, grab: f32, y: f32) {
+        let Some((_, rect)) = self.layout.panes.iter().find(|(id, _)| *id == pane) else { return };
+        let Some(state) = self.panes.get(&pane) else { return };
+        let mut terminal = state.terminal.lock();
+        let Some(bar) = self.terminal_scrollbar(self.pane_terminal_rect(pane, *rect), &terminal) else { return };
+        let next = terminal.history().saturating_sub(bar.scroll_at(y, grab).round() as usize);
+        let current = terminal.display_offset();
+        if next != current {
+            terminal.scroll(Scroll::Delta(next as i32 - current as i32));
+            self.dirty = true;
+        }
+    }
+
     fn cell_at(&self, pane: PaneId, rect: Rect, x: f32, y: f32) -> (usize, usize, aster_vt::Side) {
         let Some(m) = self.metrics else { return (0, 0, aster_vt::Side::Left) };
-        let inner = view::pane_inner_with(self.pane_terminal_rect(pane, rect), self.ui(), self.config.terminal.padding);
+        let inner = view::pane_inner_with(self.pane_terminal_rect(pane, rect), self.ui(), &self.config.terminal);
         let size = self.panes.get(&pane).map(|p| p.size).unwrap_or(Size::new(1, 1));
         let fx = ((x - inner.x) / m.w).max(0.0);
         let col = (fx as usize).min(size.cols - 1);
@@ -2441,13 +2509,10 @@ impl App {
         match self.drag.clone() {
             Drag::SidebarResize { .. } => return self.resize_sidebar(x),
             Drag::Pane { pane, start, moved } => return self.drag_pane(pane, start, moved, x, y),
-            Drag::SettingsSlider { item, track, .. } => {
-                self.drag = Drag::SettingsSlider { item, track, x };
-                self.dirty = true;
-                return;
-            }
             Drag::SettingsScrollbar { page, grab } => return self.drag_settings_scrollbar(page, grab, y),
+            Drag::TerminalScrollbar { pane, grab } => return self.drag_terminal_scrollbar(pane, grab, y),
             Drag::Select { pane, .. } => {
+                self.set_cursor(CursorIcon::Default);
                 if let Some(rect) = self.layout.panes.iter().find(|(id, _)| *id == pane).map(|(_, r)| *r) {
                     let (line, col, side) = self.cell_at(pane, rect, x, y);
                     if let Some(p) = self.panes.get(&pane) {
@@ -2520,6 +2585,13 @@ impl App {
             if self.pane_at(previous.0, previous.1).and_then(|(pane, rect)| self.ssh_pointer_at(pane, rect, previous.0, previous.1)).is_some() {
                 self.dirty = true;
             }
+            if self.terminal_scrollbar_at(x, y).is_some() {
+                self.hover_link = None;
+                self.set_cursor(CursorIcon::Hand);
+                self.dirty = true;
+                return;
+            }
+            self.dirty |= self.terminal_scrollbar_at(previous.0, previous.1).is_some();
         }
         let link = self.link_at(x, y);
         if link != self.hover_link {
@@ -2536,8 +2608,6 @@ impl App {
             }
         } else if self.hover_link.is_some() {
             CursorIcon::Hand
-        } else if self.overlay.is_none() && self.pane_at(x, y).is_some() {
-            CursorIcon::Text
         } else {
             CursorIcon::Default
         };
@@ -2679,7 +2749,7 @@ impl App {
             }
             if self.chrome.tab_menu.contains(x, y) {
                 if button == MouseButton::Left {
-                    self.drag = Drag::TabMenu;
+                    self.drag = Drag::TabProfiles;
                 }
                 return;
             }
@@ -2749,6 +2819,7 @@ impl App {
             return;
         }
         self.focus_pane(pane);
+        if button == MouseButton::Left && self.start_terminal_scrollbar_drag(x, y) { return; }
         let held = self.mouse_mods;
         if !held.shift && self.report(pane, rect, MouseAction::Press(button), x, y, held) {
             self.drag = Drag::Report { pane, button };
@@ -2812,15 +2883,15 @@ impl App {
             self.dirty = true;
             return;
         }
-        if matches!(self.drag, Drag::SettingsSlider { .. } | Drag::SettingsScrollbar { .. }) && button != MouseButton::Left { return; }
+        if matches!(self.drag, Drag::SettingsScrollbar { .. } | Drag::TerminalScrollbar { .. }) && button != MouseButton::Left { return; }
         let drag = std::mem::replace(&mut self.drag, Drag::None);
         self.dirty = true;
         match drag {
             Drag::SidebarResize { width } if button == MouseButton::Left => self.save_sidebar_width(width),
             Drag::Pane { pane, moved: true, .. } if button == MouseButton::Left => self.finish_pane_drag(pane, x, y),
             Drag::Tab { index, moved, .. } if button == MouseButton::Left => self.finish_tab_drag(index, moved, x, y),
-            Drag::SettingsSlider { item, track, .. } if self.settings.is_some() => self.finish_settings_slider(item, track, x),
             Drag::SettingsScrollbar { page, grab } => self.drag_settings_scrollbar(page, grab, y),
+            Drag::TerminalScrollbar { pane, grab } => self.drag_terminal_scrollbar(pane, grab, y),
             Drag::Select { pane, open_link } => {
                 let has = self.panes.get(&pane).is_some_and(|p| p.terminal.lock().has_selection());
                 if !has {
@@ -2845,9 +2916,8 @@ impl App {
                 _ => Action::CloseWindow,
             }),
             Drag::TabClose(i) if self.chrome.tabs.get(i).is_some_and(|t| t.close.contains(x, y)) => self.close_tab_asking(i),
-            Drag::TabMenu if button == MouseButton::Left && self.chrome.tab_menu.contains(x, y) => {
-                let menu = self.chrome.tab_menu;
-                self.open_tab_menu(self.active, menu.x, menu.bottom());
+            Drag::TabProfiles if button == MouseButton::Left && self.chrome.tab_menu.contains(x, y) => {
+                self.open_overlay(OverlayKind::TabProfiles);
             }
             Drag::SettingsButton if button == MouseButton::Left && !self.tab_bar_hidden() && self.chrome.settings.contains(x, y) => {
                 self.run(Action::Settings);
@@ -2914,8 +2984,9 @@ impl App {
             WheelDirection::Left => MouseAction::WheelLeft,
             WheelDirection::Right => MouseAction::WheelRight,
         };
+        let local_scroll = vertical && chord.mods.shift;
         if chord.mods.any() && self.non_keyboard_shortcut(chord)
-            || self.report(pane, rect, action, x, y, chord.mods)
+            || !local_scroll && self.report(pane, rect, action, x, y, chord.mods)
             || !chord.mods.any() && self.non_keyboard_shortcut(chord)
             || !vertical
         {
@@ -2929,7 +3000,7 @@ impl App {
         }
         p.scroll_acc -= lines as f32;
         let mode = p.terminal.lock().mode();
-        if mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
+        if !local_scroll && mode.contains(TermMode::ALT_SCREEN) && mode.contains(TermMode::ALTERNATE_SCROLL) {
             let seq: &[u8] = if lines > 0 { if mode.contains(TermMode::APP_CURSOR) { b"\x1bOA" } else { b"\x1b[A" } } else if mode.contains(TermMode::APP_CURSOR) { b"\x1bOB" } else { b"\x1b[B" };
             let bytes = seq.repeat(lines.unsigned_abs() as usize);
             self.effects.push(Effect::Write { pane, bytes });

@@ -1,4 +1,6 @@
-use crate::profile::Profile;
+use crate::app::App;
+use crate::panes::PaneId;
+use crate::profile::{Profile, SshProxy};
 
 #[derive(Clone, Copy)]
 pub enum PasswordUpdate {
@@ -94,6 +96,16 @@ pub fn host_profile(alias: &str, ssh: &str) -> Profile {
     p.icon = Some("ssh".into());
     p.ssh = Some(alias.to_owned());
     p
+}
+
+impl App {
+    pub fn system_ssh_proxy_error(&self, pane: PaneId) -> Option<&'static str> {
+        let profile = &self.panes.get(&pane)?.profile;
+        let proxy = profile.ssh_options.as_ref()?.proxy.as_ref()?;
+        (profile.ssh.is_some() && profile.id.starts_with("file-config:")
+            && matches!(proxy, SshProxy::Jump { .. } | SshProxy::Socks { .. } | SshProxy::Http { .. }))
+            .then(|| crate::i18n::t("This imported SSH profile requires the native client for its proxy"))
+    }
 }
 
 pub(crate) fn system_shell_in_profile_folder(profile: &Profile) -> Option<Vec<String>> {

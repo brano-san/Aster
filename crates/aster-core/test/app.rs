@@ -737,7 +737,8 @@ fn splitting_and_closing_panes() {
     assert_eq!(a.layout.panes.len(), 1);
     let first = s[0].0;
     a.exited(first, Some(0));
-    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
+    assert_eq!(a.tab_count(), 0);
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
 }
 
 #[test]
@@ -764,7 +765,7 @@ fn a_failing_exit_keeps_the_pane_until_a_key_is_pressed() {
     a.exited(pane, Some(1));
     assert_eq!(a.tab_count(), 1);
     a.on_event(Event::Char('q'));
-    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
+    assert_eq!(a.tab_count(), 0);
 }
 
 #[test]
@@ -833,7 +834,7 @@ fn a_key_cancels_reconnect_and_keeps_the_pane() {
     assert!(spawns(&a.take_effects()).is_empty());
     assert!(a.panes[&pane].exited.is_some());
     a.on_event(Event::Char('q'));
-    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Close)));
+    assert_eq!(a.tab_count(), 0);
 }
 
 #[test]
@@ -1058,17 +1059,41 @@ fn executable_path_titles_fall_back_to_the_profile_name() {
 #[test]
 fn opacity_reaches_the_backgrounds_only_where_the_window_can_show_it() {
     let (mut a, _) = app();
-    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface(crate::config::Backdrop::None))));
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface { backdrop: crate::config::Backdrop::None, blur: 0.0 })));
     let mut config = Config::default();
     config.appearance.opacity = 0.5;
     config.appearance.backdrop = crate::config::Backdrop::Mica;
     a.set_config(config);
-    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface(crate::config::Backdrop::Mica))));
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface { backdrop: crate::config::Backdrop::Mica, blur: 0.0 })));
     assert_eq!(a.theme.background.0 >> 24, 0xFF, "an opaque window keeps opaque backgrounds");
     a.set_surface(true, true);
     assert_eq!((a.theme.background.0 >> 24, a.theme.chrome.0 >> 24, a.theme.surface.0 >> 24), (128, 0, 0xFF));
     a.set_surface(true, false);
     assert_eq!(a.theme.chrome.0 >> 24, 128, "without a backdrop the tab bar is as clear as the terminal");
+}
+
+#[test]
+fn background_blur_follows_opacity_without_discarding_the_saved_amount() {
+    use crate::config::Backdrop;
+
+    let (mut a, _) = app();
+    a.take_effects();
+    let mut config = Config::parse("[appearance]\nbackground-blur = 0.35\nbackdrop = 'mica'").unwrap();
+    a.set_config(config.clone());
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface { backdrop: Backdrop::Mica, blur: 0.0 })));
+
+    config.appearance.opacity = 0.75;
+    a.set_config(config.clone());
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface { backdrop: Backdrop::Mica, blur: 0.35 })));
+
+    config.appearance.opacity = 0.65;
+    a.set_config(config.clone());
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Surface { .. })));
+
+    config.appearance.opacity = 1.0;
+    a.set_config(config);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Surface { backdrop: Backdrop::Mica, blur: 0.0 })));
+    assert_eq!(a.config().appearance.background_blur, 0.35);
 }
 
 #[test]
@@ -1253,6 +1278,24 @@ fn selected(a: &App) -> String {
 }
 
 #[test]
+fn terminal_uses_the_arrow_over_text_and_empty_space_without_disabling_selection() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    a.focused_terminal().unwrap().lock().feed(b"abcdef");
+    a.frame(&mut g, false);
+    let inner = view::pane_inner(a.layout.panes[0].1, 1.0);
+    let metrics = a.metrics.unwrap();
+    for (x, y) in [(inner.x + 1.0, inner.y + metrics.h / 2.0), (inner.right() - 20.0, inner.bottom() - 20.0)] {
+        a.on_event(Event::MouseMove { x, y });
+        assert_eq!(a.cursor_icon, CursorIcon::Default);
+    }
+    select_with(&mut a, Mods::NONE, (0, 0), (2, 0), 1);
+    assert_eq!(a.cursor_icon, CursorIcon::Default);
+    assert_eq!(selected(&a), "abc");
+}
+
+#[test]
 fn alt_drag_selects_a_block_and_shift_click_extends_the_selection() {
     let (mut a, mut g) = app();
     a.open_default_tab();
@@ -1376,7 +1419,10 @@ fn text_padding_shrinks_the_grid_from_every_edge() {
     let pane = a.tabs[0].focus;
     let before = a.panes[&pane].size;
     let mut config = Config::default();
-    config.terminal.padding = 40.0;
+    config.terminal.padding_top = 40.0;
+    config.terminal.padding_bottom = 40.0;
+    config.terminal.padding_right = 40.0;
+    config.terminal.padding_left = 40.0;
     a.set_config(config);
     a.frame(&mut g, false);
     let after = a.panes[&pane].size;
@@ -1429,6 +1475,74 @@ fn launching_a_settings_profile_by_keyboard_or_mouse_starts_it_in_the_background
         assert_eq!(a.focused_pane(), Some(SETTINGS_PANE));
         assert!(a.settings_open());
     }
+}
+
+#[test]
+fn terminal_scrollbar_navigates_a_full_scrollback() {
+    use std::fmt::Write;
+
+    let (mut a, mut g) = app();
+    a.set_viewport(420, 600, 1.0);
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let terminal = a.focused_terminal().unwrap().clone();
+    let rows = terminal.lock().size().rows;
+    let mut output = String::new();
+    for line in 0..25_009 + rows {
+        write!(output, "Line {line:05}\r\n").unwrap();
+    }
+    write!(output, "Line {:05}", 25_009 + rows).unwrap();
+    terminal.lock().feed(output.as_bytes());
+    assert_eq!(terminal.lock().history(), 25_000);
+    assert_eq!(terminal.lock().display_offset(), 0);
+    a.frame(&mut g, false);
+
+    let rect = a.layout.panes[0].1;
+    a.on_event(Event::MouseMove { x: rect.x + 20.0, y: rect.y + 50.0 });
+    a.on_event(Event::Wheel { dx: 0.0, dy: 1.0 });
+    assert_eq!(terminal.lock().display_offset(), 3);
+    a.on_event(Event::Wheel { dx: 0.0, dy: -1.0 });
+    assert_eq!(terminal.lock().display_offset(), 0);
+
+    let x = rect.right() - 7.0;
+    let bottom = rect.bottom() - 12.0;
+    let top = rect.y + 5.0;
+    let button = MouseButton::Left;
+    a.on_event(Event::MouseDown { x, y: bottom, button, clicks: 1 });
+    a.on_event(Event::MouseMove { x, y: top });
+    assert_eq!(terminal.lock().display_offset(), 25_000);
+    assert_eq!(terminal.lock().line_text(0).0.trim_end(), "Line 00010");
+    a.on_event(Event::MouseUp { x, y: top, button });
+
+    a.on_event(Event::MouseDown { x, y: bottom, button, clicks: 1 });
+    a.on_event(Event::MouseUp { x, y: bottom, button });
+    assert_eq!(terminal.lock().display_offset(), 0);
+}
+
+#[test]
+fn shift_wheel_scrolls_saved_lines_when_the_terminal_application_captures_the_mouse() {
+    let (mut a, mut g) = app();
+    a.open_default_tab();
+    a.frame(&mut g, false);
+    let terminal = a.focused_terminal().unwrap().clone();
+    terminal.lock().feed(&b"history\r\n".repeat(256));
+    assert!(terminal.lock().history() > 3);
+    let rect = a.layout.panes[0].1;
+    a.on_event(Event::MouseMove { x: rect.x + 20.0, y: rect.y + 50.0 });
+    a.on_event(Event::Wheel { dx: 0.0, dy: 1.0 });
+    assert_eq!(terminal.lock().display_offset(), 3);
+    a.on_event(Event::Wheel { dx: 0.0, dy: -1.0 });
+    terminal.lock().feed(b"\x1b[?1000h\x1b[?1006h");
+    a.take_effects();
+
+    a.on_event(Event::Wheel { dx: 0.0, dy: 1.0 });
+    assert_eq!(terminal.lock().display_offset(), 0);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::Write { bytes, .. } if bytes.starts_with(b"\x1b[<64;"))));
+
+    a.on_event(Event::Modifiers(Mods { shift: true, ..Mods::NONE }));
+    a.on_event(Event::Wheel { dx: 0.0, dy: 1.0 });
+    assert_eq!(terminal.lock().display_offset(), 3);
+    assert!(!a.take_effects().iter().any(|e| matches!(e, Effect::Write { .. })));
 }
 
 #[test]

@@ -27,9 +27,8 @@ const G_RESTORE: &str = "\u{E923}";
 enum ProfileFieldControl {
     Text,
     ReadOnly,
-    Choice { editable: bool },
+    Choice { editable: bool, expanded: bool },
     Picker,
-    Switch(bool),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -83,13 +82,16 @@ impl CellRun {
 }
 
 
-pub fn pane_inner_with(r: Rect, s: f32, padding: f32) -> Rect {
-    let p = (padding.clamp(0.0, 64.0) * s).round();
-    r.inset(p, p)
+pub fn pane_inner_with(r: Rect, s: f32, terminal: &crate::config::Terminal) -> Rect {
+    let pad = |value: f32| (value.clamp(0.0, 64.0) * s).round();
+    let left = pad(terminal.padding_left).min(r.w);
+    let top = pad(terminal.padding_top).min(r.h);
+    Rect::new(r.x + left, r.y + top, (r.w - left - pad(terminal.padding_right)).max(0.0), (r.h - top - pad(terminal.padding_bottom)).max(0.0))
 }
 
 pub fn pane_inner(r: Rect, s: f32) -> Rect {
-    pane_inner_with(r, s, PAD)
+    let pad = (PAD * s).round();
+    r.inset(pad, pad)
 }
 
 fn rgb(c: Rgb) -> Color {
@@ -178,7 +180,7 @@ pub struct OverlayGeometry {
 
 pub fn overlay_geometry(app: &App, o: &Overlay) -> OverlayGeometry {
     if o.kind.scrolls_smoothly() {
-        let layout = crate::overlay_list::OverlayList::new(app.chrome.content, app.ui(), o);
+        let layout = crate::overlay_list::OverlayList::new(app.chrome.content, app.ui(), o, o.tab_anchor(app.chrome.tab_menu));
         return layout.geometry(layout.target(o));
     }
     let s = app.ui();
@@ -797,10 +799,11 @@ impl App {
                     if let Some((label, tint)) = &paint.badge {
                         let style = tab_badge_style(s);
                         let w = (g.measure(label, style) + 6.0 * s).round();
-                        if x + w + 18.0 * s <= text_end {
+                        let gap = (10.0 * s).round();
+                        if x + w + gap + 13.0 * s <= text_end {
                             let badge = Rect::new(x, r.y + ((r.h - 16.0 * s) / 2.0).round(), w, (16.0 * s).round());
                             draw_tab_badge(g, badge, label, *tint, s);
-                            x = badge.right() + (5.0 * s).round();
+                            x = badge.right() + gap;
                         }
                     }
                     g.text(x, y, &paint.label, ui, if active { theme.text } else { theme.text_dim }, (text_end - x).max(0.0));
@@ -837,7 +840,7 @@ impl App {
         }
         centered(g, plus, G_PLUS, icons, theme.text_dim);
         if menu.w > 0.0 && menu.h > 0.0 {
-            let fill = if self.drag == Drag::TabMenu && hot == Some(TabHover::Menu) { Some(theme.button_press) }
+            let fill = if self.drag == Drag::TabProfiles && hot == Some(TabHover::Menu) { Some(theme.button_press) }
                 else { hover_fill(&self.hover_state.tabs, TabHover::Menu, now, theme.button_hover) };
             if let Some(fill) = fill {
                 g.dl.round_rect(menu, fill, (6.0 * s).round());
@@ -959,6 +962,9 @@ impl App {
                 t.resize(size);
                 t.set_cell_pixels(m.w as u16, m.h as u16);
             }
+            if pane.host_id.is_none() {
+                pane.restore_history();
+            }
             pane.size = size;
             pane.ssh_connecting = launch.ssh.is_some();
             if pane.profile.ssh.is_some() || pane.profile.exit_decision(None) == crate::profile::ExitDecision::Reconnect {
@@ -993,7 +999,7 @@ impl App {
             }
             let Some(tab) = self.tabs.iter().find(|t| t.root.contains(id)) else { continue };
             if let Some((_, rect)) = tab.root.layout(content, gap).panes.into_iter().find(|(p, _)| *p == id) {
-                let inner = pane_inner_with(self.pane_terminal_rect(id, rect), s, self.config.terminal.padding);
+                let inner = pane_inner_with(self.pane_terminal_rect(id, rect), s, &self.config.terminal);
                 let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
                 self.prepare_pane(id, size, m);
             }
@@ -1014,7 +1020,7 @@ impl App {
     fn draw_pane<B: TextBackend>(&mut self, g: &mut Gfx<B>, id: PaneId, (pane_rect, visual): (Rect, Rect), focused: bool, (m, sidebar_gap, show_from): (Metrics, f32, f32), (blink_alpha, blinking): (f32, bool)) {
         let s = self.ui();
         let rect = self.pane_terminal_rect(id, pane_rect);
-        let inner = pane_inner_with(rect, s, self.config.terminal.padding);
+        let inner = pane_inner_with(rect, s, &self.config.terminal);
         let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
         self.prepare_pane(id, size, m);
         let window_focused = self.terminal_has_focus();
@@ -1149,8 +1155,8 @@ impl App {
             }
         });
         run.flush(g);
-        let offset = t.display_offset();
-        let history = t.history();
+        let scrollbar = if has_matches { None } else { self.terminal_scrollbar(rect, &t) };
+        let scroll = t.history().saturating_sub(t.display_offset()) as f32;
         drop(t);
         for (x, y, w, flags, ucolor, fg) in decorations {
             let uy = y + under_y;
@@ -1187,13 +1193,13 @@ impl App {
             g.text(r.x, r.y + m.baseline, &self.preedit.text, style, theme.foreground, f32::MAX);
             g.dl.rect(Rect::new(r.x, r.y + under_y, w, thin), theme.foreground);
         }
-        if !has_matches && offset > 0 && history > 0 {
-            let total = (history + size.rows) as f32;
-            let track = rect.inset(0.0, (4.0 * s).round());
-            let th = (track.h * size.rows as f32 / total).max(24.0 * s);
-            let ty = track.y + (track.h - th) * (1.0 - offset as f32 / history as f32);
-            let bw = (4.0 * s).round();
-            g.dl.round_rect(Rect::new(track.right() - bw - 2.0 * s, ty, bw, th), theme.text_dim.alpha(0x90), bw / 2.0);
+        if let Some(bar) = scrollbar {
+            let thumb = bar.thumb(scroll);
+            let hot = bar.track.contains(self.mouse.0, self.mouse.1) || matches!(self.drag, Drag::TerminalScrollbar { pane, .. } if pane == id);
+            if hot {
+                g.dl.round_rect(bar.track, theme.overlay.alpha(0xA0), bar.track.w / 2.0);
+            }
+            g.dl.round_rect(thumb, theme.text_dim.alpha(if hot { 0xD0 } else { 0x90 }), thumb.w / 2.0);
         }
         g.dl.set_clip(None);
         if focused && self.pane_rename.is_none() && !self.sidebar_focused() {
@@ -2218,6 +2224,7 @@ impl App {
     }
 
     fn draw_editor_field<B: TextBackend>(&self, g: &mut Gfx<B>, slot: Rect, field: (&str, &str), control: ProfileFieldControl, focused: bool) {
+        use crate::profiles_page::layout::{choice_trigger, field_control};
         let s = self.ui();
         let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
@@ -2225,37 +2232,27 @@ impl App {
         let label = Rect::new(slot.x, slot.y, slot.w, 19.0 * s);
         let y = baseline(g, label, small);
         g.text(label.x, y, field.0, small, if focused { theme.text } else { theme.text_dim }, label.w);
-        let r = Rect::new(slot.x, label.bottom() + 2.0 * s, slot.w, 31.0 * s).snap();
+        let r = field_control(slot, s);
         g.dl.round_rect(r, theme.surface, 5.0 * s);
         g.dl.outline(r, if focused { theme.accent } else { theme.overlay_border }, 5.0 * s, if focused { (1.5 * s).round() } else { s.round() }.max(1.0));
         let mut inner = r.inset(9.0 * s, 2.0 * s);
         if field.0 == t("Color") {
             inner = color_field(g, inner, field.1, theme, s);
         }
-        if let ProfileFieldControl::Switch(on) = control {
-            let h = (18.0 * s).round();
-            let switch = Rect::new(inner.right() - 32.0 * s, r.y + (r.h - h) * 0.5, 32.0 * s, h).snap();
-            g.dl.round_rect(switch, if on { theme.accent } else { theme.overlay_border }, h * 0.5);
-            let knob = switch.h - 4.0 * s;
-            let kx = if on { switch.right() - knob - 2.0 * s } else { switch.x + 2.0 * s };
-            g.dl.circle(Rect::new(kx, switch.y + (switch.h - knob) * 0.5, knob, knob), if on { theme.on_accent } else { theme.text_dim });
-            inner.w = (switch.x - 8.0 * s - inner.x).max(0.0);
-        } else if matches!(control, ProfileFieldControl::Picker) {
+        if matches!(control, ProfileFieldControl::Picker) {
             g.dl.chevron((inner.right() - 5.0 * s, r.y + r.h * 0.5), 8.0 * s, 0.0, (1.4 * s).max(1.0), theme.text_dim);
             inner.w = (inner.w - 18.0 * s).max(0.0);
-        } else if matches!(control, ProfileFieldControl::Choice { .. }) {
+        } else if let ProfileFieldControl::Choice { expanded, .. } = control {
             let (mx, my) = self.mouse;
-            for (k, angle) in [(2, 180.0), (1, 0.0)] {
-                let arrow = Rect::new(r.right() - k as f32 * 24.0 * s, r.y, 24.0 * s, r.h);
-                if arrow.contains(mx, my) {
-                    g.dl.round_rect(arrow.inset(2.0 * s, 3.0 * s), theme.button_hover, 4.0 * s);
-                }
-                g.dl.chevron((arrow.x + arrow.w * 0.5, arrow.y + arrow.h * 0.5), 7.0 * s, angle, (1.4 * s).max(1.0), theme.text_dim);
+            let arrow = choice_trigger(r, s);
+            if expanded || arrow.contains(mx, my) {
+                g.dl.round_rect(arrow.inset(2.0 * s, 3.0 * s), theme.button_hover, 4.0 * s);
             }
-            inner.w = (r.right() - 50.0 * s - inner.x).max(0.0);
+            g.dl.chevron((arrow.x + arrow.w * 0.5, arrow.y + arrow.h * 0.5), 8.0 * s, if expanded { -90.0 } else { 90.0 }, (1.4 * s).max(1.0), theme.text_dim);
+            inner.w = (arrow.x - inner.x).max(0.0);
         }
         let y = baseline(g, inner, ui);
-        if focused && matches!(control, ProfileFieldControl::Text | ProfileFieldControl::Choice { editable: true }) {
+        if focused && matches!(control, ProfileFieldControl::Text | ProfileFieldControl::Choice { editable: true, expanded: false }) {
             let first = g.dl.instances.len();
             let w = g.measure(field.1, ui);
             let caret = s.round().max(1.0);
@@ -2269,7 +2266,7 @@ impl App {
     }
 
     fn draw_profile_editor<B: TextBackend>(&self, g: &mut Gfx<B>, area: Rect, page: &crate::settings::SettingsPage, controls: &mut crate::control_motion::Frame<'_>) {
-        use crate::profiles_page::{kind_label, layout::editor_layout, KINDS};
+        use crate::profiles_page::{kind_label, KINDS};
         let s = self.ui();
         let theme = self.theme;
         let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
@@ -2278,10 +2275,11 @@ impl App {
         let title = FontStyle::new(FontFamily::Ui, (17.0 * s).round(), true);
         let line = s.round().max(1.0);
         let (mx, my) = self.mouse;
-        let (layout, heading, error) = if let Some(editor) = &page.editor {
-            (crate::profiles_page::layout::profile_editor_layout(area, s, editor), editor.title(), editor.error.as_deref())
+        let Some(layout) = page.profile_layout(area, s) else { return };
+        let (heading, error) = if let Some(editor) = &page.editor {
+            (editor.title(), editor.error.as_deref())
         } else if let Some(group) = &page.group_editor {
-            (editor_layout(area, s, 0, 8, group.focus), if group.original.is_some() { t("Edit group") } else { t("New group") }.to_owned(), (!group.error.is_empty()).then_some(group.error.as_str()))
+            (if group.original.is_some() { t("Edit group") } else { t("New group") }.to_owned(), (!group.error.is_empty()).then_some(group.error.as_str()))
         } else {
             return;
         };
@@ -2320,12 +2318,14 @@ impl App {
                     centered(g, r, &field.label, ui, theme.text);
                     continue;
                 }
-                let control = match field.switch() {
-                    Some(value) => ProfileFieldControl::Switch(value),
-                    None if field.is_icon() => ProfileFieldControl::Picker,
-                    None if !field.choices.is_empty() => ProfileFieldControl::Choice { editable: field.editable },
-                    None if !field.editable => ProfileFieldControl::ReadOnly,
-                    None => ProfileFieldControl::Text,
+                let control = if field.is_icon() {
+                    ProfileFieldControl::Picker
+                } else if field.has_dropdown() {
+                    ProfileFieldControl::Choice { editable: field.editable, expanded: i == editor.focus && editor.choice.is_some() }
+                } else if field.editable {
+                    ProfileFieldControl::Text
+                } else {
+                    ProfileFieldControl::ReadOnly
                 };
                 let masked = field.masked();
                 self.draw_editor_field(g, slot, (&field.label, masked.as_deref().unwrap_or_else(|| field.display())), control, i == editor.focus);
@@ -2345,7 +2345,7 @@ impl App {
                 let focused = i == group.focus;
                 if i < 4 {
                     let value = if i == 1 { group.parent_label(&page.groups) } else { &group.fields[i] };
-                    let control = if i == 1 { ProfileFieldControl::Choice { editable: false } } else { ProfileFieldControl::Text };
+                    let control = if i == 1 { ProfileFieldControl::Choice { editable: false, expanded: focused && group.choice.is_some() } } else { ProfileFieldControl::Text };
                     self.draw_editor_field(g, slot, (labels[i], value), control, focused);
                 } else {
                     let r = slot.inset(0.0, 7.0 * s);
@@ -2369,6 +2369,24 @@ impl App {
             g.dl.round_rect(r, if r.contains(mx, my) { theme.button_hover } else if primary { theme.accent.alpha(0x38) } else { theme.surface }, 5.0 * s);
             g.dl.outline(r, if primary { theme.accent } else { theme.overlay_border }, 5.0 * s, line);
             centered(g, r, label, ui, theme.text);
+        }
+        if let Some((focus, menu)) = page.profile_choice() {
+            let rows = layout.choice_rows(s, focus, menu);
+            if let (Some((_, first)), Some((_, last))) = (rows.first(), rows.last()) {
+                let panel = Rect::new(first.x, first.y, first.w, last.bottom() - first.y);
+                g.dl.shadow(panel, theme.shadow, 0.0, (10.0 * s).round());
+                g.dl.rect(panel, theme.surface);
+                g.dl.rect(panel, theme.overlay);
+                for (index, r) in rows {
+                    if index == menu.index || r.contains(mx, my) {
+                        g.dl.rect(r, if index == menu.index { theme.accent.alpha(0x42) } else { theme.button_hover });
+                    }
+                    let inner = r.inset(10.0 * s, 0.0);
+                    let y = baseline(g, inner, ui);
+                    g.text(inner.x, y, &menu.options[index].1, ui, theme.text, inner.w);
+                }
+                g.dl.outline(panel, theme.overlay_border, 0.0, line);
+            }
         }
     }
 
@@ -2605,25 +2623,25 @@ impl App {
         }
     }
 
-    fn draw_font_sample<B: TextBackend>(&self, g: &mut Gfx<B>, rect: Rect, ui: FontStyle) {
+    fn draw_font_sample<B: TextBackend>(&self, g: &mut Gfx<B>, rect: Rect, ui: FontStyle, palette: aster_vt::Palette) {
         let s = self.ui();
         let pad = (12.0 * s).round();
         let inner = rect.inset(pad, (6.0 * s).round());
         let label = Rect::new(inner.x, inner.y, inner.w, (17.0 * s).round());
         let line = Rect::new(inner.x, label.bottom(), inner.w, (inner.bottom() - label.bottom()).max(0.0));
         let radius = (6.0 * s).round();
-        g.dl.round_rect(rect, color(self.palette.background), radius);
+        g.dl.round_rect(rect, color(palette.background), radius);
         g.dl.outline(rect, self.theme.overlay_border, radius, s.round().max(1.0));
         let y = baseline(g, label, ui);
-        g.text(label.x, y, t("Font preview"), ui, color(self.palette.foreground), label.w);
+        g.text(label.x, y, t("Font preview"), ui, color(palette.foreground), label.w);
         let size = self.metrics.map_or(self.config.terminal.font_size * self.scale, |m| m.px);
         let style = FontStyle { ligatures: self.config.terminal.ligatures, ..FontStyle::new(FontFamily::Mono, size.min(line.h).max(1.0), false) };
         let y = baseline(g, line, style);
         g.dl.set_clip(Some(line));
         let regular = format!("{}  -> == !=", t("Aa"));
-        let advance = g.text(line.x, y, &regular, style, color(self.palette.foreground), line.w);
+        let advance = g.text(line.x, y, &regular, style, color(palette.foreground), line.w);
         let x = line.x + advance + pad;
-        g.text(x, y, t("Aa"), FontStyle { bold: true, ..style }, color(self.palette.ansi[4]), (line.right() - x).max(0.0));
+        g.text(x, y, t("Aa"), FontStyle { bold: true, ..style }, color(palette.ansi[4]), (line.right() - x).max(0.0));
         g.dl.set_clip(None);
     }
 
@@ -2818,7 +2836,7 @@ impl App {
     }
 
     fn draw_settings<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant, controls: &mut crate::control_motion::Frame<'_>) {
-        use crate::settings::{part_at, Control, Part, RowKind, VaultRow, SETTINGS};
+        use crate::settings::{Control, RowKind, VaultRow, SETTINGS};
         let s = self.ui();
         let ui = FontStyle::new(FontFamily::Ui, (13.5 * s).round(), false);
         let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
@@ -2855,17 +2873,12 @@ impl App {
                 let layout = crate::settings::ShortcutLayout::new(width, s, bindings, &hint, |text| g.measure(text, small));
                 page.shortcut_rows.insert(index, layout);
             }
-            if let Some(Control::Segments(options)) = SETTINGS.get(index).map(|setting| setting.control) {
-                for &(_, label) in options {
-                    page.segment_widths.insert(label, (g.measure(t(label), ui) + 16.0 * s).ceil());
-                }
-            }
         }
         let Some(geo) = self.settings_geometry() else { return };
         let animate = self.animations();
         self.settings.as_mut().unwrap().scroll = geo.scroll;
         let page = self.settings.as_ref().unwrap();
-        let scroll = self.list_motion.settings.sample(geo.scroll, (geo.height - geo.list.h).max(0.0), animate && !page.editing(), now, &mut self.motion);
+        let scroll = self.list_motion.settings.sample(geo.scroll, (geo.height - geo.list.h).max(0.0), animate && !page.editing() && page.choice_menu.is_none(), now, &mut self.motion);
         let theme = self.theme;
         let line = (1.0 * s).round().max(1.0);
         let (mx, my) = self.mouse;
@@ -2912,7 +2925,8 @@ impl App {
             self.draw_scheme_bar(g, page, bar, ui, controls);
         }
         if let Some(sample) = geo.font_sample {
-            self.draw_font_sample(g, sample, small);
+            let palette = if page.colors_page() { self.scheme(page.scheme_tab.name(&self.config.appearance)).unwrap_or(self.palette) } else { self.palette };
+            self.draw_font_sample(g, sample, small, palette);
         }
         let layer = Layer::RestartNotice;
         let from = self.layers.start(&mut g.dl, layer, self.layers.opened(layer, geo.restart.is_some()), TOAST_OUT);
@@ -2948,6 +2962,24 @@ impl App {
         let current_scheme = page.scheme_item(if page.colors_page() { page.scheme_tab.name(&self.config.appearance) } else { self.current_scheme() });
         let offset = geo.scroll.round() - scroll.round();
         let (mx, my) = if geo.list.contains(mx, my) { (mx, my + offset) } else { (-1.0, -1.0) };
+        if let Some(mut about) = geo.about {
+            about.y += offset;
+            if about.bottom() >= geo.list.y && about.y <= geo.list.bottom() {
+                g.dl.round_rect(about, theme.overlay, radius);
+                let icon_size = (64.0 * s).round();
+                let icon = Rect::new(about.x + ((about.w - icon_size) / 2.0).round(), about.y + (12.0 * s).round(), icon_size, icon_size);
+                g.image(crate::settings::APPLICATION_ICON, icon);
+                let name = Rect::new(about.x, about.y + (78.0 * s).round(), about.w, (29.0 * s).round());
+                centered(g, name, "Aster", title, theme.text);
+                let version = if self.installation == crate::installation::State::Installed {
+                    tf("Version {version} · Installed", &[("version", crate::update::CURRENT)])
+                } else {
+                    tf("Version {version}", &[("version", crate::update::CURRENT)])
+                };
+                let version_line = Rect::new(about.x, name.bottom(), about.w, (18.0 * s).round());
+                centered(g, version_line, &version, ui, theme.text_dim);
+            }
+        }
         for row in &geo.rows {
             let row = crate::settings::Row {
                 rect: Rect::new(row.rect.x, row.rect.y + offset, row.rect.w, row.rect.h),
@@ -2959,34 +2991,33 @@ impl App {
             }
             match row.kind {
                 RowKind::Section(name) => {
-                    let mut r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), row.rect.w, (28.0 * s).round());
-                    let arrow_x = r.x + 4.0 * s;
-                    if !page.searching() {
-                        r.x += (18.0 * s).round();
-                        r.w = (row.rect.right() - r.x).max(0.0);
-                    }
+                    let r = Rect::new(row.rect.x + (14.0 * s).round(), row.rect.y + (10.0 * s).round(), (row.rect.w - 28.0 * s).max(0.0), (28.0 * s).round());
                     let y = baseline(g, r, section);
-                    let heading = g.dl.instances.len();
                     g.text(r.x, y, t(name), section, theme.accent, r.w);
-                    if !page.searching() {
-                        let text_bounds = g.dl.instances[heading..].iter().map(|instance| (instance.rect[1], instance.rect[1] + instance.rect[3]))
-                            .reduce(|(top, bottom), (y0, y1)| (top.min(y0), bottom.max(y1)));
-                        let arrow_y = text_bounds.map_or(r.y + r.h / 2.0, |(top, bottom)| (top + bottom) / 2.0);
-                        let angle = controls.angle(crate::control_motion::Control::Section(name), page.section_open(name));
-                        let ink = if row.rect.contains(mx, my) { theme.accent } else { theme.text_dim };
-                        g.dl.chevron((arrow_x, arrow_y), 8.0 * s, angle, 1.5 * s, ink);
-                    }
-                    if name == crate::settings::SYSTEM && !page.searching() {
-                        let version = if self.installation == crate::installation::State::Installed {
-                            tf("Aster {version} · Installed for this user", &[("version", env!("CARGO_PKG_VERSION"))])
-                        } else {
-                            tf("Aster {version}", &[("version", env!("CARGO_PKG_VERSION"))])
-                        };
-                        g.text(r.x, y + (20.0 * s).round(), &version, ui, theme.text, r.w);
-                    }
                 }
                 RowKind::Item(n) => {
                     let selected = n == page.selected;
+                    if geo.about.is_some() && n < crate::settings::APPLICATION_ACTIONS.len() {
+                        let card = row.rect;
+                        let hovered = hot == Some(page.shown[n]);
+                        let fill = if hovered { theme.button_hover } else { theme.overlay };
+                        g.dl.round_rect(card, fill, radius);
+                        g.dl.outline(card, if selected { theme.accent } else { theme.overlay_border }, radius, line);
+                        if n == 0 {
+                            centered(g, card, self.application_update_label(), ui, theme.text);
+                        } else {
+                            let icon_box = Rect::new(card.x + (12.0 * s).round(), card.y, (30.0 * s).round(), card.h);
+                            let icons = FontStyle::new(FontFamily::Icons, (17.0 * s).round(), false);
+                            let icon = ["\u{E946}", "\u{E8EC}", "\u{E8A5}"][n - 1];
+                            centered(g, icon_box, icon, icons, theme.accent);
+                            let setting = &SETTINGS[page.shown[n]];
+                            let tx = icon_box.right() + (10.0 * s).round();
+                            let w = (card.right() - tx - 12.0 * s).max(0.0);
+                            g.text(tx, card.y + (23.0 * s).round(), t(setting.label), ui, theme.text, w);
+                            g.text(tx, card.y + (41.0 * s).round(), t(setting.hint), small, theme.text_dim, w);
+                        }
+                        continue;
+                    }
                     let card = row.rect.inset(0.0, inset);
                     if selected {
                         g.dl.round_rect(card, theme.accent.alpha(0x26), radius);
@@ -3113,30 +3144,6 @@ impl App {
                     let c = row.control;
                     match setting.control {
                         Control::ReadOnly(_) => {}
-                        Control::Segments(options) => {
-                            let value = crate::settings::get(&self.config, setting.key);
-                            let active = value.as_ref().and_then(|v| v.as_str());
-                            g.dl.round_rect(c, theme.overlay, radius);
-                            for (segment, &(key, label)) in page.segments(options, c, s).into_iter().zip(options) {
-                                let chosen = active == Some(key);
-                                if chosen || segment.contains(mx, my) {
-                                    g.dl.round_rect(segment, if chosen { theme.accent } else { theme.button_hover }, radius);
-                                }
-                                let inner = segment.inset(3.0 * s, 0.0);
-                                let text = t(label);
-                                let width = g.measure(text, ui).min(inner.w);
-                                let y = baseline(g, inner, ui);
-                                g.text(inner.x + ((inner.w - width) / 2.0).round(), y, text, ui, if chosen { theme.on_accent } else { theme.text }, inner.w);
-                            }
-                            g.dl.outline(c, theme.overlay_border, radius, line);
-                        }
-                        Control::Toggle => {
-                            let progress = controls.switch(setting.key, self.setting_on(setting));
-                            g.dl.round_rect(c, crate::control_motion::blend(theme.overlay_border, theme.accent, progress), c.h / 2.0);
-                            let knob = (c.h - 6.0 * s).round();
-                            let kx = crate::control_motion::knob_x(c, knob, 3.0 * s, progress);
-                            g.dl.circle(Rect::new(kx, c.y + ((c.h - knob) / 2.0).round(), knob, knob), crate::control_motion::blend(theme.text_dim, theme.on_accent, progress));
-                        }
                         Control::Run { action, label } => {
                             g.dl.round_rect(c, if c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
                             g.dl.outline(c, if selected { theme.accent } else { theme.overlay_border }, radius, line);
@@ -3147,48 +3154,19 @@ impl App {
                             };
                             centered(g, c, label, ui, theme.text);
                         }
-                        Control::Slider { min, max, .. } if !(selected && page.editing()) => {
-                            let track = crate::settings::slider_track(c, s);
-                            let value = self.slider_value(setting, min).clamp(min, max);
-                            let dragging = matches!(self.drag, Drag::SettingsSlider { item, .. } if item == page.shown[n]);
-                            let fraction = controls.slider(setting.key, ((value - min) / (max - min)) as f32, dragging);
-                            let fill = (track.w * fraction).round();
-                            g.dl.round_rect(track, theme.overlay_border, track.h / 2.0);
-                            g.dl.round_rect(Rect::new(track.x, track.y, fill, track.h), theme.accent, track.h / 2.0);
-                            let knob = (12.0 * s).round();
-                            g.dl.circle(Rect::new(track.x + fill - knob / 2.0, track.y + (track.h - knob) / 2.0, knob, knob), theme.accent);
-                            let readout = Rect::new(track.right() + 10.0 * s, c.y, (c.right() - track.right() - 10.0 * s).max(0.0), c.h);
-                            centered(g, readout, &format!("{:.0}%", value * 100.0), small, theme.text);
-                        }
                         control => {
-                            let editing = selected && page.editing() && matches!(control, Control::Text | Control::Color | Control::StringList | Control::Font { .. } | Control::Number { .. } | Control::Slider { .. });
-                            g.dl.round_rect(c, theme.overlay, radius);
-                            g.dl.outline(c, if editing { theme.accent } else { theme.overlay_border }, radius, line);
-                            let stepper = !matches!(control, Control::Text | Control::Color | Control::StringList | Control::Font { .. } | Control::Slider { .. });
-                            let edge = if stepper { (30.0 * s).round() } else { (10.0 * s).round() };
-                            let mut inner = Rect::new(c.x + edge, c.y, (c.w - 2.0 * edge).max(0.0), c.h);
-                            if stepper {
-                                let hover = c.contains(mx, my).then(|| part_at(control, c, s, mx));
-                                let stroke = (1.4 * s).max(1.0);
-                                let size = (9.0 * s).round();
-                                let less = Rect::new(c.x, c.y, edge, c.h);
-                                let more = Rect::new(c.right() - edge, c.y, edge, c.h);
-                                for (r, part) in [(less, Part::Less), (more, Part::More)] {
-                                    if hover == Some(part) {
-                                        g.dl.round_rect(r.inset(2.0 * s, 2.0 * s), theme.button_hover, radius);
-                                    }
-                                    let center = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-                                    let ink = theme.text_dim;
-                                    if matches!(control, Control::Number { .. }) {
-                                        let arm = (5.0 * s).round();
-                                        g.dl.rect(Rect::new((center.0 - arm).round(), (center.1 - line / 2.0).round(), 2.0 * arm, line), ink);
-                                        if part == Part::More {
-                                            g.dl.rect(Rect::new((center.0 - line / 2.0).round(), (center.1 - arm).round(), line, 2.0 * arm), ink);
-                                        }
-                                    } else {
-                                        g.dl.chevron(center, size, if part == Part::Less { 180.0 } else { 0.0 }, stroke, ink);
-                                    }
-                                }
+                            let enabled = self.setting_enabled(setting);
+                            let editing = selected && page.editing();
+                            let open = selected && (page.choice_menu.is_some() || !page.font_matches.is_empty());
+                            let dropdown = control.dropdown() || matches!(control, Control::Font { .. });
+                            g.dl.round_rect(c, if enabled && c.contains(mx, my) { theme.button_hover } else { theme.overlay }, radius);
+                            g.dl.outline(c, if editing || open { theme.accent } else { theme.overlay_border }, radius, line);
+                            let right = if dropdown { 28.0 } else { 10.0 } * s;
+                            let mut inner = Rect::new(c.x + 10.0 * s, c.y, (c.w - 10.0 * s - right).max(0.0), c.h);
+                            let ink = if enabled { theme.text } else { theme.text_dim.alpha(0x80) };
+                            if dropdown {
+                                let arrow = if enabled { theme.text_dim } else { ink };
+                                g.dl.chevron((c.right() - 14.0 * s, c.y + c.h / 2.0), 9.0 * s, if open { 270.0 } else { 90.0 }, 1.4 * s, arrow);
                             }
                             let text = if editing { page.edit_text() } else { self.setting_text(setting) };
                             if matches!(control, Control::Color) {
@@ -3202,11 +3180,8 @@ impl App {
                                 }
                                 let w = g.text(inner.x, y, &text, ui, theme.text, inner.w);
                                 g.dl.rect(Rect::new(inner.x + w + 1.0, c.y + ((c.h - caret_h) / 2.0).round(), line, caret_h), theme.accent);
-                            } else if stepper {
-                                let w = g.measure(&text, ui).min(inner.w);
-                                g.text((inner.x + (inner.w - w) / 2.0).round(), y, &text, ui, theme.text, inner.w);
                             } else {
-                                g.text(inner.x, y, &text, ui, theme.text, inner.w);
+                                g.text(inner.x, y, &text, ui, ink, inner.w);
                             }
                         }
                     }
@@ -3215,11 +3190,12 @@ impl App {
         }
         let (mx, my) = self.mouse;
         for &(index, r) in &geo.suggestions {
+            let (selected, label) = if let Some(menu) = &page.choice_menu { (menu.index, &menu.options[index].1) } else { (page.font_index, &page.font_matches[index]) };
             g.dl.rect(r, theme.surface);
-            g.dl.rect(r, if index == page.font_index { theme.accent.alpha(0x42) } else if r.contains(mx, my) { theme.button_hover } else { theme.overlay });
+            g.dl.rect(r, if index == selected { theme.accent.alpha(0x42) } else if r.contains(mx, my) { theme.button_hover } else { theme.overlay });
             let inner = r.inset(10.0 * s, 0.0);
             let y = baseline(g, inner, ui);
-            g.text(inner.x, y, &page.font_matches[index], ui, theme.text, inner.w);
+            g.text(inner.x, y, label, ui, theme.text, inner.w);
         }
         if let (Some((_, first)), Some((_, last))) = (geo.suggestions.first(), geo.suggestions.last()) {
             g.dl.outline(Rect::new(first.x, first.y, first.w, last.bottom() - first.y), theme.overlay_border, 0.0, line);
@@ -3366,7 +3342,7 @@ impl App {
         };
         let animate = self.animations();
         let (geo, hover) = if o.kind.scrolls_smoothly() {
-            let layout = crate::overlay_list::OverlayList::new(self.chrome.content, self.ui(), &o);
+            let layout = crate::overlay_list::OverlayList::new(self.chrome.content, self.ui(), &o, o.tab_anchor(self.chrome.tab_menu));
             let target = layout.target(&o);
             let scroll = self.list_motion.overlay.sample(target, layout.max, animate && o.scroll_offset.is_some(), now, &mut self.motion);
             let hover = layout.hit_row(target, self.mouse);

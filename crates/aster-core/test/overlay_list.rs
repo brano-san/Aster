@@ -9,7 +9,7 @@ fn grouped_picker_keeps_a_fixed_viewport_and_hits_at_the_target() {
         ..Pick::default()
     }).collect();
     let overlay = Overlay::new(OverlayKind::Profiles, picks);
-    let layout = OverlayList::new(Rect::new(0.0, 20.0, 800.0, 600.0), 1.0, &overlay);
+    let layout = OverlayList::new(Rect::new(0.0, 20.0, 800.0, 600.0), 1.0, &overlay, None);
     let start = layout.target(&overlay);
     let end = layout.reveal(29, start);
     assert_eq!(start, 0.0);
@@ -30,10 +30,10 @@ fn shrinking_the_picker_keeps_the_keyboard_selection_in_view() {
     let picks = (0..20).map(|i| Pick { label: i.to_string(), ..Pick::default() }).collect();
     let mut overlay = Overlay::new(OverlayKind::Commands, picks);
     overlay.selected = 8;
-    let large = OverlayList::new(Rect::new(0.0, 20.0, 800.0, 600.0), 1.0, &overlay);
+    let large = OverlayList::new(Rect::new(0.0, 20.0, 800.0, 600.0), 1.0, &overlay, None);
     let position = large.position(0.0);
     overlay.scroll_offset = Some(position);
-    let compact = OverlayList::new(Rect::new(0.0, 20.0, 800.0, 210.0), 1.0, &overlay);
+    let compact = OverlayList::new(Rect::new(0.0, 20.0, 800.0, 210.0), 1.0, &overlay, None);
     let scroll = compact.target(&overlay);
     assert!(scroll > 0.0);
     let visible = compact.geometry(scroll);
