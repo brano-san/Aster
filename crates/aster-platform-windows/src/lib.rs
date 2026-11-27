@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+mod accessibility;
 mod autostart;
 mod blur;
 mod conpty;

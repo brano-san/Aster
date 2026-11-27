@@ -17,8 +17,8 @@ fn detection_always_finds_cmd_with_a_directory_reporting_prompt_and_unique_ids()
 
 #[test]
 fn commands_are_encoded_as_base64_utf16() {
-    assert_eq!(encode_command("dir"), "ZABpAHIA");
-    assert_eq!(encode_command("ab"), "YQBiAA==");
+    assert_eq!(encode_powershell_command("dir"), "ZABpAHIA");
+    assert_eq!(encode_powershell_command("ab"), "YQBiAA==");
 }
 
 #[test]

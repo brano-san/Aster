@@ -142,6 +142,8 @@ pub enum Event {
     SessionEnding,
     GlobalHotkey,
     NotificationClicked(u64),
+    Accessibility(crate::accessibility::Action),
+    AccessibilityRefresh,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

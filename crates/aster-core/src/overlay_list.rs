@@ -33,7 +33,7 @@ impl<'a> OverlayList<'a> {
         let inset = (10.0 * s).round();
         let y = content.y + inset;
         let input = Rect::new(x, y, width, (if profiles { 44.0 } else { 40.0 } * s).round());
-        let item_height = (if profiles { 34.0 } else { 30.0 } * s).round();
+        let item_height = (if overlay.kind.has_detail_rows() { 44.0 } else if profiles { 34.0 } else { 30.0 } * s).round();
         let header_height = (30.0 * s).round();
         let pad = (6.0 * s).round();
         let row = |y, h| Rect::new(x + pad, y, (width - 2.0 * pad).max(0.0), h);

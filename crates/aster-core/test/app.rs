@@ -73,6 +73,83 @@ fn app() -> (App, Gfx<Mono>) {
 }
 
 #[test]
+fn accessible_tabs_palette_and_search_follow_the_keyboard_focus() {
+    use crate::accessibility::{Action as Accessible, Role};
+
+    let (mut app, mut gfx) = app();
+    app.open_tab(profile("local:a"));
+    app.open_tab(profile("local:b"));
+    app.on_event(Event::Focus(true));
+    app.frame(&mut gfx, false);
+    let tree = app.accessibility_tree();
+    let tabs: Vec<_> = tree.nodes.iter().filter(|node| node.role == Role::Tab).collect();
+    assert_eq!(tabs.len(), 2);
+    assert!(!tabs[0].selected && tabs[1].selected);
+    let first = tabs[0].id;
+    assert_eq!(tree.node(tree.focus.unwrap()).unwrap().role, Role::Terminal);
+
+    app.on_event(Event::Accessibility(Accessible::Invoke(first)));
+    app.frame(&mut gfx, false);
+    let tree = app.accessibility_tree();
+    assert!(tree.node(first).unwrap().selected);
+    let terminal = tree.focus.unwrap();
+
+    app.run(Action::CommandSelector);
+    app.frame(&mut gfx, false);
+    let tree = app.accessibility_tree();
+    assert_eq!(tree.node(tree.focus.unwrap()).unwrap().role, Role::Edit);
+    assert!(tree.nodes.iter().any(|node| node.role == Role::ListItem && node.invokable && node.selected));
+    assert!(tree.node(terminal).is_none());
+    let result = tree.nodes.iter().find(|node| node.role == Role::ListItem && !node.selected).unwrap().id;
+    app.on_event(Event::Accessibility(Accessible::SelectItem(result)));
+    let selection = app.accessibility_tree();
+    assert!(selection.node(result).unwrap().selected);
+    assert_eq!(selection.focus, tree.focus);
+
+    app.on_event(Event::Key { key: Key::Escape, mods: Mods::NONE, pressed: true });
+    assert_eq!(app.accessibility_tree().focus, Some(terminal));
+    app.open_search();
+    app.on_event(Event::Char('x'));
+    let tree = app.accessibility_tree();
+    let field = tree.node(tree.focus.unwrap()).unwrap();
+    assert_eq!(field.role, Role::Edit);
+    assert_eq!(field.text.as_ref().unwrap().value, "x");
+    app.on_event(Event::Accessibility(Accessible::Focus(terminal)));
+    assert_eq!(app.accessibility_tree().focus, Some(terminal));
+    app.on_event(Event::Focus(false));
+    assert_eq!(app.accessibility_tree().focus, None);
+}
+
+#[test]
+fn accessible_terminal_selection_maps_unicode_to_terminal_cells() {
+    use crate::accessibility::Action as Accessible;
+
+    let (mut app, mut gfx) = app();
+    app.open_default_tab();
+    app.on_event(Event::Focus(true));
+    app.frame(&mut gfx, false);
+    let terminal = app.focused_terminal().unwrap().clone();
+    terminal.lock().feed("A界e\u{301}\r\nB".as_bytes());
+    let tree = app.accessibility_tree();
+    let node = tree.focus.unwrap();
+    let text = tree.node(node).unwrap().text.as_ref().unwrap();
+    assert!(text.value.starts_with("A界e\u{301}\nB"));
+    assert_eq!(text.caret, Some(6));
+    assert_eq!(text.lines[0].end, 5);
+    assert_eq!(text.lines[1].start, 5);
+    assert!(text.lines[0].bounds.w > 0.0 && text.lines[1].bounds.y > text.lines[0].bounds.y);
+    let width = text.lines[0].offsets[1];
+    assert_eq!(text.lines[0].offsets, vec![0.0, width, 3.0 * width, 3.0 * width, 4.0 * width, 4.0 * width]);
+
+    app.on_event(Event::Accessibility(Accessible::SelectText { node, start: 1, end: 4 }));
+    assert_eq!(terminal.lock().selection_text().as_deref(), Some("界e\u{301}"));
+    let tree = app.accessibility_tree();
+    assert_eq!(tree.node(node).unwrap().text.as_ref().unwrap().selection, Some((1, 4)));
+    app.on_event(Event::Accessibility(Accessible::SelectText { node, start: 4, end: 4 }));
+    assert!(terminal.lock().selection_text().is_none());
+}
+
+#[test]
 fn menu_motion_ends_after_unfold_and_ghost_fade() {
     use crate::motion::{POP, UNFOLD};
     let (mut a, mut gfx) = app();
@@ -291,6 +368,64 @@ fn command_notification_polls_until_busy_then_idle_only_once() {
     assert!(!effects.iter().any(|e| matches!(e, Effect::ProbeCommand { .. })));
     a.activate(0);
     assert!(!a.tab_activity(0));
+}
+
+#[test]
+fn shell_command_notification_uses_only_the_watched_pane_and_reports_the_exit_code() {
+    let (mut app, _) = app();
+    app.config.notifications.command_finished = true;
+    app.open_default_tab();
+    let other = app.focused_pane().unwrap();
+    app.run(Action::SplitRight);
+    let watched = app.focused_pane().unwrap();
+    for pane in [other, watched] {
+        app.terminal(pane).unwrap().lock().feed(b"\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07");
+    }
+    app.take_effects();
+    app.run(Action::NotifyCommand);
+    assert!(!app.take_effects().iter().any(|effect| matches!(effect, Effect::ProbeCommand { .. })));
+    app.terminal(other).unwrap().lock().feed(b"\x1b]133;D;9\x07");
+    app.woken();
+    assert!(!app.take_effects().iter().any(|effect| matches!(effect, Effect::Notify(_))));
+    app.terminal(watched).unwrap().lock().feed(b"\x1b]133;D;7\x07\x1b]133;D;8\x07");
+    app.woken();
+    let notes: Vec<_> = app.take_effects().into_iter().filter_map(|effect| {
+        if let Effect::Notify(note) = effect { Some(note) } else { None }
+    }).collect();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].body.contains('7'));
+}
+
+#[test]
+fn arming_a_shell_command_notification_ignores_completions_already_received() {
+    let (mut app, _) = app();
+    app.config.notifications.command_finished = true;
+    app.open_default_tab();
+    let pane = app.focused_pane().unwrap();
+    app.terminal(pane).unwrap().lock().feed(b"\x1b]133;C\x07done\x1b]133;D;0\x07");
+    app.run(Action::NotifyCommand);
+    app.woken();
+    assert!(app.tabs[0].command_watch.armed());
+    assert!(!app.take_effects().iter().any(|effect| matches!(effect, Effect::Notify(_))));
+}
+
+#[test]
+fn exiting_a_watched_pane_without_a_finish_mark_settles_the_notification() {
+    let (mut app, _) = app();
+    app.config.notifications.command_finished = true;
+    app.open_default_tab();
+    app.run(Action::SplitRight);
+    let pane = app.focused_pane().unwrap();
+    app.terminal(pane).unwrap().lock().feed(b"\x1b]133;C\x07running");
+    app.run(Action::NotifyCommand);
+    app.take_effects();
+    app.exited(pane, Some(7));
+    assert!(!app.tabs[0].command_watch.armed());
+    let notes: Vec<_> = app.take_effects().into_iter().filter_map(|effect| {
+        if let Effect::Notify(note) = effect { Some(note) } else { None }
+    }).collect();
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].body.contains('7'));
 }
 
 #[test]
@@ -662,6 +797,23 @@ fn debug_actions_target_the_focused_terminal() {
 }
 
 #[test]
+fn fixture_actions_only_record_the_new_tab_and_save_the_focused_pane() {
+    let (mut a, mut gfx) = app();
+    a.open_default_tab();
+    let regular = a.focused_terminal().unwrap();
+    a.run(Action::DebugRecordFixture);
+    assert_eq!(a.tab_count(), 2);
+    assert!(regular.lock().capture_fixture().is_err());
+    a.frame(&mut gfx, false);
+    let pane = a.focused_pane().unwrap();
+    let terminal = a.focused_terminal().unwrap();
+    terminal.lock().feed(b"fixture output");
+    assert!(terminal.lock().capture_fixture().is_ok());
+    a.run(Action::DebugSaveFixture);
+    assert!(a.take_effects().iter().any(|e| matches!(e, Effect::SaveFixture { pane: id } if *id == pane)));
+}
+
+#[test]
 fn export_buffer_snapshots_the_focused_panes_history_and_screen() {
     let (mut a, _) = app();
     a.open_default_tab();
@@ -766,6 +918,53 @@ fn a_failing_exit_keeps_the_pane_until_a_key_is_pressed() {
     assert_eq!(a.tab_count(), 1);
     a.on_event(Event::Char('q'));
     assert_eq!(a.tab_count(), 0);
+}
+
+#[test]
+fn explicitly_started_task_reruns_in_the_same_split_with_its_original_launch() {
+    let (mut a, mut g) = app();
+    let mut config = a.config.clone();
+    config.terminal.environment.insert("VAR".into(), "first".into());
+    a.set_config(config.clone());
+    let argv = ["program".to_owned(), "arg with spaces".to_owned(), "".to_owned()];
+    let cwd = r"D:\work dir";
+    a.run_command(&argv, Some(cwd.into()));
+    let task = a.focused_pane().unwrap();
+    a.split_with(Side::Right, a.default_profile().unwrap());
+    let shell = a.focused_pane().unwrap();
+    a.frame(&mut g, false);
+    let launch = spawns(&a.take_effects()).into_iter().find(|(pane, _)| *pane == task).unwrap().1;
+    assert_eq!(launch.command, "program");
+    assert_eq!(launch.args, ["arg with spaces", ""]);
+    assert_eq!(launch.cwd.as_deref(), Some(cwd));
+    a.terminal(task).unwrap().lock().feed(b"task output");
+    let peer = a.terminal(shell).unwrap().clone();
+    peer.lock().feed(b"peer output");
+    a.exited(task, Some(45));
+    a.frame(&mut g, false);
+    a.take_effects();
+    assert!(a.terminal(task).unwrap().lock().buffer_text().contains("45"));
+    let bounds = a.layout.panes.iter().find(|(pane, _)| *pane == task).unwrap().1;
+    let button = a.task_rerun_button(task, bounds).unwrap();
+    config.terminal.environment.insert("VAR".into(), "changed".into());
+    a.set_config(config);
+    a.take_effects();
+    a.on_down(button.x + 1.0, button.y + 1.0, MouseButton::Left, 1);
+    a.frame(&mut g, false);
+    let effects = a.take_effects();
+    let rerun = spawns(&effects);
+    assert_eq!(rerun.len(), 1);
+    assert_eq!(rerun[0].0, task);
+    assert_eq!(rerun[0].1.command, launch.command);
+    assert_eq!(rerun[0].1.args, launch.args);
+    assert_eq!(rerun[0].1.cwd, launch.cwd);
+    assert_eq!(rerun[0].1.env, launch.env);
+    assert_eq!(rerun[0].1.local_environment, launch.local_environment);
+    assert!(!effects.iter().any(|effect| matches!(effect, Effect::Kill { .. } | Effect::Write { .. })));
+    assert!(a.terminal(task).unwrap().lock().buffer_text().contains("task output"));
+    assert!(Arc::ptr_eq(a.terminal(shell).unwrap(), &peer));
+    assert!(peer.lock().buffer_text().contains("peer output"));
+    assert_eq!(a.tab_count(), 1);
 }
 
 #[test]

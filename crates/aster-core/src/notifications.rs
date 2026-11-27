@@ -44,7 +44,7 @@ impl Activity {
 impl App {
     pub(crate) fn reset_activity_tracking(&mut self) {
         let now = Instant::now();
-        for tab in &mut self.tabs {
+        for tab in self.all_tabs_mut() {
             tab.activity = Activity::new(now);
         }
         for pane in self.panes.values_mut() {
@@ -57,8 +57,10 @@ impl App {
             return;
         }
         let silence = Duration::from_secs(u64::from(self.config.notifications.activity_silence_seconds.clamp(1, 3600)));
-        for index in 0..self.tabs.len() {
-            let tab = &mut self.tabs[index];
+        let foreground = self.tabs.get(self.active).map(|tab| tab.key);
+        let tabs = self.tabs.iter_mut().chain(self.workspaces.iter_mut().flat_map(|workspace| &mut workspace.tabs));
+        let mut notifications = Vec::new();
+        for tab in tabs {
             let mut changed = false;
             for id in tab.root.panes() {
                 if let Some(pane) = self.panes.get_mut(&id) {
@@ -67,16 +69,19 @@ impl App {
                     pane.activity_seq = seq;
                 }
             }
-            if tab.activity.observe(now, index != self.active, changed, silence) {
-                self.notify_tab(index, t("Background tab activity"));
+            if tab.activity.observe(now, Some(tab.key) != foreground, changed, silence) {
+                notifications.push(tab.key);
             }
+        }
+        for key in notifications {
+            self.notify_tab(key, t("Background tab activity"), None);
         }
     }
 
-    pub(crate) fn notify_command_finished(&mut self, index: usize) {
+    pub(crate) fn notify_command_finished(&mut self, key: u64, code: Option<i32>) {
         self.push(Effect::Attention);
         if self.config.notifications.command_finished {
-            self.notify_tab(index, t("Command finished"));
+            self.notify_tab(key, t("Command finished"), code);
         }
     }
 
@@ -84,27 +89,27 @@ impl App {
         if !self.config.notifications.command_finished {
             return;
         }
-        if let Some(index) = self.tabs.iter().position(|tab| {
-            tab.key == tab_key && tab.command_watch == crate::close::CommandWatch::Off
-        }) {
-            self.notify_tab(index, t("Process finished"));
+        if self.all_tabs().any(|tab| tab.key == tab_key && tab.command_watch == crate::close::CommandWatch::Off) {
+            self.notify_tab(tab_key, t("Process finished"), None);
         }
     }
 
-    fn notify_tab(&mut self, index: usize, title: &str) {
-        let Some(tab) = self.tabs.get(index) else { return };
+    fn notify_tab(&mut self, key: u64, title: &str, code: Option<i32>) {
+        let Some(tab) = self.all_tabs().find(|tab| tab.key == key) else { return };
+        let mut body = self.title_for_tab(tab);
+        if let Some(code) = code {
+            body.push_str(&format!("\n{} {code}", t("Exit code")));
+        }
         self.push(Effect::Notify(Notification {
-            tab: tab.key,
+            tab: key,
             title: title.to_owned(),
-            body: self.tab_title(index),
+            body,
             action: t("Open").to_owned(),
         }));
     }
 
     pub(crate) fn notification_clicked(&mut self, key: u64) {
-        if let Some(index) = self.tabs.iter().position(|tab| tab.key == key) {
-            self.activate(index);
-        }
+        self.show_tab_by_key(key);
     }
 }
 

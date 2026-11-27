@@ -109,6 +109,25 @@ fn failed_upload_removes_partial_tree() { run(async |dir, s| {
 }); }
 
 #[test]
+fn cancelled_upload_keeps_independently_added_files() { run(async |dir, s| {
+    std::fs::create_dir(dir.join("out")).unwrap();
+    let cancel = Notify::new();
+    let target = dir.join("out/tree");
+    let mut added = false;
+    let result = upload_with_cancel(&s, &dir.join("tree"), "/out", &mut |_, _| {
+        if !added {
+            std::fs::write(target.join("keep"), b"independent").unwrap();
+            cancel.notify_one();
+            added = true;
+        }
+    }, Some(&cancel)).await;
+    assert!(result.unwrap_err().contains("cancelled"));
+    assert_eq!(std::fs::read(target.join("keep")).unwrap(), b"independent");
+    assert!(!target.join("a").exists());
+    assert!(!target.join("sub").exists());
+}); }
+
+#[test]
 fn download_accepts_trailing_slash() { run(async |dir, s| {
     let root = download(&s, "/tree/", &dir.join("out"), &mut |_, _| {}).await.unwrap();
     assert_eq!(std::fs::read(root.join("a")).unwrap(), b"hello");

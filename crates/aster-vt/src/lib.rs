@@ -1,4 +1,8 @@
 mod indexed_colors;
+mod command_handler;
+mod command_marks;
+pub mod buffer_text;
+pub mod fixture;
 mod osc;
 mod palette;
 pub mod schemes;
@@ -11,6 +15,7 @@ pub use alacritty_terminal::sync::FairMutex;
 pub use alacritty_terminal::term::cell::{Cell, Flags};
 pub use alacritty_terminal::term::TermMode;
 pub use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
+pub use command_marks::CommandSummary;
 pub use osc::{Progress, ProgressState};
 pub use palette::Palette;
 pub use search::{SearchOverview, SearchStatus, VisibleMatch};
@@ -31,6 +36,7 @@ pub enum VtEvent {
     ResetTitle,
     Bell,
     Clipboard(String),
+    CommandFinished { code: Option<i32>, output_seq: u64 },
 }
 
 pub type Sink = Arc<dyn Fn(VtEvent) + Send + Sync>;
@@ -63,7 +69,8 @@ impl EventListener for Listener {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Size {
     pub cols: usize,
     pub rows: usize,
@@ -87,9 +94,11 @@ impl Dimensions for Size {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Options {
     pub scrollback: usize,
+    #[serde(with = "fixture::Shape")]
     pub cursor: CursorShape,
     pub blink: bool,
     pub word_separators: String,
@@ -111,10 +120,16 @@ pub struct Terminal {
     output_seq: u64,
     progress: Option<osc::Progress>,
     sniffer: osc::Sniffer,
+    marks: command_marks::Marks,
+    deferred_marks: command_handler::DeferredMarks,
+    scroll_region: std::ops::Range<i32>,
     cwd: Option<String>,
+    cwd_reported: bool,
     search: Option<search::Search>,
+    selection_from_buffer_match: bool,
     options: Options,
     listener: Listener,
+    recording: Option<fixture::Recording>,
 }
 
 pub struct VisibleCell<'a> {
@@ -124,11 +139,14 @@ pub struct VisibleCell<'a> {
     pub selected: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Cursor {
     pub line: usize,
     pub col: usize,
+    #[serde(with = "fixture::Shape")]
     pub shape: CursorShape,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wide: bool,
 }
 
@@ -136,18 +154,24 @@ impl Terminal {
     pub fn new(size: Size, options: Options, sink: Sink) -> Self {
         let cell = Arc::new(AtomicU32::new(0));
         let listener = Listener { sink, cell: cell.clone(), replaying: Arc::default() };
-        Self { term: Term::new(config(&options), &size, listener.clone()), parser: Processor::new(), size, cell, title: None, seq: 0, output_seq: 0, progress: None, sniffer: osc::Sniffer::default(), cwd: None, search: None, options, listener }
+        Self { term: Term::new(config(&options), &size, listener.clone()), parser: Processor::new(), size, cell, title: None, seq: 0, output_seq: 0, progress: None, sniffer: osc::Sniffer::default(), marks: command_marks::Marks::default(), deferred_marks: Default::default(), scroll_region: 0..size.rows as i32, cwd: None, cwd_reported: false, search: None, selection_from_buffer_match: false, options, listener, recording: None }
     }
 
     pub fn blank_for_replay(&self, size: Size) -> Self {
         let mut fresh = Self::new(size, self.options.clone(), self.listener.sink.clone());
         fresh.cwd.clone_from(&self.cwd);
+        fresh.cwd_reported = self.cwd_reported;
+        if self.recording.is_some() { fresh.enable_fixture_recording(); }
         fresh
     }
 
     pub fn feed_replay(&mut self, bytes: &[u8]) {
+        self.feed_replay_inner(bytes, false);
+    }
+
+    fn feed_replay_inner(&mut self, bytes: &[u8], saved: bool) {
         self.listener.replaying.store(true, Ordering::Relaxed);
-        self.feed(bytes);
+        self.feed_inner(bytes, saved);
         self.listener.replaying.store(false, Ordering::Relaxed);
     }
 
@@ -165,8 +189,12 @@ impl Terminal {
     }
 
     pub fn next_session(&mut self, options: Options, sink: Sink, cwd: Option<String>) -> Self {
+        if let Some(recording) = &mut self.recording {
+            recording.push(fixture::Step::NewSession { options: options.clone() });
+        }
         if self.mode().contains(TermMode::ALT_SCREEN) {
             self.term.swap_alt();
+            self.marks.leave_alt(&mut self.term);
         }
         let mut fresh = Self::new(self.size, options, sink);
         fresh.term.is_focused = self.term.is_focused;
@@ -177,6 +205,10 @@ impl Terminal {
         grid.cursor.point = point;
         grid.saved_cursor = grid.cursor.clone();
         std::mem::swap(fresh.term.grid_mut(), grid);
+        fresh.term.grid_mut().update_history(fresh.options.scrollback);
+        fresh.marks = self.marks.new_session();
+        fresh.recording = self.recording.take();
+        fresh.marks.retain_history(fresh.history(), fresh.size.rows);
         fresh.cwd = cwd;
         fresh.seq = self.seq.wrapping_add(1);
         fresh.output_seq = self.output_seq;
@@ -209,6 +241,7 @@ impl Terminal {
         found.refresh(&self.term);
         let Some(point) = found.step(older) else { return false };
         self.term.scroll_to_point(point);
+        self.record_fixture_view();
         self.bump();
         true
     }
@@ -242,6 +275,7 @@ impl Terminal {
         let viewport_start = row.saturating_sub(self.size.rows / 2).min(history);
         let offset = history - viewport_start;
         self.term.scroll_display(Scroll::Delta(offset as i32 - grid.display_offset() as i32));
+        self.record_fixture_view();
         self.bump();
         true
     }
@@ -258,6 +292,11 @@ impl Terminal {
 
     pub fn set_cwd(&mut self, cwd: Option<String>) {
         self.cwd = cwd;
+        self.cwd_reported = false;
+    }
+
+    pub fn reported_cwd(&self) -> Option<&str> {
+        if self.cwd_reported { self.cwd() } else { None }
     }
 
     pub fn line_text(&self, line: usize) -> (String, Vec<usize>) {
@@ -277,26 +316,58 @@ impl Terminal {
     }
 
     pub fn set_options(&mut self, options: Options) {
+        if self.options != options {
+            if let Some(recording) = &mut self.recording {
+                recording.push(fixture::Step::Options { options: options.clone() });
+            }
+        }
         self.term.set_options(config(&options));
+        let primary_history = if self.mode().contains(TermMode::ALT_SCREEN) { options.scrollback } else { self.history() };
+        self.marks.retain_history(primary_history, self.size.rows);
         self.options = options;
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.feed_inner(bytes, false);
+    }
+
+    fn feed_inner(&mut self, bytes: &[u8], saved: bool) {
+        if let Some(recording) = &mut self.recording { recording.output(bytes, saved); }
         let anchor = self.search.as_ref().map(|_| search::Search::anchor(&self.term, self.options.scrollback));
         let (cwd, progress) = (&mut self.cwd, &mut self.progress);
-        self.sniffer.feed(bytes, |payload| {
+        let cwd_reported = &mut self.cwd_reported;
+        let output_seq = self.output_seq.wrapping_add(1);
+        let notify = !self.listener.replaying.load(Ordering::Relaxed);
+        let mut handler = command_handler::HandlerWithMarks {
+            term: &mut self.term, marks: &mut self.marks, region: &mut self.scroll_region,
+            deferred: &mut self.deferred_marks, listener: &self.listener, output_seq,
+        };
+        let parser = &mut self.parser;
+        let mut consumed = 0;
+        self.sniffer.feed(bytes, |end, payload| {
             if let Some(dir) = osc::cwd(payload) {
                 *cwd = Some(dir);
+                *cwd_reported = true;
             }
             if let Some(state) = osc::progress(payload) {
                 *progress = state;
             }
+            if let Some(mark) = osc::command_mark(payload, saved) {
+                parser.advance(&mut handler, &bytes[consumed..end]);
+                consumed = end;
+                if parser.sync_bytes_count() == 0 {
+                    handler.command_mark(mark, notify);
+                } else {
+                    let dispatch = handler.defer_command_mark(mark, notify);
+                    parser.advance(&mut handler, &dispatch);
+                }
+            }
         });
-        self.parser.advance(&mut self.term, bytes);
+        parser.advance(&mut handler, &bytes[consumed..]);
         if let (Some(found), Some(anchor)) = (self.search.as_mut(), anchor) {
             found.after_feed(&self.term, anchor);
         }
-        self.output_seq = self.output_seq.wrapping_add(1);
+        self.output_seq = output_seq;
         self.bump();
     }
 
@@ -322,8 +393,12 @@ impl Terminal {
 
     pub fn resize(&mut self, size: Size) {
         if size != self.size {
+            if let Some(recording) = &mut self.recording {
+                recording.push(fixture::Step::Resize { size });
+            }
             self.size = size;
-            self.term.resize(size);
+            self.marks.resize(&mut self.term, size, self.selection_from_buffer_match);
+            self.scroll_region = 0..size.rows as i32;
             if let Some(found) = self.search.as_mut() {
                 found.reset_index();
             }
@@ -360,7 +435,10 @@ impl Terminal {
     }
 
     pub fn scroll(&mut self, scroll: Scroll) {
+        self.marks.stop_navigation();
+        let before = self.display_offset();
         self.term.scroll_display(scroll);
+        if before != self.display_offset() { self.record_fixture_view(); }
         self.bump();
     }
 
@@ -398,11 +476,13 @@ impl Terminal {
     }
 
     pub fn start_selection(&mut self, ty: SelectionType, point: Point, side: Side) {
+        self.selection_from_buffer_match = false;
         self.term.selection = Some(Selection::new(ty, point, side));
         self.bump();
     }
 
     pub fn update_selection(&mut self, point: Point, side: Side) {
+        self.selection_from_buffer_match = false;
         if let Some(s) = self.term.selection.as_mut() {
             s.update(point, side);
             self.bump();
@@ -410,6 +490,7 @@ impl Terminal {
     }
 
     pub fn select_all(&mut self) {
+        self.selection_from_buffer_match = false;
         let mut s = Selection::new(SelectionType::Simple, Point::new(self.term.topmost_line(), Column(0)), Side::Left);
         s.update(Point::new(self.term.bottommost_line(), Column(self.size.cols - 1)), Side::Right);
         self.term.selection = Some(s);
@@ -417,6 +498,7 @@ impl Terminal {
     }
 
     pub fn clear_selection(&mut self) {
+        self.selection_from_buffer_match = false;
         if self.term.selection.take().is_some() {
             self.bump();
         }
@@ -470,7 +552,13 @@ impl Terminal {
     }
 
     pub fn clear_history(&mut self) {
+        if let Some(recording) = &mut self.recording {
+            recording.push(fixture::Step::ClearHistory);
+        }
         self.term.grid_mut().clear_history();
+        if !self.mode().contains(TermMode::ALT_SCREEN) {
+            self.marks.retain_history(0, self.size.rows);
+        }
         if let Some(found) = self.search.as_mut() {
             found.reset_index();
         }
@@ -555,3 +643,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../test/search_stream.rs"]
 mod search_stream;
+
+#[cfg(test)]
+#[path = "../test/fixture.rs"]
+mod fixture_tests;

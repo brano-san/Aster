@@ -31,8 +31,9 @@ fn trim_tail(chars: &[char], start: usize, mut end: usize) -> usize {
 }
 
 fn starts_with_at(chars: &[char], at: usize, pat: &str) -> bool {
-    let p: Vec<char> = pat.chars().collect();
-    chars.len() >= at + p.len() && chars[at..at + p.len()].iter().zip(&p).all(|(a, b)| a.eq_ignore_ascii_case(b))
+    chars.get(at..at + pat.len()).is_some_and(|text| {
+        text.iter().zip(pat.bytes()).all(|(a, b)| a.eq_ignore_ascii_case(&char::from(b)))
+    })
 }
 
 fn word_start(chars: &[char], at: usize) -> bool {

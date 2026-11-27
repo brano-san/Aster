@@ -410,6 +410,8 @@ impl App {
         self.motion |= control_frame.finish();
         self.control_motion = controls;
         self.draw_sliding_files(g, now);
+        self.draw_global_transfers(g, content);
+        self.draw_quick_selection(g);
         self.draw_overlay(g, now);
         if let Some(form) = &self.ssh_forward_form {
             if let Some(caret) = self.draw_ssh_forward_form(g, content, form) {
@@ -997,7 +999,7 @@ impl App {
                 self.background_launches.push(id);
                 continue;
             }
-            let Some(tab) = self.tabs.iter().find(|t| t.root.contains(id)) else { continue };
+            let Some(tab) = self.all_tabs().find(|t| t.root.contains(id)) else { continue };
             if let Some((_, rect)) = tab.root.layout(content, gap).panes.into_iter().find(|(p, _)| *p == id) {
                 let inner = pane_inner_with(self.pane_terminal_rect(id, rect), s, &self.config.terminal);
                 let size = Size::new((inner.w / m.w).floor().max(2.0) as usize, (inner.h / m.h).floor().max(1.0) as usize);
@@ -1228,10 +1230,18 @@ impl App {
         let Some((full, ())) = slides.title.content else { return };
         if header.w <= 0.0 || height <= 0.0 { return; }
         let toolbar = slides.toolbar.content;
-        let title_right = toolbar.filter(|_| open).map(|(_, toolbar)| toolbar.buttons[0].x);
+        let rerun = self.task_rerun_button(id, rect);
+        let title_right = toolbar.filter(|_| open).map(|(_, toolbar)| toolbar.buttons[0].x).or_else(|| rerun.map(|button| button.x));
         let header = Rect::new(header.x, header.y, header.w, full);
         let from = g.dl.instances.len();
         self.draw_pane_title(g, id, header, focused, title_right, busy && !floating_busy);
+        if let Some(button) = rerun {
+            let style = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+            let hovered = button.contains(self.mouse.0, self.mouse.1);
+            g.dl.round_rect(button, if hovered { theme.button_hover } else { theme.surface }, 4.0 * s);
+            g.dl.outline(button, if hovered { theme.accent } else { theme.overlay_border }, 4.0 * s, s.round().max(1.0));
+            centered(g, button, t("Rerun task"), style, theme.text);
+        }
         let shown = Rect::new(header.x, header.y, header.w, height);
         if height < full {
             g.dl.shift(from, 0.0, height - full);
@@ -1944,7 +1954,7 @@ impl App {
         };
         if width <= 0.0 { return; }
         let Some(page) = self.files.as_ref().or(self.panel_motion.closed_files.as_ref()) else { return };
-        let geo = crate::files::geometry(rect, self.ui(), page, &self.transfers_of(page.pane));
+        let geo = crate::files::geometry(rect, self.ui(), page, &self.transfers_of(page.pane), self.shell_directory(page.pane).is_some());
         let max_scroll = (geo.height - geo.list.h).max(0.0);
         let scroll = self.list_motion.files.sample(geo.scroll, max_scroll, animate, now, &mut self.motion);
         let (mx, my) = self.mouse;
@@ -1983,6 +1993,11 @@ impl App {
             g.dl.round_rect(geo.close, theme.button_hover, radius);
         }
         centered(g, geo.close, G_CLOSE, FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false), theme.text);
+        for (r, label) in [(Some(geo.transfer_button), t("Transfers")), (geo.shell_directory, t("Shell folder"))] {
+            if let Some(r) = r {
+                self.draw_transfer_button(g, r, label, true, (mx, my));
+            }
+        }
 
         let caret_h = (16.0 * s).round();
         let field = |g: &mut Gfx<B>, r: Rect, text: &str, placeholder: &str, focused: bool| {
@@ -2008,11 +2023,31 @@ impl App {
             Some(Prompt::Chmod { text, dir, .. }) => (text.clone(), if *dir { t("Permissions in octal, applied to everything inside").to_owned() } else { t("Permissions in octal, for example 644").to_owned() }, true),
             None => (page.path.clone(), t("Loading").to_owned(), false),
         };
-        field(g, geo.path, &path_text, &path_hint, editing);
+        if geo.crumbs.is_empty() {
+            field(g, geo.path, &path_text, &path_hint, editing);
+        } else {
+            g.dl.round_rect(geo.path, theme.overlay, radius);
+            g.dl.outline(geo.path, theme.overlay_border, radius, line);
+            g.dl.set_clip(Some(geo.path));
+            for (i, crumb, rect) in &geo.crumbs {
+                let focused = page.crumb == Some(*i);
+                if focused || rect.contains(mx, my) {
+                    g.dl.round_rect(*rect, if focused { theme.accent.alpha(0x38) } else { theme.button_hover }, (4.0 * s).round());
+                }
+                if focused { g.dl.outline(*rect, theme.accent, (4.0 * s).round(), line); }
+                let inside = rect.inset((6.0 * s).round(), 0.0);
+                let y = baseline(g, inside, ui);
+                g.text(inside.x, y, &crumb.label, ui, theme.text, inside.w);
+                if *i != 0 {
+                    centered(g, Rect::new(rect.x - (5.0 * s).round(), rect.y, (7.0 * s).round(), rect.h), "›", small, theme.text_dim);
+                }
+            }
+            g.dl.set_clip(None);
+        }
         if matches!(page.prompt, Some(Prompt::Delete { .. })) {
             g.dl.outline(geo.path, Color::rgb(0xD9534F), radius, line);
         }
-        field(g, geo.filter, &page.query, t("Filter"), page.prompt.is_none());
+        field(g, geo.filter, &page.query, t("Filter"), page.prompt.is_none() && page.crumb.is_none());
 
         g.dl.set_clip(Some(geo.list));
         let name_x = geo.list.x + (40.0 * s).round();
@@ -2081,7 +2116,7 @@ impl App {
     }
 
     fn draw_file_transfers<B: TextBackend>(&mut self, g: &mut Gfx<B>, pane: PaneId, geo: &crate::files::FilesGeometry, open: bool) {
-        use crate::files::{human_size, TransferState};
+        use crate::files::TransferState;
         let s = self.ui();
         let theme = self.theme;
         let radius = (6.0 * s).round();
@@ -2097,13 +2132,12 @@ impl App {
             let bar = Rect::new(r.x + pad, r.bottom() - (6.0 * s).round(), r.w - 2.0 * pad, (3.0 * s).round().max(2.0));
             let target = if t.total > 0 { (t.done as f32 / t.total as f32).clamp(0.0, 1.0) } else { 0.0 };
             let fraction = self.busy.progress(ProgressBar::Transfer(*id), target);
-            let (state, color) = match &t.state {
-                TransferState::Running => (tf("{done} of {total}  ·  click to cancel", &[("done", &human_size(t.done)), ("total", &human_size(t.total))]), theme.text_dim),
-                TransferState::Editing { saves } => (tf("editing locally  ·  saved {saves} times  ·  click to stop", &[("saves", &saves.to_string())]), theme.accent),
-                TransferState::Done(m) if !t.upload => (tf("{message}  ·  click to show", &[("message", m)]), theme.text_dim),
-                TransferState::Done(m) => (m.clone(), theme.text_dim),
-                TransferState::Failed(e) => (tf("{error}  ·  click to dismiss", &[("error", e)]), Color::rgb(0xD9534F)),
+            let color = match &t.state {
+                TransferState::Editing { .. } => theme.accent,
+                TransferState::Failed(_) => Color::rgb(0xD9534F),
+                _ => theme.text_dim,
             };
+            let state = format!("{}  ·  {}", t.description(), t.action_label());
             g.dl.round_rect(bar, theme.overlay_border, bar.h / 2.0);
             if fraction > 0.0 {
                 g.dl.round_rect(Rect::new(bar.x, bar.y, (bar.w * fraction).max(bar.h), bar.h), if matches!(t.state, TransferState::Failed(_)) { Color::rgb(0xD9534F) } else { theme.accent }, bar.h / 2.0);
@@ -2123,9 +2157,91 @@ impl App {
             }
             g.text(x, y, &state, small, color, width.max(0.0));
         }
-        let hint = t("Enter open  ·  Ctrl+D download  ·  F4 edit  ·  F2 rename  ·  F7 new folder  ·  F9 permissions  ·  Del delete  ·  Ctrl+U or drop to upload");
-        let hy = baseline(g, geo.hint, small);
-        g.text(geo.hint.x, hy, hint, small, theme.text_dim, geo.hint.w);
+        let top = if geo.shell_directory.is_some() {
+            t("Tab focus path  ·  ← / → select folder  ·  Ctrl+L go to folder  ·  Ctrl+Shift+L shell folder")
+        } else {
+            t("Tab focus path  ·  ← / → select folder  ·  Ctrl+L go to folder")
+        };
+        let bottom = t("Enter open  ·  Ctrl+D download  ·  F4 edit  ·  F2 rename  ·  F7 new folder  ·  F9 permissions  ·  Del delete  ·  Ctrl+U or drop to upload");
+        for (i, hint) in [top, bottom].into_iter().enumerate() {
+            let half = geo.hint.h / 2.0;
+            let y = baseline(g, Rect::new(geo.hint.x, geo.hint.y + i as f32 * half, geo.hint.w, half), small);
+            g.text(geo.hint.x, y, hint, small, theme.text_dim, geo.hint.w);
+        }
+    }
+
+    fn draw_transfer_button<B: TextBackend>(&self, g: &mut Gfx<B>, rect: Rect, label: &str, enabled: bool, (mx, my): (f32, f32)) {
+        let s = self.ui();
+        let theme = self.theme;
+        let radius = (5.0 * s).round();
+        let style = FontStyle::new(FontFamily::Ui, (12.0 * s).round(), false);
+        g.dl.round_rect(rect, if enabled && rect.contains(mx, my) { theme.button_hover } else { theme.surface }, radius);
+        g.dl.outline(rect, theme.overlay_border, radius, s.round().max(1.0));
+        let inner = rect.inset((4.0 * s).round(), 0.0);
+        let w = g.measure(label, style).min(inner.w);
+        let y = baseline(g, inner, style);
+        g.text((inner.x + (inner.w - w) / 2.0).round(), y, label, style, if enabled { theme.text } else { theme.text_dim }, inner.w);
+    }
+
+    fn draw_global_transfers<B: TextBackend>(&mut self, g: &mut Gfx<B>, content: Rect) {
+        use crate::files::TransferState;
+        let Some(geo) = self.global_transfer_geometry() else { return };
+        let theme = self.theme;
+        let s = self.ui();
+        let radius = (8.0 * s).round();
+        let line = s.round().max(1.0);
+        let mouse = self.mouse;
+        let title = FontStyle::new(FontFamily::Ui, (17.0 * s).round(), true);
+        let ui = FontStyle::new(FontFamily::Ui, (13.0 * s).round(), false);
+        let small = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), false);
+        g.dl.rect(content, theme.dim);
+        g.dl.shadow(geo.frame, theme.shadow, radius, (18.0 * s).round());
+        g.dl.round_rect(geo.frame, theme.overlay, radius);
+        g.dl.outline(geo.frame, theme.overlay_border, radius, line);
+        let ty = baseline(g, geo.title, title);
+        g.text(geo.title.x, ty, t("SFTP transfers"), title, theme.text, geo.title.w);
+        if geo.close.contains(mouse.0, mouse.1) {
+            g.dl.round_rect(geo.close, theme.button_hover, radius);
+        }
+        centered(g, geo.close, G_CLOSE, FontStyle::new(FontFamily::Icons, (10.0 * s).round(), false), theme.text);
+        let selected = self.global_transfer_selected();
+        g.dl.set_clip(Some(geo.list));
+        if self.transfers.is_empty() {
+            centered(g, geo.list, t("No file transfers"), ui, theme.text_dim);
+        }
+        for row in &geo.rows {
+            let Some(transfer) = self.transfers.iter().find(|t| t.id == row.id) else { continue };
+            let full = Rect::new(geo.list.x, row.details.y, geo.list.w, row.details.h);
+            if selected == Some(row.id) {
+                g.dl.round_rect(full, theme.accent.alpha(0x24), (5.0 * s).round());
+            }
+            let x = row.details.x + (8.0 * s).round();
+            let w = (row.details.right() - x).max(0.0);
+            let arrow = if transfer.edit { "✎" } else if transfer.upload { "↑" } else { "↓" };
+            let label = format!("{arrow} {}  ·  {}", transfer.name, transfer.host);
+            g.text(x, row.details.y + (17.0 * s).round(), &label, ui, theme.text, w);
+            let color = if matches!(transfer.state, TransferState::Failed(_)) { Color::rgb(0xD9534F) } else { theme.text_dim };
+            g.text(x, row.details.y + (34.0 * s).round(), &transfer.description(), small, color, w);
+            let bar = Rect::new(x, row.details.bottom() - (6.0 * s).round(), w, (2.0 * s).round().max(1.0));
+            if matches!(transfer.state, TransferState::Running) {
+                g.dl.round_rect(bar, theme.overlay_border, bar.h / 2.0);
+                let target = if transfer.total > 0 { (transfer.done as f32 / transfer.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                let fraction = self.busy.progress(ProgressBar::Transfer(row.id), target);
+                if fraction > 0.0 { g.dl.round_rect(Rect::new(bar.x, bar.y, bar.w * fraction, bar.h), theme.accent, bar.h / 2.0); }
+            }
+            if self.panes.contains_key(&transfer.pane) {
+                self.draw_transfer_button(g, row.source, t("Open tab"), true, mouse);
+            }
+            self.draw_transfer_button(g, row.action, transfer.action_label(), true, mouse);
+            if selected == Some(row.id) && self.transfer_action_focused() {
+                g.dl.outline(row.action, theme.accent, (5.0 * s).round(), line);
+            }
+        }
+        g.dl.set_clip(None);
+        if !self.transfers.is_empty() {
+            let y = baseline(g, geo.hint, small);
+            g.text(geo.hint.x, y, t("↑ / ↓ select  ·  Tab focus action  ·  Enter activate  ·  Esc close"), small, theme.text_dim, geo.hint.w);
+        }
     }
 
     fn draw_profile_tree_row<B: TextBackend>(&self, g: &mut Gfx<B>, page: &crate::settings::SettingsPage, tree: &crate::profiles_page::TreeRow, rect: Rect, (selected, (mx, my)): (bool, (f32, f32)), controls: &mut crate::control_motion::Frame<'_>) {
@@ -3332,6 +3448,30 @@ impl App {
         }
     }
 
+    fn draw_quick_selection<B: TextBackend>(&self, g: &mut Gfx<B>) {
+        let Some(selection) = self.quick_selection.as_ref() else { return };
+        let Some((_, pane)) = self.layout.panes.iter().find(|(id, _)| *id == selection.pane) else { return };
+        let Some(metrics) = self.metrics else { return };
+        let s = self.ui();
+        let pane = self.pane_terminal_rect(selection.pane, *pane);
+        let inner = pane_inner_with(pane, s, &self.config.terminal);
+        g.dl.rect(pane, self.theme.background.alpha(76));
+        let title = if selection.open { t("Type a label to open · Esc to cancel") } else { t("Type a label to copy · Esc to cancel") };
+        self.draw_hint(g, pane, title, false);
+        let font = FontStyle::new(FontFamily::Ui, (11.5 * s).round(), true);
+        let h = metrics.h.max(14.0 * s);
+        g.dl.set_clip(Some(pane));
+        for target in selection.targets.iter().filter(|target| target.label.starts_with(&selection.prefix)) {
+            let w = (g.measure(&target.label, font) + 9.0 * s).round();
+            let x = (inner.x + target.column as f32 * metrics.w).min((pane.right() - w).max(pane.x));
+            let y = (inner.y + target.line as f32 * metrics.h).min((pane.bottom() - h).max(pane.y));
+            let rect = Rect::new(x, y, w, h);
+            g.dl.round_rect(rect, self.theme.accent, 3.0 * s);
+            centered(g, rect, &target.label, font, self.theme.on_accent);
+        }
+        g.dl.set_clip(None);
+    }
+
     fn draw_overlay<B: TextBackend>(&mut self, g: &mut Gfx<B>, now: Instant) {
         let layer = Layer::Overlay;
         let overlay = self.overlay.clone();
@@ -3380,8 +3520,11 @@ impl App {
         if o.shown.is_empty() {
             let r = Rect::new(geo.frame.x, geo.input.bottom(), geo.frame.w, geo.frame.bottom() - geo.input.bottom());
             let message = match o.kind {
+                OverlayKind::WorkspaceName { .. } => t("Choose a unique workspace name"),
                 OverlayKind::SerialSpeed(_) => t("Enter a speed from 50 to 4000000 baud"),
                 OverlayKind::SshPorts(pane) if !self.ssh_forwards.get(&pane).is_some_and(|items| !items.is_empty()) => t("No SSH port forwards"),
+                kind if kind.searches_output() => self.session_search_status(),
+                OverlayKind::CommandHistory(_) => t("No completed commands in this pane"),
                 _ => t("No matches"),
             };
             centered(g, r, message, ui, theme.text_dim);
@@ -3398,13 +3541,48 @@ impl App {
         }
         let profiles = o.kind.is_profile_picker();
         for (i, r) in &geo.items {
-            let (item, _) = &o.shown[*i];
+            let (item, ranges) = &o.shown[*i];
             let pick = &o.items[*item];
             let chosen = *i == o.selected;
             if chosen {
                 g.dl.round_rect(*r, theme.accent.alpha(0x38), (5.0 * s).round());
             } else if let Some(fill) = hover_fill(&self.hover_state.overlay, *item, now, theme.button_hover) {
                 g.dl.round_rect(*r, fill, (5.0 * s).round());
+            }
+            if o.kind.has_detail_rows() {
+                let inner = r.inset((10.0 * s).round(), (4.0 * s).round());
+                let top = Rect::new(inner.x, inner.y, inner.w, (inner.h * 0.54).round());
+                let bottom = Rect::new(inner.x, top.bottom(), inner.w, inner.bottom() - top.bottom());
+                let label_y = baseline(g, top, ui);
+                let hint_y = baseline(g, bottom, small);
+                let highlight = ranges.first().filter(|_| matches!(o.kind, OverlayKind::CommandOutput(..)));
+                if let Some(range) = highlight {
+                    let before = g.text(top.x, label_y, &pick.label[..range.start], ui, theme.text, top.w);
+                    let matched = g.text(top.x + before, label_y, &pick.label[range.clone()], ui, theme.accent, (top.w - before).max(0.0));
+                    g.text(top.x + before + matched, label_y, &pick.label[range.end..], ui, theme.text, (top.w - before - matched).max(0.0));
+                } else {
+                    g.text(top.x, label_y, &pick.label, ui, theme.text, top.w);
+                }
+                let shortcut = if chosen {
+                    match o.kind {
+                        OverlayKind::CommandHistory(_) => Some(t("Enter to search · Ctrl+C to copy output")),
+                        OverlayKind::CommandOutput(..) => Some(t("Enter to jump · Ctrl+C to copy match")),
+                        _ => None,
+                    }
+                } else { None };
+                if let Some(shortcut) = shortcut {
+                    if pick.hint.is_empty() {
+                        g.text(bottom.x, hint_y, shortcut, small, theme.text_dim, bottom.w);
+                    } else {
+                        let shortcut_w = g.measure(shortcut, small).min(bottom.w * 0.62);
+                        let hint_w = (bottom.w - shortcut_w - 8.0 * s).max(0.0);
+                        g.text(bottom.x, hint_y, &pick.hint, small, theme.text_dim, hint_w);
+                        g.text(bottom.right() - shortcut_w, hint_y, shortcut, small, theme.text_dim, shortcut_w);
+                    }
+                } else {
+                    g.text(bottom.x, hint_y, &pick.hint, small, theme.text_dim, bottom.w);
+                }
+                continue;
             }
             let y = baseline(g, *r, ui);
             let mut x = r.x + (10.0 * s).round();
@@ -3440,7 +3618,15 @@ impl App {
                 centered(g, action, &pick.badge, small, theme.text);
                 right = action.x - 8.0 * s;
             }
-            let label_room = if port_action && !pick.hint.is_empty() { ((right - x) * 0.52).max(0.0) } else { (right - x).max(0.0) };
+            let workspace_hint = (o.kind == OverlayKind::Workspaces && !pick.hint.is_empty())
+                .then(|| g.measure(&pick.hint, small).min((right - x).max(0.0) * 0.42));
+            let label_room = if let Some(hint) = workspace_hint {
+                (right - x - hint - 8.0 * s).max(0.0)
+            } else if port_action && !pick.hint.is_empty() {
+                ((right - x) * 0.52).max(0.0)
+            } else {
+                (right - x).max(0.0)
+            };
             let label_w = g.measure(&pick.label, ui).min(label_room);
             g.text(x, y, &pick.label, ui, theme.text, label_room);
             if !pick.hint.is_empty() && pick.hint != pick.label {
@@ -3454,7 +3640,7 @@ impl App {
                     let hx = x + label_w + 9.0 * s;
                     g.text(hx, hy, &pick.hint, small, theme.text_dim, (right - hx).max(0.0));
                 } else {
-                    let hint_w = g.measure(&pick.hint, small).min(right - x);
+                    let hint_w = workspace_hint.unwrap_or_else(|| g.measure(&pick.hint, small).min(right - x));
                     g.text(right - hint_w, hy, &pick.hint, small, theme.text_dim, hint_w + 1.0);
                 }
             }

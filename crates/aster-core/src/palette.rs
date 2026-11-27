@@ -19,6 +19,9 @@ impl App {
             .filter(|a| !matches!(a, Action::SerialSpeed | Action::SerialBreak) || self.serial_pane().is_some())
             .filter(|a| *a != Action::SaveLayout || self.can_save_layout())
             .filter(|a| *a != Action::SaveAsProfile || self.focused_pane().is_some_and(|id| self.panes.contains_key(&id)))
+            .filter(|a| *a != Action::SaveSelectionAsSnippet || self.focused_terminal().is_some_and(|t| t.lock().has_selection()))
+            .filter(|a| *a != Action::CommandHistory || self.focused_terminal().is_some())
+            .filter(|a| *a != Action::RerunTask || self.focused_pane().is_some_and(|pane| self.can_rerun_task(pane)))
             .filter(|a| !matches!(a, Action::DefaultTerminal(enable) if !self.default_terminal.offers(*enable)))
             .map(|action| self.command_pick(&action, action.label(), action.source_label()))
             .collect();
@@ -27,6 +30,7 @@ impl App {
             let name = entry.name.as_deref();
             self.command_pick(&entry.action, entry.action.label_for(name), entry.action.source_label_for(name))
         }));
+        picks.extend(self.snippet_picks());
         for (parent, entries) in [("Tab", self.tab_menu_entries(self.active)), ("Terminal", self.terminal_menu_entries())] {
             picks.extend(entries.into_iter().filter_map(|entry| {
                 let Entry::Item { label: std::borrow::Cow::Borrowed(label), action, .. } = entry else { return None };

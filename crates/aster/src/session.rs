@@ -2,6 +2,7 @@ use crate::zmodem::{Note, Outcome, Transfer};
 use aster_core::app::{Shared, Wake};
 use aster_core::panes::PaneId;
 use aster_platform::{Pty, Spawned, WindowId};
+use aster_vt::fixture::{Chunking, Fixture, MAX_FILE_BYTES};
 use crossbeam_channel::{bounded, unbounded, Sender};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -40,33 +41,19 @@ impl RawOutput {
 pub enum OutputFile {
     Raw(Vec<u8>),
     Buffer(String),
+    Fixture(Vec<u8>),
 }
 
 impl OutputFile {
     pub fn save(self, pane: PaneId, downloads: impl FnOnce() -> Option<PathBuf> + Send + 'static, terminal: Shared, wake: Wake) {
-        let report = move |message: String| {
-            let clean: String = message.chars().filter(|c| !c.is_control()).collect();
-            terminal.lock().feed(format!("\r\n\x1b[2m[{clean}]\x1b[0m\r\n").as_bytes());
-            wake();
-        };
-        let notify = report.clone();
-        let worker = std::thread::Builder::new().name(format!("aster-save-output-{pane}")).spawn(move || {
-            let result = downloads().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Downloads folder unavailable"))
-                .and_then(|dir| self.write(&dir, pane));
-            notify(match result {
-                Ok(path) => aster_core::i18n::tf("saved to {path}", &[("path", &path.display().to_string())]),
-                Err(e) => format!("cannot save output: {e}"),
-            });
-        });
-        if let Err(e) = worker {
-            report(format!("cannot save output: {e}"));
-        }
+        save_output(pane, downloads, terminal, wake, move || Ok(self));
     }
 
     fn write(&self, dir: &Path, pane: PaneId) -> io::Result<PathBuf> {
         let (name, extension, bytes) = match self {
             Self::Raw(bytes) => ("output", "bin", bytes.as_slice()),
             Self::Buffer(text) => ("buffer", "txt", text.as_bytes()),
+            Self::Fixture(bytes) => ("fixture", "json", bytes.as_slice()),
         };
         std::fs::create_dir_all(dir)?;
         let mut time = SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_nanos();
@@ -87,6 +74,52 @@ impl OutputFile {
             return Ok(path);
         }
     }
+}
+
+fn save_output(
+    pane: PaneId,
+    downloads: impl FnOnce() -> Option<PathBuf> + Send + 'static,
+    terminal: Shared,
+    wake: Wake,
+    output: impl FnOnce() -> io::Result<OutputFile> + Send + 'static,
+) {
+    let report = move |message: String| {
+        let clean: String = message.chars().filter(|c| !c.is_control()).collect();
+        terminal.lock().feed(format!("\r\n\x1b[2m[{clean}]\x1b[0m\r\n").as_bytes());
+        wake();
+    };
+    let notify = report.clone();
+    let worker = std::thread::Builder::new().name(format!("aster-save-output-{pane}")).spawn(move || {
+        let result = output().and_then(|output| {
+            let dir = downloads().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Downloads folder unavailable"))?;
+            output.write(&dir, pane)
+        });
+        notify(match result {
+            Ok(path) => aster_core::i18n::tf("saved to {path}", &[("path", &path.display().to_string())]),
+            Err(e) => format!("cannot save output: {e}"),
+        });
+    });
+    if let Err(e) = worker {
+        report(format!("cannot save output: {e}"));
+    }
+}
+
+pub fn save_fixture(pane: PaneId, downloads: impl FnOnce() -> Option<PathBuf> + Send + 'static, terminal: Shared, wake: Wake) {
+    let source = terminal.clone();
+    save_output(pane, downloads, terminal, wake, move || {
+        let fixture = source.lock().capture_fixture().map_err(io::Error::other)?;
+        Ok(OutputFile::Fixture(fixture.to_json().map_err(io::Error::other)?))
+    });
+}
+
+pub fn verify_fixture_file(path: &Path) -> io::Result<()> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(MAX_FILE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    let fixture = Fixture::from_json(&bytes).map_err(io::Error::other)?;
+    for chunking in Chunking::ALL {
+        fixture.verify(chunking).map_err(|error| io::Error::other(format!("{chunking:?}: {error}")))?;
+    }
+    Ok(())
 }
 
 #[derive(Default)]

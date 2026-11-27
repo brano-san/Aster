@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "initial_size": { "cols": 12, "rows": 3 },
+  "initial_options": { "scrollback": 100, "cursor": "block", "blink": true, "word_separators": " ()[]{}'\"" },
+  "steps": [
+    { "kind": "output", "data": "1b5d3133" },
+    { "kind": "output", "data": "333b410724201b5d3133333b42076563686f0d0a1b5d3133333b431b" },
+    { "kind": "output", "data": "5c68690d0a1b5d3133333b443b31071b5d3133333b41072420" }
+  ],
+  "expected": {
+    "size": { "cols": 12, "rows": 3 },
+    "rows": ["$ echo", "hi", "$"],
+    "cursor": { "line": 2, "col": 2, "shape": "block" },
+    "commands": [{ "id": 1, "command": "echo", "preview": "hi", "status": 1 }],
+    "integrated": true
+  }
+}

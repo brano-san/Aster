@@ -1,11 +1,15 @@
 use crossbeam_channel::Sender;
 use russh_sftp::client::SftpSession;
+use russh_sftp::client::{error::Error as SftpError, fs::File as SftpFile};
+use russh_sftp::protocol::{OpenFlags, StatusCode};
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::{DefaultHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Notify;
 
 const CHUNK: usize = 64 * 1024;
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
@@ -23,7 +27,8 @@ pub struct Entry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
-    List { path: String },
+    List { id: u64, paths: Vec<String> },
+    OpenLink { id: u64, path: String },
     Download { id: u64, remote: String, dir: PathBuf },
     Upload { id: u64, local: PathBuf, dir: String },
     Mkdir { path: String },
@@ -36,7 +41,9 @@ pub enum Request {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
-    Listing { path: String, entries: Vec<Entry> },
+    Listing { id: u64, path: String, entries: Vec<Entry> },
+    LinkFile { id: u64, path: String },
+    NavigationFailed { id: u64, error: String },
     Progress { id: u64, done: u64, total: u64 },
     Downloaded { id: u64, local: PathBuf },
     Uploaded { id: u64, remote: String },
@@ -44,6 +51,16 @@ pub enum Reply {
     Editing { id: u64, local: PathBuf },
     Saved { id: u64, remote: String },
     Failed { id: Option<u64>, error: String },
+}
+
+impl Request {
+    pub(crate) fn failure(&self, error: String) -> Reply {
+        match self {
+            Self::List { id, .. } | Self::OpenLink { id, .. } => Reply::NavigationFailed { id: *id, error },
+            Self::Download { id, .. } | Self::Upload { id, .. } | Self::Edit { id, .. } | Self::Cancel { id } => Reply::Failed { id: Some(*id), error },
+            _ => Reply::Failed { id: None, error },
+        }
+    }
 }
 
 pub fn join(dir: &str, name: &str) -> String {
@@ -82,7 +99,7 @@ pub fn local_name(remote: &str) -> String {
 
 pub fn unique(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
-    if !first.exists() {
+    if first.symlink_metadata().is_err() {
         return first;
     }
     let (stem, ext) = match name.rfind('.').filter(|&i| i > 0) {
@@ -91,8 +108,28 @@ pub fn unique(dir: &Path, name: &str) -> PathBuf {
     };
     (1..)
         .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|p| !p.exists())
+        .find(|p| p.symlink_metadata().is_err())
         .unwrap_or(first)
+}
+
+pub(super) async fn exclusive_upload(session: &SftpSession, path: &str) -> Result<SftpFile, String> {
+    let flags = OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE;
+    match session.open_with_flags(path, flags).await {
+        Ok(file) => Ok(file),
+        Err(error) => Err(upload_create_error(session, path, error).await),
+    }
+}
+
+pub(super) async fn upload_create_error(session: &SftpSession, path: &str, error: SftpError) -> String {
+    if session.symlink_metadata(path).await.is_ok() {
+        format!("{path} already exists")
+    } else {
+        format!("{path}: {error}")
+    }
+}
+
+pub(super) fn file_is_missing(error: &SftpError) -> bool {
+    matches!(error, SftpError::Status(status) if status.status_code == StatusCode::NoSuchFile)
 }
 
 pub fn sort(entries: &mut [Entry]) {
@@ -141,7 +178,7 @@ async fn edit_stamp(path: &Path) -> Result<Option<EditStamp>, String> {
 pub struct Files {
     session: Arc<SftpSession>,
     replies: Sender<Reply>,
-    running: Arc<Mutex<HashMap<u64, tokio::task::JoinHandle<()>>>>,
+    running: Arc<Mutex<HashMap<u64, Arc<Notify>>>>,
 }
 
 impl Files {
@@ -150,26 +187,21 @@ impl Files {
     }
 
     pub fn handle(&self, request: Request) {
+        let mut running = self.running.lock().unwrap_or_else(|error| error.into_inner());
         if let Request::Cancel { id } = request {
-            if let Some(task) = self.running.lock().ok().and_then(|mut r| r.remove(&id)) {
-                task.abort();
-                let replies = self.replies.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = task.await {
-                        let error = if error.is_cancelled() { "cancelled".into() } else { error.to_string() };
-                        let _ = replies.send(Reply::Failed { id: Some(id), error });
-                    }
-                });
-            }
+            if let Some(cancel) = running.get(&id) { cancel.notify_one(); }
             return;
         }
         let id = match &request {
             Request::Download { id, .. } | Request::Upload { id, .. } | Request::Edit { id, .. } => Some(*id),
             _ => None,
         };
+        let cancel = Arc::new(Notify::new());
+        if let Some(id) = id { running.insert(id, cancel.clone()); }
+        drop(running);
         let me = self.clone();
-        let task = tokio::spawn(async move {
-            let reply = me.run(request).await.unwrap_or_else(|error| Reply::Failed { id, error });
+        tokio::spawn(async move {
+            let reply = me.run(&request, &cancel).await.unwrap_or_else(|error| request.failure(error));
             if let Some(id) = id {
                 if let Ok(mut r) = me.running.lock() {
                     r.remove(&id);
@@ -177,52 +209,78 @@ impl Files {
             }
             let _ = me.replies.send(reply);
         });
-        if let (Some(id), Ok(mut r)) = (id, self.running.lock()) {
-            r.insert(id, task);
-        }
     }
 
-    async fn run(&self, request: Request) -> Result<Reply, String> {
+    pub(super) fn cancel_all(&self) {
+        let running = self.running.lock().unwrap_or_else(|error| error.into_inner());
+        for cancel in running.values() { cancel.notify_one(); }
+    }
+
+    async fn listing(&self, id: u64, path: &str) -> Result<Reply, String> {
+        let wanted = if path.is_empty() || path == "~" { "." } else { path };
+        let path = self.session.canonicalize(wanted).await.map_err(|e| e.to_string())?;
+        let mut entries: Vec<Entry> = self.session.read_dir(path.clone()).await.map_err(|e| e.to_string())?
+            .filter(|e| !matches!(e.file_name().as_str(), "." | ".."))
+            .map(|e| entry(e.file_name(), &e.metadata())).collect();
+        sort(&mut entries);
+        Ok(Reply::Listing { id, path, entries })
+    }
+
+    async fn run(&self, request: &Request, cancel: &Notify) -> Result<Reply, String> {
         let s = &self.session;
         let err = |e: russh_sftp::client::error::Error| e.to_string();
         match request {
-            Request::List { path } => {
-                let wanted = if path.trim().is_empty() || path == "~" { ".".to_owned() } else { path };
-                let path = s.canonicalize(wanted).await.map_err(err)?;
-                let mut entries: Vec<Entry> = s.read_dir(path.clone()).await.map_err(err)?.filter(|e| e.file_name() != "." && e.file_name() != "..").map(|e| entry(e.file_name(), &e.metadata())).collect();
-                sort(&mut entries);
-                Ok(Reply::Listing { path, entries })
+            Request::List { id, paths } => {
+                let mut error = String::new();
+                for path in paths {
+                    match self.listing(*id, path).await {
+                        Ok(reply) => return Ok(reply),
+                        Err(e) => error = e,
+                    }
+                }
+                Err(error)
+            }
+            Request::OpenLink { id, path } => {
+                let meta = s.metadata(path).await.map_err(err)?;
+                if meta.is_dir() {
+                    self.listing(*id, path).await
+                } else if meta.is_regular() {
+                    Ok(Reply::LinkFile { id: *id, path: path.clone() })
+                } else {
+                    Err(format!("{path} is not a regular file"))
+                }
             }
             Request::Mkdir { path } => {
                 s.create_dir(path.clone()).await.map_err(err)?;
-                Ok(Reply::Changed { dir: parent(&path) })
+                Ok(Reply::Changed { dir: parent(path) })
             }
             Request::Remove { path, dir } => {
-                if dir {
-                    crate::sftp_tree::remove(s, &path).await?;
+                if *dir {
+                    crate::sftp_tree::remove(s, path).await?;
                 } else {
                     s.remove_file(path.clone()).await.map_err(err)?;
                 }
-                Ok(Reply::Changed { dir: parent(&path) })
+                Ok(Reply::Changed { dir: parent(path) })
             }
             Request::Rename { from, to } => {
-                s.rename(from.clone(), to).await.map_err(err)?;
-                Ok(Reply::Changed { dir: parent(&from) })
+                s.rename(from, to).await.map_err(err)?;
+                Ok(Reply::Changed { dir: parent(from) })
             }
             Request::Chmod { path, mode, recursive } => {
-                crate::sftp_tree::chmod(s, &path, mode, recursive).await?;
-                Ok(Reply::Changed { dir: parent(&path) })
+                crate::sftp_tree::chmod(s, path, *mode, *recursive).await?;
+                Ok(Reply::Changed { dir: parent(path) })
             }
             Request::Download { id, remote, dir } => {
-                if s.metadata(remote.clone()).await.map_err(err)?.is_dir() {
-                    let mut progress = self.progress(id);
-                    let local = crate::sftp_tree::download(s, &remote, &dir, &mut progress).await?;
-                    return Ok(Reply::Downloaded { id, local });
+                let meta = until_cancelled(cancel, async { s.symlink_metadata(remote).await.map_err(err) }).await?;
+                if meta.is_dir() && !meta.is_symlink() {
+                    let mut progress = self.progress(*id);
+                    let local = crate::sftp_tree::download_with_cancel(s, remote, dir, &mut progress, Some(cancel)).await?;
+                    return Ok(Reply::Downloaded { id: *id, local });
                 }
-                self.download(id, &remote, &dir).await
+                self.download(*id, remote, dir, cancel).await
             }
-            Request::Upload { id, local, dir } => self.upload(id, &local, &dir).await,
-            Request::Edit { id, remote, dir } => self.edit(id, &remote, &dir).await,
+            Request::Upload { id, local, dir } => self.upload(*id, local, dir, cancel).await,
+            Request::Edit { id, remote, dir } => self.edit(*id, remote, dir, cancel).await,
             Request::Cancel { .. } => Err("nothing to cancel".into()),
         }
     }
@@ -238,19 +296,29 @@ impl Files {
         }
     }
 
-    async fn edit(&self, id: u64, remote: &str, dir: &Path) -> Result<Reply, String> {
-        let Reply::Downloaded { local, .. } = self.download(id, remote, &dir.join(id.to_string())).await? else {
+    async fn edit(&self, id: u64, remote: &str, dir: &Path, cancel: &Notify) -> Result<Reply, String> {
+        let Reply::Downloaded { local, .. } = self.download(id, remote, &dir.join(id.to_string()), cancel).await? else {
             return Err("download failed".into());
         };
-        let mut saved = edit_stamp(&local).await?.ok_or_else(|| format!("{}: file disappeared", local.display()))?;
+        let prepared = until_cancelled(cancel, async {
+            edit_stamp(&local).await?.ok_or_else(|| format!("{}: file disappeared", local.display()))
+        }).await;
+        let mut saved = match prepared {
+            Ok(stamp) => stamp,
+            Err(error) => {
+                let _ = std::fs::remove_file(&local);
+                if let Some(parent) = local.parent() { let _ = std::fs::remove_dir(parent); }
+                return Err(error);
+            }
+        };
         let _ = self.replies.send(Reply::Editing { id, local: local.clone() });
         loop {
-            tokio::time::sleep(EDIT_POLL).await;
+            until_cancelled(cancel, async { tokio::time::sleep(EDIT_POLL).await; Ok(()) }).await?;
             let Some(now) = edit_stamp(&local).await? else { continue };
             if now == saved {
                 continue;
             }
-            tokio::time::sleep(EDIT_POLL).await;
+            until_cancelled(cancel, async { tokio::time::sleep(EDIT_POLL).await; Ok(()) }).await?;
             if edit_stamp(&local).await?.as_ref() != Some(&now) {
                 continue;
             }
@@ -268,44 +336,56 @@ impl Files {
         Ok(())
     }
 
-    async fn download(&self, id: u64, remote: &str, dir: &Path) -> Result<Reply, String> {
-        let total = self.session.metadata(remote).await.map_err(|e| e.to_string())?.size.unwrap_or(0);
-        let mut source = self.session.open(remote).await.map_err(|e| e.to_string())?;
+    async fn download(&self, id: u64, remote: &str, dir: &Path, cancel: &Notify) -> Result<Reply, String> {
+        let meta = until_cancelled(cancel, async { self.session.metadata(remote).await.map_err(|e| e.to_string()) }).await?;
+        if !meta.is_regular() { return Err(format!("{remote} is not a regular file")); }
+        let total = meta.size.unwrap_or(0);
+        let mut source = until_cancelled(cancel, async { self.session.open(remote).await.map_err(|e| e.to_string()) }).await?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let local = unique(dir, &local_name(remote));
-        let mut target = tokio::fs::File::create(&local).await.map_err(|e| format!("{}: {e}", local.display()))?;
-        let copied = self.copy(id, &mut source, &mut target, total).await;
-        drop(target);
-        if let Err(e) = copied {
+        let name = local_name(remote);
+        let (local, mut target) = loop {
+            let local = unique(dir, &name);
+            match tokio::fs::File::create_new(&local).await {
+                Ok(file) => break (local, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("{}: {error}", local.display())),
+            }
+        };
+        if let Err(e) = until_cancelled(cancel, self.copy(id, &mut source, &mut target, total)).await {
+            let _ = target.shutdown().await;
+            drop(target);
             let _ = std::fs::remove_file(&local);
             return Err(e);
         }
         Ok(Reply::Downloaded { id, local })
     }
 
-    async fn upload(&self, id: u64, local: &Path, dir: &str) -> Result<Reply, String> {
+    async fn upload(&self, id: u64, local: &Path, dir: &str, cancel: &Notify) -> Result<Reply, String> {
         let name = local.file_name().map(|n| n.to_string_lossy().into_owned()).ok_or("not a file")?;
         let meta = std::fs::metadata(local).map_err(|e| format!("{}: {e}", local.display()))?;
         if meta.is_dir() {
             let mut progress = self.progress(id);
-            let remote = crate::sftp_tree::upload(&self.session, local, dir, &mut progress).await?;
+            let remote = crate::sftp_tree::upload_with_cancel(&self.session, local, dir, &mut progress, Some(cancel)).await?;
             return Ok(Reply::Uploaded { id, remote });
         }
         if !meta.is_file() {
             return Err(format!("{name} is not a regular file"));
         }
         let remote = join(dir, &name);
-        if self.session.try_exists(remote.clone()).await.unwrap_or(false) {
-            return Err(format!("{remote} already exists"));
-        }
         let mut source = tokio::fs::File::open(local).await.map_err(|e| format!("{}: {e}", local.display()))?;
-        let mut target = self.session.create(remote.clone()).await.map_err(|e| e.to_string())?;
-        if let Err(e) = self.copy(id, &mut source, &mut target, meta.len()).await {
+        let mut target = exclusive_upload(&self.session, &remote).await?;
+        let result = until_cancelled(cancel, async {
+            self.copy(id, &mut source, &mut target, meta.len()).await?;
+            target.shutdown().await.map_err(|e| e.to_string())
+        }).await;
+        if let Err(e) = result {
+            let _ = target.shutdown().await;
             drop(target);
-            let _ = self.session.remove_file(remote).await;
+            if let Err(cleanup) = self.session.remove_file(&remote).await {
+                if !file_is_missing(&cleanup) { return Err(format!("{e}; {remote}: cleanup failed: {cleanup}")); }
+            }
             return Err(e);
         }
-        target.shutdown().await.map_err(|e| e.to_string())?;
         Ok(Reply::Uploaded { id, remote })
     }
 
@@ -328,6 +408,14 @@ impl Files {
         to.flush().await.map_err(|e| e.to_string())?;
         let _ = self.replies.send(Reply::Progress { id, done, total: total.max(done) });
         Ok(())
+    }
+}
+
+pub(super) async fn until_cancelled<T>(cancel: &Notify, transfer: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        _ = cancel.notified() => Err("cancelled".into()),
+        reply = transfer => reply,
     }
 }
 

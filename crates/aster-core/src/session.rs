@@ -20,6 +20,29 @@ pub struct SessionState {
 pub struct WindowState {
     pub tabs: Vec<TabState>,
     pub active: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<WorkspaceState>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub tabs: Vec<TabState>,
+    pub active: usize,
+}
+
+impl WindowState {
+    pub fn has_layout(&self) -> bool {
+        !self.tabs.is_empty() || self.workspace.is_some() || !self.workspaces.is_empty()
+    }
+
+    pub fn all_tabs(&self) -> impl Iterator<Item = &TabState> {
+        self.tabs.iter().chain(self.workspaces.iter().flat_map(|workspace| &workspace.tabs))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -99,6 +122,12 @@ fn restore_text(lines: &[String]) -> Vec<u8> {
     output
 }
 
+pub(crate) fn restore_history_text(lines: &[String]) -> Vec<u8> {
+    let mut output = restore_text(lines);
+    output.extend_from_slice(b"\x1b[2J\x1b[H");
+    output
+}
+
 #[derive(Clone, Copy)]
 enum RestoreMode {
     ClosedTab,
@@ -108,15 +137,12 @@ enum RestoreMode {
 impl Pane {
     pub(crate) fn restore_history(&mut self) {
         let Some(lines) = self.restore_buffer.take() else { return };
-        let mut output = restore_text(&lines);
-        // On the primary screen, erase-display moves its populated rows into scrollback.
-        output.extend_from_slice(b"\x1b[2J\x1b[H");
-        self.restore_output(&output);
+        self.restore_output(&restore_history_text(&lines));
     }
 
     fn restore_output(&mut self, output: &[u8]) {
         let mut terminal = self.terminal.lock();
-        terminal.feed(output);
+        terminal.feed_saved_output(output);
         self.seen = terminal.output_seq();
         self.activity_seq = self.seen;
     }
@@ -212,7 +238,7 @@ impl App {
                     (cwd, Vec::new())
                 } else {
                     let cwd = self.pane_cwd(*id);
-                    let buffer = pane.restore_buffer.clone().unwrap_or_else(|| pane.terminal.lock().tail_lines(BUFFER_LINES));
+                    let buffer = pane.restore_buffer.as_deref().map_or_else(|| pane.terminal.lock().saved_tail(BUFFER_LINES), <[String]>::to_vec);
                     (cwd, buffer)
                 };
                 NodeState::Pane(Box::new(PaneState { profile: pane.source_profile.clone(), name: pane.name.clone(), cwd, buffer, host_id: pane.host_id }))
@@ -226,13 +252,13 @@ impl App {
     }
 
     pub(crate) fn tab_state(&self, index: usize) -> Option<TabState> {
-        self.capture_tab(index, false)
+        self.capture_tab(self.tabs.get(index)?, false)
     }
 
-    fn capture_tab(&self, index: usize, checkpoint: bool) -> Option<TabState> {
-        let t = self.tabs.get(index)?;
+    fn capture_tab(&self, t: &Tab, checkpoint: bool) -> Option<TabState> {
         let root = self.node_state(&t.root, checkpoint)?;
-        let focus = t.root.panes().iter().position(|p| *p == t.focus).unwrap_or(0);
+        let focus = t.root.panes().into_iter().filter(|id| self.panes.get(id).is_some_and(|pane| !pane.profile.hold))
+            .position(|id| id == t.focus).unwrap_or(0);
         Some(TabState { root, focus, title: t.title.clone(), color: t.color.clone(), pinned: t.pinned })
     }
 
@@ -249,17 +275,24 @@ impl App {
     }
 
     fn capture_session(&self, checkpoint: bool) -> WindowState {
-        let mut tabs = Vec::new();
-        let mut active = 0;
-        for index in 0..self.tabs.len() {
-            if let Some(tab) = self.capture_tab(index, checkpoint) {
-                if index <= self.active {
-                    active = tabs.len();
+        let workspace = self.capture_workspace(self.workspace.as_deref(), &self.tabs, self.active, checkpoint);
+        let workspaces = self.workspaces.iter().map(|workspace| {
+            self.capture_workspace(workspace.name.as_deref(), &workspace.tabs, workspace.active, checkpoint)
+        }).collect();
+        WindowState { tabs: workspace.tabs, active: workspace.active, workspace: workspace.name, workspaces }
+    }
+
+    fn capture_workspace(&self, name: Option<&str>, tabs: &[Tab], active: usize, checkpoint: bool) -> WorkspaceState {
+        let mut state = WorkspaceState { name: name.map(str::to_owned), ..WorkspaceState::default() };
+        for (index, tab) in tabs.iter().enumerate() {
+            if let Some(tab) = self.capture_tab(tab, checkpoint) {
+                if index <= active {
+                    state.active = state.tabs.len();
                 }
-                tabs.push(tab);
+                state.tabs.push(tab);
             }
         }
-        WindowState { active, tabs }
+        state
     }
 
     pub(crate) fn build(&mut self, state: &NodeState) -> Node {
@@ -277,7 +310,7 @@ impl App {
                     if !p.buffer.is_empty() {
                         match mode {
                             RestoreMode::ClosedTab => pane.restore_output(&restore_text(&p.buffer)),
-                            RestoreMode::Startup { .. } => pane.restore_buffer = Some(p.buffer.clone()),
+                            RestoreMode::Startup { .. } => pane.restore_buffer = Some(p.buffer.clone().into()),
                         }
                     }
                 }
@@ -292,20 +325,32 @@ impl App {
     }
 
     pub fn restore(&mut self, state: &WindowState) -> bool {
-        for tab in &state.tabs {
+        let existing = std::mem::take(&mut self.tabs);
+        let (tabs, active) = self.restore_tabs(existing, &state.tabs, state.active);
+        self.tabs = tabs;
+        self.active = active;
+        self.workspace.clone_from(&state.workspace);
+        for workspace in &state.workspaces {
+            let (tabs, active) = self.restore_tabs(Vec::new(), &workspace.tabs, workspace.active);
+            self.workspaces.push(crate::workspaces::Workspace { name: workspace.name.clone(), tabs, active, ..Default::default() });
+        }
+        self.dirty = true;
+        !self.tabs.is_empty() || state.has_layout()
+    }
+
+    fn restore_tabs(&mut self, mut tabs: Vec<Tab>, saved: &[TabState], active: usize) -> (Vec<Tab>, usize) {
+        tabs.reserve(saved.len());
+        for tab in saved {
             let root = self.build_session_node(&tab.root, RestoreMode::Startup { hosted: self.config.terminal.persistent_sessions });
             let order = root.panes();
             self.background_launches.extend(order.iter().copied().filter(|id| self.panes[id].host_id.is_some()));
             let focus = order.get(tab.focus).or(order.first()).copied().unwrap_or(0);
-            self.tabs.push(Tab { title: tab.title.clone(), color: tab.color.clone(), pinned: tab.pinned, ..Tab::new(root, focus) });
+            tabs.push(Tab { title: tab.title.clone(), color: tab.color.clone(), pinned: tab.pinned, ..Tab::new(root, focus) });
         }
-        self.active = state.active.min(self.tabs.len().saturating_sub(1));
-        if let Some(focus) = self.focused_pane() {
-            self.tabs.sort_by_key(|t| !t.pinned);
-            self.active = self.tabs.iter().position(|t| t.focus == focus).unwrap_or(0);
-        }
-        self.dirty = true;
-        !self.tabs.is_empty()
+        let active = tabs.get(active.min(tabs.len().saturating_sub(1))).map(|tab| tab.key);
+        tabs.sort_by_key(|t| !t.pinned);
+        let active = tabs.iter().position(|t| Some(t.key) == active).unwrap_or(0);
+        (tabs, active)
     }
 }
 

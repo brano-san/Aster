@@ -705,6 +705,17 @@ fn command_tabs_stay_after_success_and_are_not_restored() {
 }
 
 #[test]
+fn command_tabs_use_the_cli_directory_and_leave_cd_arguments_unchanged() {
+    let mut a = app(0);
+    let command = ["tool", "--cd", "arg with spaces", ""].map(str::to_owned);
+    a.run_command(&command, Some("/tmp/work folder".into()));
+    let pane = &a.panes[&a.focused_pane().unwrap()];
+    let launch = pane.pending.as_ref().unwrap();
+    assert_eq!(launch.cwd.as_deref(), Some("/tmp/work folder"));
+    assert_eq!(launch.args, ["--cd", "arg with spaces", ""]);
+}
+
+#[test]
 fn a_delegated_console_is_a_held_tab_with_a_one_shot_launch() {
     let mut a = app(1);
     a.open_delegated_console("invalid".into());

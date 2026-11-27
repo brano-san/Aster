@@ -1182,7 +1182,7 @@ impl App {
         page
     }
 
-    fn show_settings_page(&mut self, k: usize) {
+    pub(crate) fn show_settings_page(&mut self, k: usize) {
         let tab = self.active_scheme_tab();
         self.config_editor.focus = None;
         self.config_editor.cancel_paste();

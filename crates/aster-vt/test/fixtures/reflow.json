@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "initial_size": { "cols": 4, "rows": 4 },
+  "initial_options": { "scrollback": 100, "cursor": "block", "blink": true, "word_separators": " ()[]{}'\"" },
+  "steps": [
+    { "kind": "output", "data": "1b5b33316d611b5b306d62636465666768" },
+    { "kind": "resize", "size": { "cols": 8, "rows": 4 } }
+  ],
+  "expected": {
+    "size": { "cols": 8, "rows": 4 },
+    "rows": ["abcdefgh", "", "", ""],
+    "cursor": { "line": 0, "col": 7, "shape": "block" },
+    "cells": [{ "line": 0, "col": 0, "foreground": { "Named": "Red" } }]
+  }
+}

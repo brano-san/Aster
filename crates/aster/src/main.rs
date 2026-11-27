@@ -11,6 +11,7 @@ mod handler;
 mod log;
 mod local_spawn;
 mod net;
+mod output_path;
 mod pty_host;
 mod quake;
 mod remote;
@@ -207,6 +208,17 @@ fn main() {
     let cwd = std::env::current_dir().ok();
     let command = match cli::parse(&args[1..], cwd.as_deref()) {
         cli::Parsed::Request(command) => command,
+        cli::Parsed::ReplayFixture(path) => {
+            match session::verify_fixture_file(std::path::Path::new(&path)) {
+                Ok(()) => say("Terminal fixture verified with all four chunking strategies."),
+                Err(error) => {
+                    let clean: String = error.to_string().chars().filter(|c| !c.is_control()).collect();
+                    say(&format!("Cannot verify terminal fixture: {clean}"));
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         cli::Parsed::Version => {
             say(&format!("Aster {}", env!("CARGO_PKG_VERSION")));
             return;

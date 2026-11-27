@@ -96,15 +96,19 @@ pub enum Effect {
     SaveRawConfig { text: String, expected: Option<String> },
     Restart,
     Open(String),
+    OpenOutputPath { target: String, reported_cwd: Option<String>, initial_cwd: Option<String>, pid: Option<u32> },
+    SearchSessions(crate::search_sessions::Request),
     OpenLog,
     StartMenuShortcut(bool),
     InstallForUser,
     DefaultTerminal(bool),
     SaveOutput { pane: PaneId },
+    SaveFixture { pane: PaneId },
     ExportBuffer { pane: PaneId, text: String },
     RecentProfiles(Vec<String>),
     OpenConfigFile,
     RevealConfigFile,
+    RevealFile(std::path::PathBuf),
     CheckConfigFile,
     OpenConfigFolder,
     ShowDefaultConfig,
@@ -169,13 +173,14 @@ pub(crate) struct Pane {
     pub exited: Option<Option<u32>>,
     pub pending: Option<Launch>,
     pub retry_launch: Option<Box<Launch>>,
+    pub task_launch: Option<Box<Launch>>,
     pub ssh_connecting: bool,
     reconnect_at: Option<Instant>,
     generation: u64,
     pub queued: Vec<u8>,
     pub pid: Option<u32>,
     pub host_id: Option<u64>,
-    pub restore_buffer: Option<Vec<String>>,
+    pub restore_buffer: Option<Arc<[String]>>,
     pub size: Size,
     pub scroll_acc: f32,
     pub seen: u64,
@@ -243,6 +248,8 @@ pub struct App {
     pub(crate) theme: Theme,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
+    pub(crate) workspace: Option<String>,
+    pub(crate) workspaces: Vec<crate::workspaces::Workspace>,
     pub(crate) panes: HashMap<PaneId, Pane>,
     next_id: PaneId,
     pub(crate) size: (f32, f32),
@@ -275,6 +282,8 @@ pub struct App {
     pub(crate) tab_strip: crate::tab_motion::TabStrip,
     pub(crate) hover_link: Option<HoverLink>,
     pub(crate) overlay: Option<Overlay>,
+    pub(crate) quick_selection: Option<crate::quick_selection::QuickSelection>,
+    pub(crate) session_search: crate::search_sessions::SessionSearch,
     pub(crate) settings: Option<crate::settings::SettingsPage>,
     pub(crate) config_path: Option<String>,
     pub(crate) config_status: Option<Result<(), String>>,
@@ -306,6 +315,7 @@ pub struct App {
     pub(crate) paste_confirm: Option<crate::paste::PasteConfirm>,
     pub(crate) files: Option<crate::files::FilesPage>,
     pub(crate) transfers: Vec<crate::files::Transfer>,
+    pub(crate) sftp_transfers: Option<crate::files::TransfersPanel>,
     pub(crate) transfer_seq: u64,
     pub(crate) last_dirs: HashMap<PaneId, String>,
     pub(crate) offers: HashMap<PaneId, (PaneTransfer, String)>,
@@ -383,6 +393,8 @@ impl App {
             theme: Theme::from_palette(&Palette::default()),
             tabs: Vec::new(),
             active: 0,
+            workspace: None,
+            workspaces: Vec::new(),
             panes: HashMap::new(),
             next_id: 1,
             size: (0.0, 0.0),
@@ -415,6 +427,8 @@ impl App {
             tab_strip: Default::default(),
             hover_link: None,
             overlay: None,
+            quick_selection: None,
+            session_search: Default::default(),
             settings: None,
             config_path: None,
             config_status: None,
@@ -437,6 +451,7 @@ impl App {
             paste_confirm: None,
             files: None,
             transfers: Vec::new(),
+            sftp_transfers: None,
             transfer_seq: 0,
             last_dirs: HashMap::new(),
             offers: HashMap::new(),
@@ -516,7 +531,7 @@ impl App {
         self.offers.get(&pane).filter(|o| o.0 == PaneTransfer::AwaitingFiles).map(|o| o.1.as_str())
     }
 
-    fn offered_pane(&self) -> Option<PaneId> {
+    pub(crate) fn offered_pane(&self) -> Option<PaneId> {
         self.focused_pane().filter(|p| self.offers.contains_key(p))
     }
 
@@ -869,6 +884,18 @@ impl App {
         }
     }
 
+    pub fn open_fixture_recording_tab(&mut self) {
+        let before = self.tabs.len();
+        self.open_default_tab();
+        if self.tabs.len() > before {
+            for pane in self.tabs[self.active].root.panes() {
+                if let Some(terminal) = self.terminal(pane) {
+                    terminal.lock().enable_fixture_recording();
+                }
+            }
+        }
+    }
+
     fn options(&self) -> Options {
         let cursor = match self.config.terminal.cursor {
             CursorStyle::Block => CursorShape::Block,
@@ -919,7 +946,7 @@ impl App {
             global: self.config.terminal.environment.clone(), profile: profile.env.clone(), refresh: self.config.terminal.refresh_environment, set_comspec: self.config.terminal.set_comspec,
         }));
         let launch = Launch { delegation: None, local_environment, elevated: profile.elevated, ssh: profile.ssh.clone(), ssh_options: profile.ssh_options.clone().map(Box::new), serial: profile.serial.clone(), socket: profile.socket.clone(), stream: profile.stream.clone(), clear_after_connect: profile.clear_after_connect, command: profile.command.clone(), args, cwd, env, cols: 80, rows: 24 };
-        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, ssh_connecting: false, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, host_id: None, restore_buffer: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
+        self.panes.insert(id, Pane { terminal, source_profile, profile, title: None, name: None, exited: None, pending: Some(launch), retry_launch: None, task_launch: None, ssh_connecting: false, reconnect_at: None, generation: 0, queued: Vec::new(), pid: None, host_id: None, restore_buffer: None, size, scroll_acc: 0.0, seen: 0, activity_seq: 0 });
         id
     }
 
@@ -997,27 +1024,24 @@ impl App {
     }
 
     pub fn close_pane(&mut self, pane: PaneId) {
-        let Some(ti) = self.tabs.iter().position(|t| t.root.contains(pane)) else { return };
+        let Some(ti) = self.tabs.iter().position(|t| t.root.contains(pane)) else {
+            return self.close_hidden_pane(pane);
+        };
         self.release_pane(pane);
         let tab = &mut self.tabs[ti];
         if tab.root == Node::Leaf(pane) {
             self.remove_tab(ti);
         } else {
-            let order = tab.root.panes();
-            let at = order.iter().position(|p| *p == pane).unwrap_or(0);
-            tab.root.remove(pane);
-            let rest = tab.root.panes();
-            if tab.focus == pane {
-                tab.focus = rest[at.saturating_sub(1).min(rest.len() - 1)];
-            }
-            if tab.zoomed == Some(pane) {
-                tab.zoomed = None;
-            }
+            tab.remove_leaf(pane);
         }
         self.dirty = true;
     }
 
     pub(crate) fn release_pane(&mut self, pane: PaneId) {
+        self.clear_command_watch(pane);
+        self.background_launches.retain(|&id| id != pane);
+        self.end_file_transfers(pane);
+        self.last_dirs.remove(&pane);
         if self.files.as_ref().is_some_and(|f| f.pane == pane) {
             self.close_files();
         }
@@ -1066,9 +1090,7 @@ impl App {
             self.release_pane(id);
         }
         if self.tabs.is_empty() {
-            if self.config.terminal.close_window_with_last_tab {
-                self.effects.push(Effect::Close);
-            } else {
+            if !self.close_window_if_no_tabs() {
                 self.active = 0;
                 self.mru.cancel();
                 self.start_selected = 0;
@@ -1105,12 +1127,63 @@ impl App {
     }
 
     pub fn close_all(&mut self) {
+        self.session_search = Default::default();
+        self.cancel_quick_selection();
         self.effects.extend(self.panes.iter().filter(|(_, p)| p.exited.is_none()).map(|(&pane, p)| Effect::Kill { pane, host_id: p.host_id }));
         self.panes.clear();
         self.ssh_auth.clear();
         self.ssh_forwards.clear();
         self.ssh_forward_form = None;
+        self.background_launches.clear();
         self.tabs.clear();
+        self.workspace = None;
+        self.workspaces.clear();
+    }
+
+    pub(crate) fn replace_workspace(&mut self, mut next: crate::workspaces::Workspace) -> crate::workspaces::Workspace {
+        self.mru.cancel();
+        std::mem::swap(&mut self.workspace, &mut next.name);
+        std::mem::swap(&mut self.tabs, &mut next.tabs);
+        std::mem::swap(&mut self.active, &mut next.active);
+        std::mem::swap(&mut self.closed_tabs, &mut next.closed_tabs);
+        std::mem::swap(&mut self.mru, &mut next.mru);
+        std::mem::swap(&mut self.last_tab, &mut next.last_tab);
+
+        self.current_tab = self.focused_pane();
+        self.overlay = None;
+        self.session_search = Default::default();
+        self.cancel_quick_selection();
+        self.close_search();
+        self.close_files();
+        self.sftp_transfers = None;
+        self.stop_rearranging();
+        self.blur_sidebar();
+        self.config_editor.cancel_paste();
+        if let Some(page) = self.settings.as_mut() {
+            page.cancel_vault_input();
+        }
+        self.settings = None;
+        self.settings_stash = None;
+        self.rename = None;
+        self.pane_rename = None;
+        self.pane_profile_probe = None;
+        self.ssh_forward_form = None;
+        self.paste_confirm = None;
+        self.close_confirm = None;
+        self.menu = None;
+        self.broadcast = None;
+        self.drag = Drag::None;
+        self.last_click = None;
+        self.layout = Layout::default();
+        self.chrome.tabs.clear();
+        self.tab_strip = Default::default();
+        self.hover_link = None;
+        self.preedit = Preedit::default();
+        self.start_selected = 0;
+        self.reset_animations();
+        self.track_tab();
+        self.prompt_pending_serial();
+        next
     }
 
     pub fn activate(&mut self, index: usize) {
@@ -1125,6 +1198,8 @@ impl App {
             self.active = index;
             self.mru.visit(self.tabs[index].key);
             self.overlay = None;
+            self.session_search = Default::default();
+            self.cancel_quick_selection();
             self.reset_blink();
             self.dirty = true;
         }
@@ -1203,6 +1278,10 @@ impl App {
 
     pub fn tab_title(&self, index: usize) -> String {
         let Some(tab) = self.tabs.get(index) else { return String::new() };
+        self.title_for_tab(tab)
+    }
+
+    pub(crate) fn title_for_tab(&self, tab: &Tab) -> String {
         if tab.focus == SETTINGS_PANE {
             return crate::i18n::t("Settings").to_owned();
         }
@@ -1223,7 +1302,7 @@ impl App {
             return;
         }
         if p.exited.is_some() {
-            self.close_pane(pane);
+            if p.task_launch.is_none() { self.close_pane(pane); }
             return;
         }
         if self.config.terminal.scroll_on_input {
@@ -1303,7 +1382,7 @@ impl App {
     }
 
     pub fn paste(&mut self, text: String) {
-        if text.is_empty() {
+        if text.is_empty() || self.quick_selection.is_some() {
             return;
         }
         if self.ssh_forward_form_text(&text) || self.config_editor_text(&text) { return; }
@@ -1315,6 +1394,7 @@ impl App {
         if let Some(o) = self.overlay.as_mut() {
             o.insert(&text.replace(['\r', '\n'], " "));
             self.dirty = true;
+            self.session_search_edited();
             return;
         }
         if self.rename.is_some() {
@@ -1322,6 +1402,9 @@ impl App {
         }
         if self.pane_rename.is_some() {
             return self.pane_rename_text(&text.replace(['\r', '\n'], " "));
+        }
+        if self.global_transfers_open() {
+            return;
         }
         if self.files.is_some() {
             return self.files_text(&text.replace(['\r', '\n'], " "));
@@ -1355,7 +1438,7 @@ impl App {
         self.paste_now(&text);
     }
 
-    fn paste_mode(&self) -> TermMode {
+    pub(crate) fn paste_mode(&self) -> TermMode {
         let mut mode = self.mode();
         if !self.config.terminal.bracketed_paste {
             mode.remove(TermMode::BRACKETED_PASTE);
@@ -1472,6 +1555,24 @@ impl App {
             SelectProfileSection(section) => self.open_filtered_profiles(crate::picker::ProfileFilter::Section(section)),
             SelectProfileGroup(id) => self.open_filtered_profiles(crate::picker::ProfileFilter::Group(&id)),
             Search => self.open_search(),
+            SearchSessions => self.open_session_search(),
+            QuickSelect => self.start_quick_selection(false),
+            QuickOpen => self.start_quick_selection(true),
+            PreviousPrompt => self.jump_shell_prompt(true),
+            NextPrompt => self.jump_shell_prompt(false),
+            CopyCommandOutput => self.copy_shell_command_output(),
+            CommandHistory => {
+                if let Some(pane) = self.focused_pane() {
+                    self.close_search();
+                    self.open_overlay(OverlayKind::CommandHistory(pane));
+                }
+            }
+            NewWorkspace => self.open_workspace_name(false),
+            RenameWorkspace => self.open_workspace_name(true),
+            SwitchWorkspace => self.open_overlay(OverlayKind::Workspaces),
+            ManageSnippets => self.manage_snippets(),
+            SaveSelectionAsSnippet => self.save_selection_as_snippet(),
+            RerunTask => self.rerun_task(),
             SelectColorScheme => self.open_overlay(OverlayKind::Schemes),
             SetTabColor => self.open_overlay(OverlayKind::TabColors),
             SerialSpeed => {
@@ -1495,6 +1596,12 @@ impl App {
             DebugSaveOutput => {
                 if let Some(pane) = self.focused_pane().filter(|p| self.panes.contains_key(p)) {
                     self.effects.push(Effect::SaveOutput { pane });
+                }
+            }
+            DebugRecordFixture => self.open_fixture_recording_tab(),
+            DebugSaveFixture => {
+                if let Some(pane) = self.focused_pane().filter(|p| self.panes.contains_key(p)) {
+                    self.effects.push(Effect::SaveFixture { pane });
                 }
             }
             ExportBuffer => {
@@ -1556,6 +1663,7 @@ impl App {
             SaveAsProfile => self.save_as_profile(false),
             SaveLayout => self.save_as_profile(true),
             OpenFiles => self.open_files(),
+            SftpTransfers => self.toggle_global_transfers(),
             FillPassword => {
                 self.fill_password();
             }
@@ -1678,9 +1786,17 @@ impl App {
     }
 
     pub(crate) fn open_overlay(&mut self, kind: OverlayKind) {
+        self.cancel_quick_selection();
+        if !kind.searches_output() {
+            self.session_search = Default::default();
+        }
         self.list_motion.overlay = Default::default();
         let items = match kind {
             OverlayKind::Commands => self.command_picks(),
+            OverlayKind::SessionSearch | OverlayKind::CommandOutput(..) => Vec::new(),
+            OverlayKind::CommandHistory(pane) => self.command_history_picks(pane),
+            OverlayKind::Workspaces => self.workspace_picks(),
+            OverlayKind::WorkspaceName { .. } => Vec::new(),
             OverlayKind::Profiles => self.profile_picks(),
             OverlayKind::TabProfiles => self.filtered_profile_picks(crate::picker::ProfileFilter::TabMenu),
             OverlayKind::PaneProfile(_) => self.filtered_profile_picks(crate::picker::ProfileFilter::SinglePane),
@@ -1714,9 +1830,16 @@ impl App {
         self.dirty = true;
     }
 
-    fn choose(&mut self, kind: OverlayKind, value: String) {
+    pub(crate) fn choose(&mut self, kind: OverlayKind, value: String) {
         if let OverlayKind::SshPorts(pane) = kind {
             return self.choose_ssh_forward(pane, &value);
+        }
+        if kind.searches_output() {
+            self.choose_session_match(&value);
+            return;
+        }
+        if let OverlayKind::WorkspaceName { rename } = kind {
+            return self.submit_workspace_name(rename, &value);
         }
         self.overlay = None;
         self.dirty = true;
@@ -1725,6 +1848,9 @@ impl App {
             OverlayKind::ProfileTemplates => self.edit_profile_template(&value),
             OverlayKind::SshKeys(_) => self.choose_ssh_key(value),
             OverlayKind::SshPorts(_) => {}
+            OverlayKind::SessionSearch | OverlayKind::CommandOutput(..) | OverlayKind::WorkspaceName { .. } => {}
+            OverlayKind::CommandHistory(pane) => self.search_command_output(pane, &value),
+            OverlayKind::Workspaces => self.choose_workspace(&value),
             OverlayKind::ProfileIcons => self.set_profile_icon(value),
             OverlayKind::SerialSpeed(pane) => {
                 let Ok(baud) = value.parse() else { return };
@@ -1737,6 +1863,9 @@ impl App {
                 }
             }
             OverlayKind::Commands => {
+                if self.choose_snippet(&value) {
+                    return;
+                }
                 if let Some(a) = Action::from_id(&value) {
                     self.run(a);
                 }
@@ -1768,7 +1897,7 @@ impl App {
         }
     }
 
-    fn preview_scheme(&mut self) {
+    pub(crate) fn preview_scheme(&mut self) {
         if self.config.read_only() { return; }
         let Some(o) = self.overlay.as_ref().filter(|o| o.kind == OverlayKind::Schemes) else { return };
         if let Some(v) = o.selected_value() {
@@ -1779,6 +1908,7 @@ impl App {
     }
 
     fn close_overlay(&mut self) {
+        self.session_search = Default::default();
         if let Some(OverlayKind::SerialSpeed(pane)) = self.overlay.take().map(|o| o.kind) {
             if self.panes.get(&pane).is_some_and(|p| p.pending.is_some()) {
                 self.close_pane(pane);
@@ -1798,6 +1928,17 @@ impl App {
         self.dirty = true;
         match key {
             Key::Escape => return self.close_overlay(),
+            Key::Char('C') if mods.ctrl && !mods.alt && !mods.meta && matches!(o.kind, OverlayKind::CommandHistory(_) | OverlayKind::CommandOutput(..)) => {
+                self.swallow_chord = Some(key);
+                let kind = o.kind;
+                if let Some(value) = o.selected_value() {
+                    if let OverlayKind::CommandHistory(pane) = kind {
+                        self.copy_command_from_history(pane, &value);
+                    } else if self.choose_session_match(&value) {
+                        self.copy();
+                    }
+                }
+            }
             Key::Up => o.step(-1),
             Key::Down => o.step(1),
             Key::PageUp => o.step(-8),
@@ -1809,7 +1950,10 @@ impl App {
                     o.set_query(&address);
                 }
             }
-            Key::Backspace => o.backspace(mods.ctrl),
+            Key::Backspace => {
+                o.backspace(mods.ctrl);
+                self.session_search_edited();
+            }
             Key::Enter if mods.ctrl && o.kind == OverlayKind::Profiles => {
                 let value = o.selected_value().unwrap_or_default();
                 let id = value.strip_prefix(crate::picker::RECENT).unwrap_or(&value).to_owned();
@@ -1846,7 +1990,7 @@ impl App {
     }
 
     pub(crate) fn terminal_has_focus(&self) -> bool {
-        self.focused && self.overlay.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.pane_rename.is_none() && self.paste_confirm.is_none() && self.close_confirm.is_none() && self.files.is_none() && !self.sidebar_focused() && !self.rearranging()
+        self.focused && self.overlay.is_none() && self.quick_selection.is_none() && self.settings.is_none() && self.menu.is_none() && self.rename.is_none() && self.pane_rename.is_none() && self.paste_confirm.is_none() && self.close_confirm.is_none() && self.files.is_none() && !self.global_transfers_open() && !self.sidebar_focused() && !self.rearranging()
     }
 
     pub(crate) fn cursor_blink_enabled(&self) -> bool {
@@ -1868,6 +2012,7 @@ impl App {
 
     fn on_timer_at(&mut self, now: Instant) {
         self.timer_due = None;
+        self.request_session_search(now);
         self.poll_commands(now);
         self.resume_connections(now);
         let animate = self.animations();
@@ -1921,8 +2066,32 @@ impl App {
         self.prompts.remove(&pane);
         let now = Instant::now();
         p.reconnect_at = Some(now);
+        self.clear_command_watch(pane);
+        self.end_file_transfers(pane);
         if self.files.as_ref().is_some_and(|page| page.pane == pane) { self.close_files(); }
         self.resume_connections(now);
+    }
+
+    pub(crate) fn can_rerun_task(&self, pane: PaneId) -> bool {
+        self.panes.get(&pane).is_some_and(|pane| pane.task_launch.is_some() && pane.exited.is_some())
+    }
+
+    pub(crate) fn rerun_task(&mut self) {
+        let Some(pane) = self.focused_pane().filter(|pane| self.can_rerun_task(*pane)) else { return };
+        let options = self.options();
+        let p = self.panes.get_mut(&pane).unwrap();
+        let launch = p.task_launch.as_deref().unwrap().clone();
+        p.generation += 1;
+        let sink = Self::terminal_sink(self.sender.clone(), self.wake.clone(), pane, p.generation);
+        let terminal = p.terminal.lock().next_session(options, sink, launch.cwd.clone());
+        p.terminal = Arc::new(FairMutex::new(terminal));
+        p.exited = None;
+        p.title = None;
+        p.pid = None;
+        p.host_id = None;
+        p.queued.clear();
+        p.pending = Some(launch);
+        self.dirty = true;
     }
 
     pub fn on_event(&mut self, event: Event) {
@@ -2062,6 +2231,8 @@ impl App {
             return;
         }
         match event {
+            Event::Accessibility(action) => self.perform_accessibility(action),
+            Event::AccessibilityRefresh => self.dirty = true,
             Event::Resized { width, height } => {
                 self.size = (width as f32, height as f32);
                 self.dirty = true;
@@ -2094,6 +2265,7 @@ impl App {
             }
             Event::Focus(f) => {
                 if !f {
+                    self.cancel_quick_selection();
                     self.mru.cancel();
                     self.dirty = true;
                 }
@@ -2155,6 +2327,9 @@ impl App {
                 self.dirty = true;
             }
             Event::DroppedFiles(paths) => {
+                if self.quick_selection.is_some() || self.overlay.as_ref().is_some_and(|o| o.kind.has_detail_rows()) || self.global_transfers_open() {
+                    return;
+                }
                 if self.offered_pane().is_some() {
                     if let Some(pane) = self.awaiting_pane() {
                         self.effects.push(Effect::SendFiles { pane, files: paths.into_iter().map(std::path::PathBuf::from).collect() });
@@ -2178,8 +2353,17 @@ impl App {
     }
 
     fn on_key(&mut self, key: Key, mods: Mods) {
+        if self.quick_selection.is_some() {
+            self.swallow_char = false;
+            self.swallow_chord = None;
+            self.swallow_control = true;
+            if key == Key::Escape {
+                self.cancel_quick_selection();
+            }
+            return;
+        }
         let ssh_auth = self.ssh_auth_active();
-        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.pane_rename.is_some() || self.settings.is_some() || self.files.is_some() || self.sidebar_focused() || self.rearranging() || ssh_auth;
+        let modal = self.overlay.is_some() || self.paste_confirm.is_some() || self.close_confirm.is_some() || self.menu.is_some() || self.rename.is_some() || self.pane_rename.is_some() || self.settings.is_some() || self.files.is_some() || self.global_transfers_open() || self.sidebar_focused() || self.rearranging() || ssh_auth;
         self.swallow_char = false;
         self.swallow_chord = None;
         self.swallow_control = (modal || self.tabs.is_empty()) && matches!(key, Key::Enter | Key::Escape | Key::Tab | Key::Backspace);
@@ -2220,9 +2404,17 @@ impl App {
         if self.pane_rename.is_some() {
             return self.pane_rename_key(key, mods);
         }
+        if self.global_transfers_open() {
+            return match self.keymap.press(Chord { key, mods }) {
+                Outcome::Action(Action::SftpTransfers) => self.toggle_global_transfers(),
+                _ => self.global_transfers_key(key),
+            };
+        }
         if self.files.is_some() {
-            if self.keymap.press(Chord { key, mods }) == Outcome::Action(Action::OpenFiles) {
-                return self.close_files();
+            match self.keymap.press(Chord { key, mods }) {
+                Outcome::Action(Action::OpenFiles) => return self.close_files(),
+                Outcome::Action(Action::SftpTransfers) => return self.toggle_global_transfers(),
+                _ => {}
             }
             return self.files_key(key, mods);
         }
@@ -2329,11 +2521,18 @@ impl App {
         if std::mem::take(&mut self.swallow_control) && c.is_control() {
             return;
         }
+        if self.quick_selection.is_some() {
+            if !alt && c.is_ascii_alphabetic() {
+                self.quick_selection_char(c);
+            }
+            return;
+        }
         if let Some(o) = self.overlay.as_mut() {
             if !c.is_control() {
                 o.insert(&c.to_string());
                 self.dirty = true;
             }
+            self.session_search_edited();
             self.preview_scheme();
             return;
         }
@@ -2345,6 +2544,9 @@ impl App {
         }
         if self.pane_rename.is_some() {
             return self.pane_rename_text(&c.to_string());
+        }
+        if self.global_transfers_open() {
+            return;
         }
         if self.files.is_some() {
             return self.files_text(&c.to_string());
@@ -2486,9 +2688,14 @@ impl App {
         let was_on_bar = self.chrome.tab_bar.contains(self.mouse.0, self.mouse.1);
         let was_on_sidebar = self.chrome.profile_sidebar.contains(self.mouse.0, self.mouse.1);
         self.mouse = (x, y);
+        if self.quick_selection.is_some() {
+            self.set_cursor(CursorIcon::Default);
+            return;
+        }
         if self.menu.is_some() {
             return self.menu_hover(x, y);
         }
+        self.dirty |= self.task_rerun_at(previous.0, previous.1) != self.task_rerun_at(x, y);
         self.dirty |= self.overlay.is_some() && previous != self.mouse;
         if self.config_editor_mouse_move(x, y) { return; }
         if self.drag == Drag::None && self.update_hovered(x, y) {
@@ -2546,6 +2753,12 @@ impl App {
         }
         if self.sidebar_move(x, y) {
             self.hover_link = None;
+            return;
+        }
+        if self.global_transfers_open() && self.chrome.content.contains(x, y) {
+            self.dirty = true;
+            self.hover_link = None;
+            self.set_cursor(CursorIcon::Default);
             return;
         }
         if self.tabs.is_empty() && self.overlay.is_none() && self.chrome.content.contains(x, y) {
@@ -2656,6 +2869,10 @@ impl App {
     fn on_down(&mut self, x: f32, y: f32, button: MouseButton, clicks: u8) {
         self.mouse = (x, y);
         self.dirty = true;
+        if self.quick_selection.is_some() {
+            self.cancel_quick_selection();
+            return;
+        }
         let chord = Chord { key: Key::Mouse(button), mods: self.mouse_mods };
         if self.capture_shortcut(chord) {
             return;
@@ -2703,6 +2920,10 @@ impl App {
             self.commit_pane_rename();
         }
         if self.sidebar_down(x, y, button, clicks) {
+            return;
+        }
+        if self.global_transfers_open() && self.chrome.content.contains(x, y) {
+            if button == MouseButton::Left { self.global_transfers_click(x, y); }
             return;
         }
         if self.files.is_some() && self.chrome.content.contains(x, y) {
@@ -2774,6 +2995,10 @@ impl App {
             return;
         }
         if let Some(pane) = self.pane_header_at(x, y) {
+            if button == MouseButton::Left && !self.rearranging() && self.task_rerun_at(x, y) == Some(pane) {
+                self.focus_pane(pane);
+                return self.rerun_task();
+            }
             if !self.rearranging() && self.pane_at(x, y).is_some_and(|(_, rect)| self.ssh_toolbar_click(pane, rect, x, y, button)) {
                 return;
             }
@@ -2928,6 +3153,9 @@ impl App {
     }
 
     fn on_wheel(&mut self, dx: f32, dy: f32, pixels: Option<f32>) {
+        if self.quick_selection.is_some() {
+            return;
+        }
         use crate::input::WheelDirection;
         if !dx.is_finite() || !dy.is_finite() { return; }
         let Some(direction) = WheelDirection::from_delta(dx, dy) else { return };
@@ -2954,10 +3182,12 @@ impl App {
         if vertical && self.sidebar_wheel(x, y, dy, pixels) {
             return;
         }
+        if self.global_transfers_open() {
+            if vertical { self.global_transfers_wheel(dy); }
+            return;
+        }
         if self.files.is_some() {
-            if vertical {
-                self.files_wheel(dy, pixels);
-            }
+            if vertical { self.files_wheel(dy, pixels); }
             return;
         }
         if self.settings.is_some() {
@@ -3031,6 +3261,13 @@ impl App {
     }
 
     pub fn woken(&mut self) {
+        self.drain_terminal_events();
+        self.scan_prompts();
+        self.poll_background_activity(Instant::now());
+        self.dirty = true;
+    }
+
+    fn drain_terminal_events(&mut self) {
         while let Ok((pane, generation, ev)) = self.events.try_recv() {
             if self.panes.get(&pane).is_none_or(|p| p.generation != generation) {
                 continue;
@@ -3051,11 +3288,9 @@ impl App {
                 }
                 VtEvent::Bell => self.ring(pane),
                 VtEvent::Clipboard(text) => self.effects.push(Effect::SetClipboard(text)),
+                VtEvent::CommandFinished { code, output_seq } => self.shell_command_finished(pane, code, output_seq),
             }
         }
-        self.scan_prompts();
-        self.poll_background_activity(Instant::now());
-        self.dirty = true;
     }
 
     pub fn pane_clears_after_connect(&self, pane: PaneId) -> bool {
@@ -3063,8 +3298,10 @@ impl App {
     }
 
     pub fn exited(&mut self, pane: PaneId, code: Option<u32>) {
+        self.drain_terminal_events();
         self.poll_background_activity(Instant::now());
-        let tab_key = self.tabs.iter().find(|tab| tab.root.contains(pane)).map(|tab| tab.key);
+        self.shell_command_session_ended(pane, code);
+        let tab_key = self.all_tabs().find(|tab| tab.root.contains(pane)).map(|tab| tab.key);
         let options = self.options();
         let Some(p) = self.panes.get_mut(&pane) else { return };
         if p.exited.is_some() {
@@ -3094,9 +3331,11 @@ impl App {
                 self.schedule_timer();
             }
             _ => {
-                let notice = match code {
-                    Some(c) => crate::i18n::tf("[Process exited with code {code}. Press any key to close.]", &[("code", &c.to_string())]),
-                    None => crate::i18n::t("[Process exited. Press any key to close.]").to_owned(),
+                let notice = match (p.task_launch.is_some(), code) {
+                    (true, Some(c)) => crate::i18n::tf("[Process exited with code {code}.]", &[("code", &c.to_string())]),
+                    (true, None) => crate::i18n::t("[Process exited.]").to_owned(),
+                    (false, Some(c)) => crate::i18n::tf("[Process exited with code {code}. Press any key to close.]", &[("code", &c.to_string())]),
+                    (false, None) => crate::i18n::t("[Process exited. Press any key to close.]").to_owned(),
                 };
                 p.terminal.lock().feed(format!("\r\n\x1b[0;2m{notice}\x1b[0m\r\n").as_bytes());
             }
@@ -3104,6 +3343,7 @@ impl App {
         if let Some(p) = self.panes.get_mut(&pane) {
             p.activity_seq = p.terminal.lock().output_seq();
         }
+        self.end_file_transfers(pane);
         if let Some(key) = tab_key {
             self.notify_session_exit(key);
         }
@@ -3158,7 +3398,7 @@ impl App {
     pub(crate) fn mark_drawn(&mut self, now: Instant) {
         self.last_frame = Some(now);
         self.dirty = self.motion && self.animations();
-        let title = self.tab_title(self.active);
+        let title = self.workspace_window_title(self.tab_title(self.active));
         let title = if title.is_empty() { "Aster".to_owned() } else { title };
         if title != self.title {
             self.title = title.clone();
@@ -3176,8 +3416,9 @@ impl App {
             self.blinking().then(|| self.blink.deadline()),
             self.bell.map(|(_, start)| start + BELL_FLASH),
             self.tab_toast.as_ref().map(|toast| toast.deadline(now, self.animations())),
-            self.tabs.iter().filter_map(|t| t.command_watch.deadline()).min(),
+            self.all_tabs().filter_map(|t| t.command_watch.deadline()).min(),
             self.panes.values().filter_map(|p| p.reconnect_at).min(),
+            self.session_search.due,
         ].into_iter().flatten().min();
         if let Some(due) = next.filter(|&due| self.timer_due.is_none_or(|armed| due < armed)) {
             let left = due.saturating_duration_since(now).as_millis().max(1) as u32;

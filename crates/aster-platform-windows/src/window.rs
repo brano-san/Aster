@@ -1,9 +1,9 @@
-use crate::err;
+use crate::{accessibility, err};
 use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, PasteTarget, Preedit};
 use aster_core::notifications::Notification;
 use aster_gfx::render::Rect;
 use aster_platform::{DockSlide, DockSpec, Placement, PlatformError, Waker, Window, WindowHandler, WindowId, WindowOptions, WindowSystem};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,6 +83,7 @@ pub struct Win32Window {
     background_blur: RefCell<Option<crate::blur::BackgroundBlur>>,
     blur_host: SharedBlurHost,
     pub(crate) sync: Rc<FrameSync>,
+    accessibility: OnceCell<Rc<accessibility::Accessibility>>,
 }
 
 impl Win32Window {
@@ -131,6 +132,7 @@ impl Win32Window {
             background_blur: RefCell::new(None),
             blur_host,
             sync: Rc::new(FrameSync::default()),
+            accessibility: OnceCell::new(),
         }
     }
 
@@ -261,6 +263,16 @@ unsafe fn open_clipboard(hwnd: HWND) -> bool {
 }
 
 impl Window for Win32Window {
+    fn accessibility_active(&self) -> bool {
+        self.accessibility.get().is_some()
+    }
+
+    fn update_accessibility(&self, tree: aster_core::accessibility::Tree) {
+        if let Some(accessibility) = self.accessibility.get() {
+            accessibility.update(tree);
+        }
+    }
+
     fn id(&self) -> WindowId {
         self.id
     }
@@ -1258,6 +1270,26 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
         (p.x as f32, p.y as f32)
     };
     match msg {
+        WM_GETOBJECT if lp.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId && s.ready.get() => {
+            let first = w.accessibility.get().is_none();
+            let provider = w.accessibility.get_or_init(|| Rc::new(accessibility::Accessibility::new(hwnd))).clone();
+            if first {
+                s.send(Event::AccessibilityRefresh);
+            }
+            Some(provider.raw(hwnd, wp, lp))
+        }
+        accessibility::MESSAGE => {
+            if let Some(provider) = w.accessibility.get() {
+                for action in provider.drain_actions() {
+                    if matches!(action, aster_core::accessibility::Action::Focus(_)) && GetFocus() != hwnd {
+                        w.activate();
+                    }
+                    s.send(Event::Accessibility(action));
+                }
+                provider.notify();
+            }
+            Some(LRESULT(0))
+        }
         WM_NCCALCSIZE if wp.0 != 0 => {
             let p = &mut *(lp.0 as *mut NCCALCSIZE_PARAMS);
             let top = p.rgrc[0].top;
@@ -1525,6 +1557,9 @@ unsafe fn handle<H: WindowHandler<Win32>>(s: &Node<H>, hwnd: HWND, msg: u32, wp:
         }
         WM_DESTROY => {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            if let Some(provider) = w.accessibility.get() {
+                provider.disconnect(hwnd);
+            }
             s.shared().destroyed(hwnd);
             Some(LRESULT(0))
         }

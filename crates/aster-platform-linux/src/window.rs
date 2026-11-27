@@ -1,3 +1,5 @@
+use crate::accessibility::Bridge;
+use aster_core::accessibility::{Action as AccessibilityAction, Tree as AccessibilityTree};
 use aster_core::input::{CursorIcon, Event, HitArea, Key, Mods, MouseButton, PasteTarget, Preedit};
 use aster_core::notifications::Notification;
 use aster_gfx::render::Rect;
@@ -49,6 +51,8 @@ pub struct LinuxWindow {
     commands: Commands,
     notification_tx: mpsc::Sender<(WindowId, u64)>,
     notification_waker: LinuxWaker,
+    accessibility: Arc<Bridge>,
+    accessibility_origin: Cell<Option<(i32, i32)>>,
     size: Cell<(u32, u32)>,
     scale: Cell<f32>,
     cursor: Cell<CursorIcon>,
@@ -121,6 +125,14 @@ impl LinuxWindow {
 impl Window for LinuxWindow {
     fn id(&self) -> WindowId {
         self.id
+    }
+
+    fn accessibility_active(&self) -> bool {
+        self.accessibility.active()
+    }
+
+    fn update_accessibility(&self, tree: AccessibilityTree) {
+        self.accessibility.update(self.id, tree, self.accessibility_origin.get());
     }
 
     fn size(&self) -> (u32, u32) {
@@ -511,7 +523,20 @@ impl WindowSystem for LinuxWindows {
                 animation_waker.wake();
             }
         });
-        let mut app = Loop { handler, nodes: Vec::new(), commands, waiting, notification_tx, notification_clicks, notification_waker: waker, pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None, monitors: Vec::new(), next_monitor_scan: None, animation_result, system_animations: true };
+        let (action_tx, accessibility_actions) = mpsc::sync_channel(256);
+        let accessibility_refresh = Arc::new(AtomicBool::new(false));
+        let ready = accessibility_refresh.clone();
+        let action_waker = waker.clone();
+        let ready_waker = waker.clone();
+        let accessibility = Arc::new(Bridge::start(move |window, action| {
+            if action_tx.try_send((window, action)).is_err() { return false; }
+            action_waker.wake();
+            true
+        }, move || {
+            ready.store(true, Ordering::Release);
+            ready_waker.wake();
+        }));
+        let mut app = Loop { handler, nodes: Vec::new(), commands, waiting, notification_tx, notification_clicks, notification_waker: waker, accessibility, accessibility_actions, accessibility_refresh, pastes: HashMap::new(), pending: self.pending.clone(), next_id: 1, mods: ModifiersState::empty(), started: false, error: None, monitors: Vec::new(), next_monitor_scan: None, animation_result, system_animations: true };
         self.event_loop.run_app_on_demand(&mut app).map_err(|e| PlatformError::new(-1, format!("event loop: {e}")))?;
         app.error.map_or(Ok(()), Err)
     }
@@ -531,6 +556,9 @@ struct Loop<H> {
     notification_tx: mpsc::Sender<(WindowId, u64)>,
     notification_clicks: mpsc::Receiver<(WindowId, u64)>,
     notification_waker: LinuxWaker,
+    accessibility: Arc<Bridge>,
+    accessibility_actions: mpsc::Receiver<(WindowId, AccessibilityAction)>,
+    accessibility_refresh: Arc<AtomicBool>,
     animation_result: mpsc::Receiver<bool>,
     system_animations: bool,
     monitors: Vec<Monitor>,
@@ -637,6 +665,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
         let size = raw.surface_size();
         let id = self.next_id;
         self.next_id += 1;
+        let origin = raw.outer_position().ok().map(|at| (at.x, at.y));
         let window = LinuxWindow {
             id,
             scale: Cell::new(raw.scale_factor() as f32),
@@ -644,6 +673,8 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
             commands: self.commands.clone(),
             notification_tx: self.notification_tx.clone(),
             notification_waker: self.notification_waker.clone(),
+            accessibility: self.accessibility.clone(),
+            accessibility_origin: Cell::new(origin),
             size: Cell::new((size.width, size.height)),
             cursor: Cell::new(CursorIcon::Default),
             edge: Cell::new(None),
@@ -658,6 +689,9 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
         let node = self.nodes.last().expect("node");
         self.handler.created(&node.window);
         self.handler.event(&node.window, Event::Animations(self.system_animations));
+        if node.window.accessibility_active() {
+            self.handler.event(&node.window, Event::AccessibilityRefresh);
+        }
         if crate::gl::capture_path().is_some() {
             for ev in capture_keys(&std::env::var("ASTER_CAPTURE_KEYS").unwrap_or_default()) {
                 self.handler.event(&node.window, ev);
@@ -668,6 +702,7 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
     fn close(&mut self, id: WindowId) {
         let Some(i) = self.nodes.iter().position(|n| n.window.id == id) else { return };
         let node = self.nodes.remove(i);
+        self.accessibility.remove(id);
         self.pastes.retain(|_, (window, _)| *window != id);
         self.handler.destroyed(&node.window);
     }
@@ -716,7 +751,12 @@ impl<H: WindowHandler<LinuxWindows>> Loop<H> {
         let w = &node.window;
         match event {
             WindowEvent::RedrawRequested => handler.redraw(w),
-            WindowEvent::Moved(at) => w.position.set(Some((at.x, at.y))),
+            WindowEvent::Moved(at) => {
+                w.position.set(Some((at.x, at.y)));
+                if !w.is_wayland() && w.accessibility_origin.replace(Some((at.x, at.y))) != Some((at.x, at.y)) && w.accessibility_active() {
+                    handler.event(w, Event::AccessibilityRefresh);
+                }
+            }
             WindowEvent::SurfaceResized(size) => {
                 w.size.set((size.width, size.height));
                 handler.event(w, Event::Resized { width: size.width, height: size.height });
@@ -807,6 +847,19 @@ impl<H: WindowHandler<LinuxWindows>> ApplicationHandler for Loop<H> {
         for (window, tab) in self.notification_clicks.try_iter() {
             if let Some(node) = self.nodes.iter().find(|node| node.window.id == window) {
                 self.handler.event(&node.window, Event::NotificationClicked(tab));
+            }
+        }
+        if self.accessibility_refresh.swap(false, Ordering::AcqRel) {
+            for node in &self.nodes {
+                self.handler.event(&node.window, Event::AccessibilityRefresh);
+            }
+        }
+        for (window, action) in self.accessibility_actions.try_iter() {
+            if let Some(node) = self.nodes.iter().find(|node| node.window.id == window) {
+                if matches!(action, AccessibilityAction::Focus(_)) && !node.window.raw.has_focus() {
+                    node.window.activate();
+                }
+                self.handler.event(&node.window, Event::Accessibility(action));
             }
         }
         for node in &self.nodes {

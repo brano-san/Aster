@@ -97,3 +97,55 @@ fn hiding_an_action_removes_its_palette_aliases_and_preserves_the_binding() {
     a.set_config(config);
     assert_eq!(a.command_picks().iter().filter(|p| p.value == "close-other-tabs").count(), 2);
 }
+
+#[test]
+fn snippets_match_name_tags_and_body_and_paste_only_into_the_focused_pane() {
+    let mut a = app();
+    let config = Config::parse("[snippets.'Working tree']\ntext = \"git status\\nnext\\n\"\ntags = ['repo-maintenance']").unwrap();
+    a.set_config(config);
+    a.open_default_tab();
+    a.run(Action::SplitRight);
+    a.run(Action::BroadcastToTab);
+    let focus = a.focused_pane().unwrap();
+    let other = a.tabs[a.active].root.panes()[0];
+    a.run(Action::CommandSelector);
+    let palette = a.overlay.as_mut().unwrap();
+    for query in ["Working tree", "repo-maintenance", "git status"] {
+        palette.set_query(query);
+        assert_eq!(palette.selected_pick().unwrap().label, "Working tree");
+    }
+    a.on_event(Event::Key { key: Key::Enter, mods: Mods::NONE, pressed: true });
+    a.on_event(Event::Char('\r'));
+    assert_eq!(a.panes[&focus].queued, b"git status next");
+    assert!(a.panes[&other].queued.is_empty());
+}
+
+#[test]
+fn saving_selection_writes_a_new_named_snippet_to_the_config() {
+    let mut a = app();
+    a.set_config(Config::parse("[snippets.'echo abc']\ntext = 'keep me'").unwrap());
+    a.open_default_tab();
+    let terminal = a.focused_terminal().unwrap();
+    terminal.lock().feed(b"echo abc");
+    terminal.lock().select_all();
+    a.run(Action::SaveSelectionAsSnippet);
+    let saved = a.take_effects().into_iter().find_map(|effect| match effect {
+        crate::app::Effect::SaveConfig(text) => Some(Config::parse(&text).unwrap()),
+        _ => None,
+    }).unwrap();
+    assert_eq!(saved.snippets["echo abc"].text, "keep me");
+    assert_eq!(saved.snippets["echo abc (2)"].text, "echo abc");
+}
+
+#[test]
+fn bracketed_snippet_input_preserves_lines_without_a_final_enter_or_control_bytes() {
+    let mut a = app();
+    a.set_config(Config::parse("[snippets.Script]\ntext = \"one\\ntwo\\u0017\\r\\n\"").unwrap());
+    a.open_default_tab();
+    a.focused_terminal().unwrap().lock().feed(b"\x1b[?2004h");
+    a.run(Action::CommandSelector);
+    a.overlay.as_mut().unwrap().set_query("Script");
+    a.on_event(Event::Key { key: Key::Enter, mods: Mods::NONE, pressed: true });
+    a.on_event(Event::Char('\r'));
+    assert_eq!(a.panes[&a.focused_pane().unwrap()].queued, b"\x1b[200~one\rtwo\x1b[201~");
+}

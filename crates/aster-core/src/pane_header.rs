@@ -18,11 +18,23 @@ pub(crate) struct ProfileProbe {
 impl App {
     pub(crate) fn pane_header(&self, pane: PaneId, rect: Rect) -> Rect {
         let shown = self.panes.get(&pane).is_some_and(|p| {
-            self.config.appearance.pane_titles || p.name.is_some() || self.pane_rename.as_ref().is_some_and(|edit| edit.pane == pane)
+            self.config.appearance.pane_titles || p.name.is_some() || self.can_rerun_task(pane) || self.pane_rename.as_ref().is_some_and(|edit| edit.pane == pane)
         });
         let base = if self.ssh_toolbar_visible(pane, rect) { 30.0 } else if shown { 24.0 } else { 0.0 };
         let height = (base * self.ui()).round().min((rect.h / 2.0).floor());
         Rect::new(rect.x, rect.y, rect.w, height)
+    }
+
+    pub(crate) fn task_rerun_button(&self, pane: PaneId, rect: Rect) -> Option<Rect> {
+        let s = self.ui();
+        if !self.can_rerun_task(pane) || rect.w < 132.0 * s || rect.h < 50.0 * s { return None; }
+        let header = self.pane_header(pane, rect);
+        Some(Rect::new(header.right() - 110.0 * s, header.y + 2.0 * s, 106.0 * s, header.h - 4.0 * s).snap())
+    }
+
+    pub(crate) fn task_rerun_at(&self, x: f32, y: f32) -> Option<PaneId> {
+        let (pane, rect) = self.pane_at(x, y)?;
+        self.task_rerun_button(pane, rect)?.contains(x, y).then_some(pane)
     }
 
     pub(crate) fn pane_terminal_rect(&self, pane: PaneId, rect: Rect) -> Rect {

@@ -5,6 +5,7 @@ use aster_core::config::Config;
 use aster_core::profile::Profile;
 use aster_gfx::text::Gfx;
 use aster_platform_linux::{GlDevice, GlRenderer, LinuxText};
+use aster_vt::fixture::{Chunking, Fixture};
 use std::sync::Arc;
 
 fn png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
@@ -47,6 +48,18 @@ fn png(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+fn render(app: &mut App, gfx: &mut Gfx<LinuxText>, renderer: &mut GlRenderer) -> Vec<u8> {
+    app.woken();
+    app.frame(gfx, false);
+    for (slot, offset) in &gfx.uploads.rects {
+        let len = (slot.w * slot.h * 4) as usize;
+        renderer.upload(*slot, &gfx.uploads.data[*offset..*offset + len]);
+    }
+    gfx.uploads.clear();
+    renderer.render(&gfx.dl).expect("render");
+    renderer.read_pixels()
+}
+
 #[test]
 fn a_frame_with_text_colors_and_box_lines_renders_offscreen() {
     let Ok(device) = GlDevice::headless() else {
@@ -62,17 +75,38 @@ fn a_frame_with_text_colors_and_box_lines_renders_offscreen() {
     app.frame(&mut gfx, false);
     let terminal = app.focused_terminal().expect("terminal");
     terminal.lock().feed("\x1b]0;aster linux\x07$ ls --color\r\n\x1b[1;34mdir\x1b[0m  \x1b[32mscript.sh\x1b[0m  \x1b[3mitalic\x1b[0m  \x1b[4munderline\x1b[0m  \x1b[4:3mcurl\x1b[0m\r\n┌──┬──┐ ╭──╮ █▓▒░ \u{E0B0}\r\n│ab│cd│ ╰──╯ Привет 日本\r\n└──┴──┘\r\n$ ".as_bytes());
-    app.woken();
-    app.frame(&mut gfx, false);
-    for (slot, offset) in &gfx.uploads.rects {
-        let len = (slot.w * slot.h * 4) as usize;
-        renderer.upload(*slot, &gfx.uploads.data[*offset..*offset + len]);
-    }
-    gfx.uploads.clear();
-    renderer.render(&gfx.dl).expect("render");
-    let pixels = renderer.read_pixels();
+    let pixels = render(&mut app, &mut gfx, &mut renderer);
     assert!(pixels.chunks_exact(4).any(|p| p[0] != pixels[0] || p[1] != pixels[1]), "the frame is not blank");
     if let Some(path) = std::env::var_os("ASTER_RENDER_PNG") {
         std::fs::write(path, png(w, h, &pixels)).unwrap();
+    }
+}
+
+#[test]
+fn replay_fixture_renders_the_same_pixels_across_read_boundaries() {
+    let Ok(device) = GlDevice::headless() else {
+        eprintln!("no EGL device, skipping");
+        return;
+    };
+    let (w, h) = (480, 260);
+    let mut renderer = GlRenderer::offscreen(&device, (w, h), 2048).expect("offscreen renderer");
+    let mut gfx = Gfx::new(LinuxText::new(), 2048);
+    let mut app = App::new(Config::default(), vec![Profile::new("local:sh", "sh", "/bin/sh", &[])], true, None, Arc::new(|| {}));
+    app.set_system_animations(false);
+    app.set_viewport(w, h, 1.0);
+    app.open_default_tab();
+    let terminal = app.focused_terminal().expect("terminal");
+    let blank = render(&mut app, &mut gfx, &mut renderer);
+    let fixture = Fixture::from_json(include_bytes!("../../aster-vt/test/fixtures/reflow.json")).unwrap();
+    let mut expected = None;
+    for chunking in Chunking::ALL {
+        *terminal.lock() = fixture.verify_and_replay(chunking).unwrap();
+        let pixels = render(&mut app, &mut gfx, &mut renderer);
+        if let Some(expected) = &expected {
+            assert!(pixels == *expected, "frame pixels differ for {chunking:?}");
+        } else {
+            assert!(pixels != blank, "fixture output must draw visible text");
+            expected = Some(pixels);
+        }
     }
 }

@@ -203,8 +203,15 @@ impl App {
             Entry::Separator,
             item("Search", Action::Search, true),
             item("Remote files", Action::OpenFiles, self.focused_pane().is_some_and(|p| self.can_browse(p))),
+            item("SFTP transfers", Action::SftpTransfers, true),
             item("Settings", Action::Settings, true),
         ];
+        if selection {
+            entries.insert(1, item("Save selection as snippet", Action::SaveSelectionAsSnippet, true));
+        }
+        if self.focused_pane().is_some_and(|pane| self.can_rerun_task(pane)) {
+            entries.insert(0, item("Rerun task", Action::RerunTask, true));
+        }
         if self.serial_pane().is_some() {
             entries.extend([
                 Entry::Separator,

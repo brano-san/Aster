@@ -72,10 +72,13 @@ pub struct Remote {
 
 pub fn file_reply(reply: sftp::Reply) -> FileReply {
     match reply {
-        sftp::Reply::Listing { path, entries } => FileReply::Listing {
+        sftp::Reply::Listing { id, path, entries } => FileReply::Listing {
+            id,
             path,
             entries: entries.into_iter().map(|e| FileEntry { name: e.name, dir: e.dir, link: e.link, size: e.size, modified: e.modified, mode: e.mode }).collect(),
         },
+        sftp::Reply::LinkFile { id, path } => FileReply::LinkFile { id, path },
+        sftp::Reply::NavigationFailed { id, error } => FileReply::NavigationFailed { id, error: aster_core::i18n::ssh_error(&error) },
         sftp::Reply::Progress { id, done, total } => FileReply::Progress { id, done, total },
         sftp::Reply::Downloaded { id, local } => FileReply::Downloaded { id, local },
         sftp::Reply::Uploaded { id, remote } => FileReply::Uploaded { id, remote },
@@ -88,7 +91,8 @@ pub fn file_reply(reply: sftp::Reply) -> FileReply {
 
 pub fn file_request(request: FileRequest, downloads: PathBuf) -> sftp::Request {
     match request {
-        FileRequest::List(path) => sftp::Request::List { path },
+        FileRequest::List { id, paths } => sftp::Request::List { id, paths },
+        FileRequest::OpenLink { id, path } => sftp::Request::OpenLink { id, path },
         FileRequest::Download { id, remote } => sftp::Request::Download { id, remote, dir: downloads },
         FileRequest::Upload { id, local, dir } => sftp::Request::Upload { id, local, dir },
         FileRequest::Mkdir(path) => sftp::Request::Mkdir { path },

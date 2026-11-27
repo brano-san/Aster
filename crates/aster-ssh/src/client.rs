@@ -387,7 +387,7 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
                         match open_files(&conn, replies.clone()).await {
                             Ok(f) => files = Some(f),
                             Err(error) => {
-                                let _ = replies.send(crate::sftp::Reply::Failed { id: None, error });
+                                let _ = replies.send(request.failure(error));
                                 continue;
                             }
                         }
@@ -399,12 +399,14 @@ async fn session(req: &Request, console: &Shared, replies: crossbeam_channel::Se
                 Some(Input::Interactive(_)) => {}
                 Some(Input::Forward(command)) => { let _ = conn.forwards.commands.send(command); }
                 Some(Input::Close) | None => {
+                    if let Some(files) = &files { files.cancel_all(); }
                     let _ = tx.close().await;
                     return Ok(0);
                 }
             },
         }
     }
+    if let Some(files) = &files { files.cancel_all(); }
     Ok(code.unwrap_or(0))
 }
 

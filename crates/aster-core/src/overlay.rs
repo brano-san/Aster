@@ -8,6 +8,11 @@ use std::time::Instant;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayKind {
     Commands,
+    SessionSearch,
+    Workspaces,
+    WorkspaceName { rename: bool },
+    CommandHistory(PaneId),
+    CommandOutput(PaneId, u64),
     Profiles,
     TabProfiles,
     PaneProfile(PaneId),
@@ -27,7 +32,15 @@ impl OverlayKind {
     }
 
     pub(crate) fn scrolls_smoothly(self) -> bool {
-        self.is_profile_picker() || matches!(self, Self::Commands | Self::Schemes)
+        self.is_profile_picker() || self.has_detail_rows() || matches!(self, Self::Commands | Self::Schemes | Self::Workspaces)
+    }
+
+    pub(crate) fn searches_output(self) -> bool {
+        matches!(self, Self::SessionSearch | Self::CommandOutput(..))
+    }
+
+    pub(crate) fn has_detail_rows(self) -> bool {
+        self.searches_output() || matches!(self, Self::CommandHistory(_))
     }
 }
 
@@ -110,6 +123,11 @@ impl Overlay {
     pub fn placeholder(&self) -> &'static str {
         match self.kind {
             OverlayKind::Commands => t("Type a command"),
+            OverlayKind::SessionSearch => t("Find in open sessions"),
+            OverlayKind::Workspaces => t("Select a workspace"),
+            OverlayKind::WorkspaceName { .. } => t("Enter a workspace name"),
+            OverlayKind::CommandHistory(_) => t("Find a command"),
+            OverlayKind::CommandOutput(..) => t("Find in this command’s output"),
             OverlayKind::Profiles => t("Select a profile or enter an address"),
             OverlayKind::TabProfiles => t("Select a profile for the new tab"),
             OverlayKind::PaneProfile(_) => t("Select a profile for this pane"),
@@ -127,22 +145,44 @@ impl Overlay {
     fn refilter(&mut self) {
         self.scroll_offset = None;
         self.items.truncate(self.base);
+        if let OverlayKind::WorkspaceName { rename } = self.kind {
+            let name = self.query.trim();
+            self.shown.clear();
+            self.selected = 0;
+            self.scroll = 0;
+            if !name.is_empty() {
+                let label = t(if rename { "Rename workspace" } else { "Create workspace" });
+                self.shown.push((self.items.len(), Vec::new()));
+                self.items.push(Pick { label: label.into(), value: name.into(), ..Pick::default() });
+            }
+            return;
+        }
+        if self.kind.searches_output() {
+            self.shown = (0..self.items.len()).map(|index| (index, Vec::new())).collect();
+            self.selected = 0;
+            self.scroll = 0;
+            return;
+        }
         if matches!(self.kind, OverlayKind::SerialSpeed(_)) {
             self.filter_serial_speeds();
             return;
         }
         let commands = matches!(self.kind, OverlayKind::Commands);
         let profiles = self.kind.is_profile_picker();
-        let english = |p: &Pick| {
+        let source_match = |p: &Pick| {
             if !commands {
                 return None;
             }
             if !p.source_label.is_empty() {
-                return (p.source_label != p.label).then(|| p.source_label.clone());
+                return (p.source_label != p.label).then(|| fuzzy(&self.query, &p.source_label)).flatten();
             }
-            crate::keymap::Action::from_id(&p.value).map(|a| a.source_label()).filter(|e| *e != p.label)
+            crate::keymap::Action::from_id(&p.value).map(|a| a.source_label()).filter(|label| *label != p.label)
+                .and_then(|label| fuzzy(&self.query, &label))
         };
-        let extra = |p: &Pick| profiles.then(|| fuzzy(&self.query, &p.hint).or_else(|| fuzzy(&self.query, &p.group))).flatten().map(|m| m.score - 20);
+        let extra = |p: &Pick| (profiles || matches!(self.kind, OverlayKind::CommandHistory(_)))
+            .then(|| fuzzy(&self.query, &p.hint).or_else(|| fuzzy(&self.query, &p.group)))
+            .flatten()
+            .map(|m| m.score - 20);
         let mut scored: Vec<(i32, usize, Vec<Range<usize>>)> = self
             .items
             .iter()
@@ -150,7 +190,7 @@ impl Overlay {
             .filter_map(|(i, p)| {
                 fuzzy(&self.query, &p.label)
                     .map(|m| (m.score, i, m.ranges))
-                    .or_else(|| english(p).and_then(|e| fuzzy(&self.query, &e)).map(|m| (m.score, i, Vec::new())))
+                    .or_else(|| source_match(p).map(|m| (m.score, i, Vec::new())))
                     .or_else(|| extra(p).map(|score| (score, i, Vec::new())))
             })
             .collect();
@@ -187,7 +227,19 @@ impl Overlay {
     }
 
     pub fn insert(&mut self, text: &str) {
-        self.query.push_str(text);
+        let limit = if self.kind.searches_output() {
+            Some(crate::search_sessions::MAX_QUERY_CHARS)
+        } else if matches!(self.kind, OverlayKind::WorkspaceName { .. }) {
+            Some(crate::workspaces::MAX_NAME_CHARS)
+        } else {
+            None
+        };
+        if let Some(limit) = limit {
+            let left = limit.saturating_sub(self.query.chars().count());
+            self.query.extend(text.chars().filter(|c| !c.is_control()).take(left));
+        } else {
+            self.query.push_str(text);
+        }
         self.refilter();
     }
 
@@ -253,6 +305,12 @@ impl Overlay {
 
     pub fn set_query(&mut self, text: &str) {
         self.query = text.to_owned();
+        self.refilter();
+    }
+
+    pub(crate) fn replace_results(&mut self, items: Vec<Pick>) {
+        self.base = items.len();
+        self.items = items;
         self.refilter();
     }
 }

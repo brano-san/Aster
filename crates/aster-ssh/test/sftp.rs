@@ -68,6 +68,99 @@ fn answer(pane: &Pane) -> Reply {
 }
 
 #[test]
+fn opening_a_link_follows_the_target_type() {
+    use russh_sftp::protocol::*;
+    struct Links(Fs);
+    impl russh_sftp::server::Handler for Links {
+        type Error = StatusCode;
+        fn unimplemented(&self) -> Self::Error { StatusCode::OpUnsupported }
+        async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            self.0.stat(id, path).await
+        }
+        async fn lstat(&mut self, id: u32, _: String) -> Result<Attrs, Self::Error> {
+            let mut attrs = FileAttributes::empty();
+            attrs.permissions = Some(0o120777);
+            Ok(Attrs { id, attrs })
+        }
+        async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
+            self.0.realpath(id, path).await
+        }
+        async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+            self.0.opendir(id, path).await
+        }
+        async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, Self::Error> {
+            self.0.readdir(id, handle).await
+        }
+        async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
+            self.0.close(id, handle).await
+        }
+    }
+
+    let root = temp_ssh_dir();
+    std::fs::create_dir(root.join("folder")).unwrap();
+    std::fs::write(root.join("folder/child"), b"hello").unwrap();
+    std::fs::write(root.join("file"), b"hello").unwrap();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let (client, server) = tokio::io::duplex(65_536);
+        let task = tokio::spawn(russh_sftp::server::run(server, Links(Fs::new(root.clone()))));
+        let files = Files::new(SftpSession::new(client).await.unwrap(), crossbeam_channel::unbounded().0);
+        let cancel = Notify::new();
+        let request = Request::OpenLink { id: 20, path: "/folder".into() };
+        assert!(matches!(files.run(&request, &cancel).await, Ok(Reply::Listing { id: 20, path, entries }) if path == "/folder" && entries[0].name == "child"));
+        let request = Request::OpenLink { id: 21, path: "/file".into() };
+        assert_eq!(files.run(&request, &cancel).await.unwrap(), Reply::LinkFile { id: 21, path: "/file".into() });
+        let request = Request::OpenLink { id: 22, path: "/broken".into() };
+        assert!(files.run(&request, &cancel).await.is_err());
+        task.abort();
+    });
+}
+
+#[test]
+fn cancelling_a_directory_download_removes_the_partial_copy() {
+    let root = temp_ssh_dir();
+    std::fs::create_dir(root.join("folder")).unwrap();
+    std::fs::write(root.join("folder/large"), vec![1; 2_000_000]).unwrap();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let (client, server) = tokio::io::duplex(65_536);
+        let task = tokio::spawn(russh_sftp::server::run(server, Fs::new(root.clone())));
+        let session = SftpSession::new(client).await.unwrap();
+        let target = root.join("local");
+        let cancel = Notify::new();
+        let mut progress = |done, _| {
+            assert!(done > 0);
+            cancel.notify_one();
+        };
+        let result = crate::sftp_tree::download_with_cancel(&session, "/folder", &target, &mut progress, Some(&cancel)).await;
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert!(!target.join("folder").exists());
+        task.abort();
+    });
+}
+
+#[test]
+fn simultaneous_uploads_with_the_same_name_never_overwrite_the_winner() {
+    let root = temp_ssh_dir();
+    let left = root.join("left/file");
+    let right = root.join("right/file");
+    let remote = root.join("remote");
+    for path in [&left, &right] { std::fs::create_dir(path.parent().unwrap()).unwrap(); }
+    std::fs::create_dir(&remote).unwrap();
+    std::fs::write(&left, b"left").unwrap();
+    std::fs::write(&right, b"right").unwrap();
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        let (client, server) = tokio::io::duplex(65_536);
+        let task = tokio::spawn(russh_sftp::server::run(server, Fs::new(remote.clone())));
+        let files = Files::new(SftpSession::new(client).await.unwrap(), crossbeam_channel::unbounded().0);
+        let cancel = Notify::new();
+        let (first, second) = tokio::join!(files.upload(1, &left, "/", &cancel), files.upload(2, &right, "/", &cancel));
+        assert_ne!(first.is_ok(), second.is_ok());
+        let expected = if first.is_ok() { b"left".as_slice() } else { b"right".as_slice() };
+        assert_eq!(std::fs::read(remote.join("file")).unwrap(), expected);
+        task.abort();
+    });
+}
+
+#[test]
 fn files_are_listed_downloaded_uploaded_and_managed_over_the_same_connection() {
     let remote = temp_ssh_dir();
     std::fs::write(remote.join("a.txt"), "hello").unwrap();
@@ -75,8 +168,9 @@ fn files_are_listed_downloaded_uploaded_and_managed_over_the_same_connection() {
     let (port, _) = serve_files(Some(remote.clone()));
     let pane = logged_in(port);
 
-    ask(&pane, Request::List { path: String::new() });
-    let Reply::Listing { path, entries } = answer(&pane) else { panic!("no listing") };
+    ask(&pane, Request::List { id: 17, paths: vec!["/missing".into(), String::new()] });
+    let Reply::Listing { id, path, entries } = answer(&pane) else { panic!("no listing") };
+    assert_eq!(id, 17);
     assert_eq!(path, "/");
     let names: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
     assert_eq!(names, [("docs", true), ("a.txt", false)]);
@@ -132,8 +226,8 @@ fn files_are_listed_downloaded_uploaded_and_managed_over_the_same_connection() {
 fn a_server_without_sftp_reports_it_once_asked() {
     let (port, _) = serve();
     let pane = logged_in(port);
-    ask(&pane, Request::List { path: String::new() });
-    assert!(matches!(answer(&pane), Reply::Failed { id: None, error } if error.contains("SFTP")));
+    ask(&pane, Request::List { id: 11, paths: vec![String::new()] });
+    assert!(matches!(answer(&pane), Reply::NavigationFailed { id: 11, error } if error.contains("SFTP")));
 }
 
 #[test]

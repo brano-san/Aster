@@ -484,6 +484,14 @@ pub struct Palette {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
+pub struct Snippet {
+    pub text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct Colors {
     pub generate_256: bool,
     pub harmonious: bool,
@@ -502,6 +510,8 @@ pub struct Config {
     #[serde(skip)]
     pub version: u32,
     pub palette: Palette,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub snippets: BTreeMap<String, Snippet>,
     pub terminal: Terminal,
     pub appearance: Appearance,
     pub colors: Colors,
@@ -547,6 +557,7 @@ impl Default for Config {
             extensions: Extensions::default(),
             picker: Picker::default(),
             palette: Palette::default(),
+            snippets: BTreeMap::new(),
             hotkeys: BTreeMap::new(),
             profiles: Vec::new(),
             hidden_profiles: Vec::new(),

@@ -28,6 +28,16 @@ fn open_on_start_only_controls_the_first_window_without_a_restored_session() {
 }
 
 #[test]
+fn startup_paste_opens_a_tab_in_an_empty_restored_workspace() {
+    let mut app = App::new(Config::default(), vec![Profile::new("local:a", "A", "shell", &[])], true, None, Arc::new(|| {}));
+    let saved = WindowState { workspace: Some("Build".into()), ..WindowState::default() };
+    let request = Request { cwd: None, command: Command::Paste { text: "hello".into() } };
+    populate_window(&mut app, Some(saved), true, Some(request));
+    assert_eq!(app.tab_count(), 1);
+    assert_eq!(app.snapshot().workspace.as_deref(), Some("Build"));
+}
+
+#[test]
 fn background_wakes_preserve_the_first_request_and_queue_one_window() {
     let (tx, rx) = std::sync::mpsc::channel();
     let mut startup = None;

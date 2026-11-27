@@ -75,6 +75,14 @@ fn hidden_is_a_startup_request_and_an_exec_argument_after_the_delimiter() {
 }
 
 #[test]
+fn record_and_replay_fixtures_have_distinct_cli_routes() {
+    assert_eq!(parsed(&["--record-vt-fixtures"]), Parsed::Request(Command::RecordVtFixture));
+    assert_eq!(parsed(&["--replay-vt-fixture", "a fixture.json"]), Parsed::ReplayFixture("a fixture.json".into()));
+    assert!(matches!(parsed(&["--replay-vt-fixture"]), Parsed::Error(_)));
+    assert!(matches!(parsed(&["--replay-vt-fixture", "one.json", "two.json"]), Parsed::Error(_)));
+}
+
+#[test]
 fn requests_survive_the_trip_between_instances() {
     let request = Request { cwd: Some("/tmp".into()), command: Command::Run { command: args(&["ls", "-la"]), dir: None } };
     assert_eq!(Request::decode(r#"{"cwd":"/tmp","command":{"kind":"run","command":["ls","-la"]}}"#), Some(request.clone()));

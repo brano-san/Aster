@@ -39,22 +39,145 @@ fn key(a: &mut App, k: Key) {
 }
 
 fn listed(a: &mut App, pane: PaneId, path: &str) {
-    a.files_reply(pane, FileReply::Listing { path: path.into(), entries: vec![entry("docs", true, 0), entry("notes.txt", false, 2048), entry("photo.jpg", false, 3_500_000)] });
+    let id = a.files_page().unwrap().pending.unwrap();
+    a.files_reply(pane, FileReply::Listing { id, path: path.into(), entries: vec![entry("docs", true, 0), entry("notes.txt", false, 2048), entry("photo.jpg", false, 3_500_000)] });
+}
+
+fn list_request(a: &mut App) -> (u64, Vec<String>) {
+    let requests = requests(a);
+    let [FileRequest::List { id, paths }] = requests.as_slice() else { panic!("{requests:?}") };
+    (*id, paths.clone())
+}
+
+#[test]
+fn remote_files_start_in_the_shell_directory_and_keep_the_last_browsed_path() {
+    let (mut a, pane) = ssh_app();
+    a.terminal(pane).unwrap().lock().feed(b"\x1b]7;file://box/srv/project\x07");
+    a.run(Action::OpenFiles);
+    assert_eq!(list_request(&mut a).1, ["/srv/project", ""]);
+    listed(&mut a, pane, "/var/log");
+    a.close_files();
+    a.run(Action::OpenFiles);
+    assert_eq!(list_request(&mut a).1, ["/var/log", "/srv/project", ""]);
+    listed(&mut a, pane, "/var/log");
+    let shell = a.files_geometry().unwrap().shell_directory.unwrap();
+    a.files_click(shell.x + 2.0, shell.y + 2.0, 1);
+    assert_eq!(list_request(&mut a).1, ["/srv/project"]);
 }
 
 #[test]
 fn opening_lists_the_home_folder_and_enter_walks_into_folders() {
     let (mut a, pane) = ssh_app();
     a.run(Action::OpenFiles);
-    assert_eq!(requests(&mut a), [FileRequest::List(String::new())]);
+    assert_eq!(list_request(&mut a).1, [""]);
     listed(&mut a, pane, "/home/ann");
     let page = a.files_page().unwrap();
     assert_eq!(page.rows(), 4, "an up row comes first below the root");
     key(&mut a, Key::Down);
     key(&mut a, Key::Enter);
-    assert_eq!(requests(&mut a), [FileRequest::List("/home/ann/docs".into())]);
+    assert_eq!(list_request(&mut a).1, ["/home/ann/docs"]);
     key(&mut a, Key::Backspace);
-    assert_eq!(requests(&mut a), [FileRequest::List("/home".into())]);
+    assert_eq!(list_request(&mut a).1, ["/home"]);
+}
+
+#[test]
+fn breadcrumbs_support_mouse_and_keyboard_and_ignore_superseded_replies() {
+    let (mut a, pane) = ssh_app();
+    a.run(Action::OpenFiles);
+    listed(&mut a, pane, "/srv/projects/acme");
+    requests(&mut a);
+
+    key(&mut a, Key::Tab);
+    key(&mut a, Key::Left);
+    key(&mut a, Key::Enter);
+    let (older, paths) = list_request(&mut a);
+    assert_eq!(paths, ["/srv/projects"]);
+    let (_, _, srv) = a.files_geometry().unwrap().crumbs.into_iter().find(|(_, crumb, _)| crumb.path == "/srv").unwrap();
+    a.files_click(srv.x + 2.0, srv.y + 2.0, 1);
+    assert_eq!(list_request(&mut a).1, ["/srv"]);
+
+    listed(&mut a, pane, "/srv");
+    a.files_reply(pane, FileReply::Listing { id: older, path: "/srv/projects".into(), entries: Vec::new() });
+    assert_eq!(a.files_page().unwrap().path, "/srv");
+}
+
+#[test]
+fn mutation_during_listing_refreshes_the_arriving_snapshot() {
+    let (mut a, pane) = ssh_app();
+    a.run(Action::OpenFiles);
+    listed(&mut a, pane, "/srv");
+    requests(&mut a);
+    key(&mut a, Key::F(5));
+    let (id, _) = list_request(&mut a);
+
+    a.files_reply(pane, FileReply::Changed { dir: "/srv".into() });
+    assert!(requests(&mut a).is_empty());
+    a.files_reply(pane, FileReply::Listing { id, path: "/srv".into(), entries: Vec::new() });
+    let (refresh, paths) = list_request(&mut a);
+    assert_ne!(refresh, id);
+    assert_eq!(paths, ["/srv"]);
+}
+
+#[test]
+fn cancelling_an_edit_while_it_downloads_ignores_a_late_editing_reply() {
+    let (mut a, pane) = ssh_app();
+    a.run(Action::OpenFiles);
+    listed(&mut a, pane, "/etc");
+    requests(&mut a);
+    key(&mut a, Key::Down);
+    key(&mut a, Key::Down);
+    key(&mut a, Key::F(4));
+    let reqs = requests(&mut a);
+    let [FileRequest::Edit { id, .. }] = reqs.as_slice() else { panic!("{reqs:?}") };
+    a.transfer_action(*id);
+    assert_eq!(requests(&mut a), [FileRequest::Cancel(*id)]);
+    a.files_reply(pane, FileReply::Editing { id: *id, local: "C:/tmp/notes.txt".into() });
+    assert!(!a.take_effects().iter().any(|effect| matches!(effect, Effect::Open(_))));
+}
+
+#[test]
+fn activating_a_file_symlink_downloads_its_target_under_the_link_name() {
+    let (mut a, pane) = ssh_app();
+    a.run(Action::OpenFiles);
+    let (id, _) = list_request(&mut a);
+    let mut alias = entry("alias", false, 0);
+    alias.link = true;
+    a.files_reply(pane, FileReply::Listing { id, path: "/".into(), entries: vec![alias] });
+    key(&mut a, Key::Enter);
+    let reqs = requests(&mut a);
+    let [FileRequest::OpenLink { id, path }] = reqs.as_slice() else { panic!("{reqs:?}") };
+    assert_eq!(path, "/alias");
+    a.files_reply(pane, FileReply::LinkFile { id: *id, path: path.clone() });
+    assert!(matches!(requests(&mut a).as_slice(), [FileRequest::Download { remote, .. }] if remote == "/alias"));
+}
+
+#[test]
+fn transfer_center_controls_a_transfer_from_another_tab() {
+    let (mut a, pane) = ssh_app();
+    a.run(Action::OpenFiles);
+    listed(&mut a, pane, "/srv");
+    a.close_files();
+    a.run(Action::OpenFiles);
+    listed(&mut a, pane, "/srv");
+    a.upload("C:/tmp/a.zip".into());
+    let id = a.transfers_of(pane)[0].id;
+    a.close_files();
+    a.open_default_tab();
+    assert_ne!(a.focused_pane(), Some(pane));
+    a.take_effects();
+    a.run(Action::SftpTransfers);
+    assert_eq!(a.global_transfer_geometry().unwrap().rows[0].id, id);
+    key(&mut a, Key::Delete);
+    assert!(a.take_effects().iter().any(|effect| matches!(effect, Effect::Files { pane: target, request: FileRequest::Cancel(target_id) } if *target == pane && *target_id == id)));
+
+    a.files_reply(pane, FileReply::Uploaded { id, remote: "/srv/a.zip".into() });
+    key(&mut a, Key::Tab);
+    key(&mut a, Key::Enter);
+    assert!(a.take_effects().iter().any(|effect| matches!(effect, Effect::RevealFile(path) if path == &PathBuf::from("C:/tmp/a.zip"))));
+    key(&mut a, Key::Tab);
+    key(&mut a, Key::Enter);
+    assert_eq!(a.focused_pane(), Some(pane));
+    assert!(!a.global_transfers_open());
 }
 
 #[test]
@@ -62,7 +185,8 @@ fn growing_the_file_list_keeps_the_bottom_row_clickable() {
     let (mut a, pane) = ssh_app();
     a.run(Action::OpenFiles);
     let entries = (0..35).map(|i| entry(&format!("{i:02}.txt"), false, 14)).collect();
-    a.files_reply(pane, FileReply::Listing { path: "/".into(), entries });
+    let (id, _) = list_request(&mut a);
+    a.files_reply(pane, FileReply::Listing { id, path: "/".into(), entries });
     key(&mut a, Key::End);
     let before = a.files_page().unwrap().scroll;
     a.set_viewport(1000, 900, 1.0);
@@ -140,7 +264,7 @@ fn prompts_create_rename_and_delete_in_the_current_folder() {
     key(&mut a, Key::Enter);
     assert_eq!(requests(&mut a), [FileRequest::Remove { path: "/srv/notes.txt".into(), dir: false }]);
     a.files_reply(pane, FileReply::Changed { dir: "/srv".into() });
-    assert_eq!(requests(&mut a), [FileRequest::List("/srv".into())]);
+    assert_eq!(list_request(&mut a).1, ["/srv"]);
 }
 
 #[test]
@@ -154,7 +278,7 @@ fn dropped_files_upload_into_the_open_folder() {
     assert!(matches!(&reqs[0], FileRequest::Upload { local, dir, .. } if dir == "/srv" && local == &PathBuf::from(r"C:\data\a.zip")));
     let FileRequest::Upload { id, .. } = reqs[0] else { unreachable!() };
     a.files_reply(pane, FileReply::Uploaded { id, remote: "/srv/a.zip".into() });
-    assert_eq!(requests(&mut a), [FileRequest::List("/srv".into())], "the folder refreshes after an upload");
+    assert_eq!(list_request(&mut a).1, ["/srv"], "the folder refreshes after an upload");
 }
 
 #[test]

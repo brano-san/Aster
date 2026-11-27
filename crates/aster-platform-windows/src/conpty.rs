@@ -150,7 +150,8 @@ pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
                 return Err(err(e));
             }
         };
-        let launched = launch(req, pcon);
+        let startup = crate::shells::startup(req);
+        let launched = launch(startup.as_ref().map_or(req, |(request, _)| request), pcon);
         let (process, pid) = match launched {
             Ok(v) => v,
             Err(e) => {
@@ -163,6 +164,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
         let inner = Arc::new(Inner { pcon: Mutex::new(Some(pcon)), process, pid });
         let waiter = inner.clone();
         let wait = Box::new(move || {
+            let _startup = startup;
             let code = if WaitForSingleObject(waiter.process, INFINITE) == WAIT_OBJECT_0 {
                 let mut code = 0u32;
                 GetExitCodeProcess(waiter.process, &mut code).ok().map(|_| code)

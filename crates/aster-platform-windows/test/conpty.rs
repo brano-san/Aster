@@ -1,5 +1,6 @@
 use super::*;
 use std::io::{Read, Write};
+use std::time::Duration;
 
 #[test]
 fn arguments_are_quoted_by_the_windows_rules() {
@@ -28,6 +29,52 @@ fn a_spawned_shell_echoes_through_the_pseudo_console_and_reports_its_exit_code()
     let (exit, output) = run(&req);
     assert_eq!(exit, Some(3));
     assert!(output.contains("aster-ok"), "{output:?}");
+}
+
+#[test]
+fn interactive_powershell_marks_output_and_reports_native_exit_code() {
+    let modules = std::path::PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join("WindowsPowerShell").join("Modules");
+    let req = SpawnRequest {
+        command: "powershell.exe".into(),
+        args: vec!["-NoLogo".into(), "-NoProfile".into()],
+        local_environment: Some(Box::default()),
+        env: vec![("PSModulePath".into(), modules.to_string_lossy().into_owned())],
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    };
+    let mut spawned = spawn(&req).expect("conpty spawn");
+    let mut reader = spawned.reader;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let collector = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() { break; }
+        }
+    });
+    spawned.writer.write_all(b"\x1b[1;1R").unwrap();
+    let mut output = String::new();
+    let mut wait_for = |needle| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !output.contains(needle) {
+            let Ok(bytes) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) else { return false };
+            output.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        true
+    };
+    let started = wait_for("\x1b]133;B");
+    let finished = if started {
+        spawned.writer.write_all(b"cmd /d /c \"echo aster-native & exit 7\"\r").unwrap();
+        wait_for("\x1b]133;D;7")
+    } else {
+        false
+    };
+    spawned.pty.kill();
+    let _ = (spawned.wait)();
+    collector.join().unwrap();
+    assert!(started && finished, "{output:?}");
+    assert!(output.contains("\x1b]133;C"));
+    assert!(output.contains("aster-native"));
 }
 
 fn run(req: &SpawnRequest) -> (Option<u32>, String) {

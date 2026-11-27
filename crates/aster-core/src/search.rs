@@ -101,7 +101,7 @@ pub(crate) fn ruler_marks(track: Rect, rows: &[usize], current: Option<usize>, t
     marks
 }
 
-fn vt(o: SearchOptions) -> VtOptions {
+pub(crate) fn vt(o: SearchOptions) -> VtOptions {
     VtOptions { regex: o.regex, case_sensitive: o.case_sensitive, whole_word: o.whole_word }
 }
 

@@ -379,7 +379,14 @@ impl App {
         let mut profile = crate::profile::Profile::new("run", &command.join(" "), program, &[]);
         profile.args = args.to_vec();
         profile.hold = true;
-        self.open_tab_at(profile, cwd);
+        self.open_tab_at(profile, cwd.clone());
+        let Some(pane) = self.focused_pane().and_then(|id| self.panes.get_mut(&id)) else { return };
+        let Some(launch) = pane.pending.as_mut() else { return };
+        launch.args.clone_from(&pane.source_profile.args);
+        if cwd.is_some() {
+            launch.cwd = cwd;
+        }
+        pane.task_launch = Some(Box::new(launch.clone()));
     }
 
     pub fn open_delegated_console(&mut self, token: String) {

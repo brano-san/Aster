@@ -37,6 +37,8 @@ struct State<P: Platform> {
 }
 
 enum StoreEvent {
+    SessionSearch(WindowId, aster_core::search_sessions::Reply),
+    OutputPathError(WindowId),
     Extensions(crate::extensions::Event),
     Launcher(Option<WindowId>, std::io::Result<bool>),
     BackgroundImage { window: WindowId, revision: u64, bitmap: Option<aster_core::background::Bitmap> },
@@ -129,6 +131,7 @@ pub struct Handler<P: Platform> {
     vault_access: HashMap<WindowId, VecDeque<AccessPrompt>>,
     store_events: StoreEvents<<P::Windows as WindowSystem>::Waker>,
     store_rx: Receiver<StoreEvent>,
+    search_requests: Sender<(WindowId, aster_core::search_sessions::Request)>,
     ssh: Option<String>,
     pending: Vec<WindowState>,
     session_saved: bool,
@@ -191,12 +194,10 @@ fn queue_background_request(startup: &mut Option<crate::cli::Request>, requests:
 
 fn initialize_tabs(app: &mut App, saved: Option<WindowState>, first: bool, command: Option<&crate::cli::Command>) {
     use crate::cli::Command;
-    if saved.is_some_and(|state| app.restore(&state)) {
-        return;
-    }
+    let restored = saved.is_some_and(|state| app.restore(&state));
     let open_default = match command {
-        Some(Command::Paste { .. }) => true,
-        Some(Command::Window | Command::Hidden) | None => !first || app.config().terminal.open_on_start,
+        Some(Command::Paste { .. }) => app.tab_count() == 0,
+        Some(Command::Window | Command::Hidden) | None => !restored && (!first || app.config().terminal.open_on_start),
         _ => false,
     };
     if open_default {
@@ -209,6 +210,7 @@ fn serve_request(app: &mut App, request: crate::cli::Request) -> bool {
     match request.command {
         Command::Window => return false,
         Command::Hidden | Command::InstallationQuit => return true,
+        Command::RecordVtFixture => app.open_fixture_recording_tab(),
         Command::Open { dir } => {
             if let Some(profile) = app.default_profile() {
                 app.open_tab_at(profile, Some(dir));
@@ -263,6 +265,15 @@ impl<P: Platform> Handler<P> {
         let config_startup = if encrypted { ConfigStartup::Prompt } else { ConfigStartup::Ready };
         let (tx, store_rx) = unbounded();
         let store_events = StoreEvents { tx, waker: waker.clone() };
+        let (search_requests, search_rx) = unbounded::<(WindowId, aster_core::search_sessions::Request)>();
+        let search_events = store_events.clone();
+        std::thread::Builder::new().name("aster-search-sessions".into()).spawn(move || {
+            while let Ok((id, request)) = search_rx.recv() {
+                if let Some(reply) = request.run() {
+                    search_events.post(StoreEvent::SessionSearch(id, reply));
+                }
+            }
+        })?;
         let sync_events = store_events.clone();
         let sync = crate::sync::Worker::start(config_path.clone(), config_access.clone(), move |event| sync_events.post(StoreEvent::Sync(event)))?;
         let fonts = store_events.clone();
@@ -311,7 +322,7 @@ impl<P: Platform> Handler<P> {
         let extension_events = store_events.clone();
         let root = config_path.as_deref().and_then(std::path::Path::parent).map(|path| path.join("extensions"));
         let (extensions, extension_worker) = crate::extensions::Host::start::<P>(root, move |event| extension_events.post(StoreEvent::Extensions(event)))?;
-        let handler = Self { extensions, installed_extensions: Default::default(), desktop, launcher_installed, default_terminal: Default::default(), shell_integration, start_menu_shortcut: false, installation: P::installation_state(), installation_quit: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, delegated_requests: None, deferred_requests: Vec::new(), startup: None, last_focused: None, recent, recent_folders, jump_list: None, sync, sync_view: Default::default(), sync_requested: None, updates, update_window: None, restarting: false, restart_preparing: false };
+        let handler = Self { search_requests, extensions, installed_extensions: Default::default(), desktop, launcher_installed, default_terminal: Default::default(), shell_integration, start_menu_shortcut: false, installation: P::installation_state(), installation_quit: false, font_families: None, config, restart_baseline, profiles, waker, device: None, windows: HashMap::new(), sessions: HashMap::new(), serials: HashMap::new(), exits, remotes: HashMap::new(), file_tx, file_rx, note_tx, note_rx, local_spawns, exit_tx, config_path, config_access, config_startup, startup_config: None, config_stamp: None, settings_revision: 0, raw_save_pending: false, secrets, vault_view, vault_access: HashMap::new(), store_events, store_rx, ssh, pending, session_saved: false, checkpoint: None, applied: None, window_prefs_dirty: false, requests: None, delegated_requests: None, deferred_requests: Vec::new(), startup: None, last_focused: None, recent, recent_folders, jump_list: None, sync, sync_view: Default::default(), sync_requested: None, updates, update_window: None, restarting: false, restart_preparing: false };
         if !encrypted {
             handler.scan_extensions(&handler.config);
             handler.update_launcher(&handler.config, None);
@@ -898,6 +909,13 @@ impl<P: Platform> Handler<P> {
                     }
                 }
             }
+            Effect::SaveFixture { pane } => {
+                if let Some(state) = self.windows.get(&id) {
+                    if let Some(terminal) = state.app.terminal(pane) {
+                        crate::session::save_fixture(pane, P::downloads_dir, terminal.clone(), state.flow.wake.clone());
+                    }
+                }
+            }
             Effect::RequestPaste => self.request_paste(window, None),
             Effect::RequestVaultPaste(input) => self.request_paste(window, Some(PasteTarget::Vault(input))),
             Effect::RequestConfigPaste(request) => self.request_paste(window, Some(PasteTarget::ConfigEditor(request))),
@@ -911,6 +929,23 @@ impl<P: Platform> Handler<P> {
             Effect::ConfigSync(operation) => self.request_config_sync(operation),
             Effect::Restart => self.request_restart(id),
             Effect::Open(target) => P::open(&target),
+            Effect::OpenOutputPath { target, reported_cwd, initial_cwd, pid } => {
+                let events = self.store_events.clone();
+                let result = std::thread::Builder::new().name("aster-open-path".into()).spawn(move || {
+                    let cwd = reported_cwd.filter(|cwd| std::path::Path::new(cwd).is_absolute())
+                        .or_else(|| pid.and_then(P::process_cwd))
+                        .or(initial_cwd);
+                    if !crate::output_path::open::<P>(&target, cwd.as_deref()) {
+                        events.post(StoreEvent::OutputPathError(id));
+                    }
+                });
+                if result.is_err() {
+                    self.store_events.post(StoreEvent::OutputPathError(id));
+                }
+            }
+            Effect::SearchSessions(request) => {
+                let _ = self.search_requests.send((id, request));
+            }
             Effect::RecentProfiles(recent) => {
                 for s in self.windows.values_mut() {
                     s.app.set_recent(recent.clone());
@@ -946,6 +981,7 @@ impl<P: Platform> Handler<P> {
                     }
                 }
             }
+            Effect::RevealFile(path) => self.desktop.send(move || P::reveal_file(&path)),
             Effect::OpenLog | Effect::OpenConfigFolder => {
                 if let Some(dir) = self.config_path.as_deref().and_then(|p| p.parent()) {
                     P::open(&dir.to_string_lossy());
@@ -1083,10 +1119,11 @@ impl<P: Platform> Handler<P> {
             }
             Effect::Files { pane, request } => {
                 let downloads = P::downloads_dir().unwrap_or_else(std::env::temp_dir);
+                let failed = request.failure(aster_core::i18n::t("the connection is closed").into());
                 let sent = self.remotes.get(&(id, pane)).is_some_and(|r| r.send(aster_ssh::console::Input::Sftp(crate::remote::file_request(request, downloads))).is_ok());
                 if !sent {
                     if let Some(s) = self.windows.get_mut(&id) {
-                        s.app.files_reply(pane, aster_core::files::FileReply::Failed { id: None, error: "the connection is closed".into() });
+                        s.app.files_reply(pane, failed);
                     }
                 }
             }
@@ -1218,7 +1255,7 @@ impl<P: Platform> Handler<P> {
         let windows = ids.into_iter().map(|id| {
             let app = &self.windows[&id].app;
             if checkpoint { app.session_checkpoint() } else { app.session_snapshot() }
-        }).chain(self.pending.iter().cloned()).filter(|w| !w.tabs.is_empty()).collect();
+        }).chain(self.pending.iter().cloned()).filter(WindowState::has_layout).collect();
         SessionState { windows, recent: self.recent.clone(), recent_folders: self.recent_folders.clone() }
     }
 
@@ -1392,6 +1429,16 @@ impl<P: Platform> Handler<P> {
     fn drain_store(&mut self) {
         while let Ok(event) = self.store_rx.try_recv() {
             match event {
+                StoreEvent::SessionSearch(id, reply) => {
+                    if let Some(state) = self.windows.get_mut(&id) {
+                        state.app.session_search_reply(reply);
+                    }
+                }
+                StoreEvent::OutputPathError(id) => {
+                    if let Some(state) = self.windows.get_mut(&id) {
+                        state.app.output_path_failed();
+                    }
+                }
                 StoreEvent::Extensions(crate::extensions::Event::Snapshot(snapshot)) => {
                     for state in self.windows.values_mut() {
                         state.app.set_extensions(snapshot.clone());
@@ -1869,6 +1916,14 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
     }
 
     fn event(&mut self, window: &Win<P>, event: Event) {
+        if matches!(event, Event::AccessibilityRefresh) {
+            if let Some(state) = self.windows.get(&window.id()).filter(|_| window.accessibility_active()) {
+                window.update_accessibility(state.app.accessibility_tree());
+                window.request_redraw();
+            }
+            return;
+        }
+        let refresh_accessibility = matches!(event, Event::Focus(_) | Event::Accessibility(_));
         if matches!(event, Event::NotificationClicked(_)) {
             self.quake_visibility(window, true);
         }
@@ -1909,6 +1964,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
                 s.quake.advance(window, s.app.animations(), s.app.clock());
             }
             s.app.on_event(event);
+            if refresh_accessibility && window.accessibility_active() {
+                window.update_accessibility(s.app.accessibility_tree());
+            }
         }
         self.apply(window);
     }
@@ -1942,6 +2000,9 @@ impl<P: Platform> WindowHandler<P::Windows> for Handler<P> {
         s.app.set_viewport(w, h, window.scale());
         let maximized = window.is_maximized();
         s.app.frame(&mut s.gfx, maximized);
+        if window.accessibility_active() {
+            window.update_accessibility(s.app.accessibility_tree());
+        }
         let renderer = s.renderer.as_mut().expect("renderer");
         renderer.resize(w, h);
         for (slot, offset) in &s.gfx.uploads.rects {

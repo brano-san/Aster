@@ -19,8 +19,9 @@ pub(crate) fn command_probe_id() -> u64 {
 pub(crate) enum CommandWatch {
     #[default]
     Off,
-    Waiting { busy: bool, next: Instant },
-    Polling { busy: bool, request: u64 },
+    Waiting { pane: PaneId, after: u64, busy: bool, next: Instant },
+    Polling { pane: PaneId, after: u64, busy: bool, request: u64 },
+    Marked { pane: PaneId, after: u64 },
     Finished,
 }
 
@@ -30,7 +31,22 @@ impl CommandWatch {
     }
 
     pub(crate) fn armed(self) -> bool {
-        matches!(self, Self::Waiting { .. } | Self::Polling { .. })
+        matches!(self, Self::Waiting { .. } | Self::Polling { .. } | Self::Marked { .. })
+    }
+
+    fn pane(self) -> Option<PaneId> {
+        match self {
+            Self::Waiting { pane, .. } | Self::Polling { pane, .. } | Self::Marked { pane, .. } => Some(pane),
+            _ => None,
+        }
+    }
+
+    fn accepts(self, pane: PaneId, seq: u64) -> bool {
+        match self {
+            Self::Waiting { pane: target, after, .. } | Self::Polling { pane: target, after, .. } | Self::Marked { pane: target, after } =>
+                target == pane && seq > after,
+            _ => false,
+        }
     }
 }
 
@@ -94,7 +110,7 @@ impl App {
         match target {
             CloseTarget::Pane(id) | CloseTarget::PaneProfile(id, _) => vec![*id],
             CloseTarget::Tabs(reps) => self.tabs.iter().filter(|t| reps.iter().any(|p| t.root.contains(*p))).flat_map(|t| t.root.panes()).collect(),
-            CloseTarget::Window => self.tabs.iter().flat_map(|t| t.root.panes()).collect(),
+            CloseTarget::Window => self.all_tabs().flat_map(|t| t.root.panes()).collect(),
         }
     }
 
@@ -121,7 +137,11 @@ impl App {
     }
 
     pub(crate) fn can_watch_command(&self, index: usize) -> bool {
-        self.tabs.get(index).is_some_and(|t| t.command_watch.armed() || !self.command_pids(t).is_empty())
+        self.tabs.get(index).is_some_and(|t| t.command_watch.armed() || self.marked_shell(t.focus) || !self.command_pids(t).is_empty())
+    }
+
+    fn marked_shell(&self, pane: PaneId) -> bool {
+        self.panes.get(&pane).is_some_and(|p| p.exited.is_none() && p.terminal.lock().shell_integrated())
     }
 
     pub(crate) fn toggle_command_watch(&mut self) {
@@ -129,32 +149,47 @@ impl App {
             return;
         }
         let now = Instant::now();
-        let watch = &mut self.tabs[self.active].command_watch;
-        *watch = if watch.armed() { CommandWatch::Off } else { CommandWatch::Waiting { busy: false, next: now } };
+        let tab = &self.tabs[self.active];
+        let pane = tab.focus;
+        let after = self.terminal(pane).map_or(0, |terminal| terminal.lock().output_seq());
+        self.tabs[self.active].command_watch = if tab.command_watch.armed() {
+            CommandWatch::Off
+        } else if self.marked_shell(pane) {
+            CommandWatch::Marked { pane, after }
+        } else {
+            CommandWatch::Waiting { pane, after, busy: false, next: now }
+        };
         self.poll_commands(now);
         self.dirty = true;
     }
 
     pub(crate) fn poll_commands(&mut self, now: Instant) {
-        for i in 0..self.tabs.len() {
-            let tab = &self.tabs[i];
-            let CommandWatch::Waiting { busy, next } = tab.command_watch else { continue };
-            if now < next {
-                continue;
-            }
-            let pids = self.command_pids(tab);
-            if pids.is_empty() {
-                self.tabs[i].command_watch = if busy { CommandWatch::Finished } else { CommandWatch::Off };
-                if busy {
-                    self.notify_command_finished(i);
-                }
-                self.dirty = true;
+        let ready: Vec<_> = self.all_tabs().filter_map(|tab| {
+            let CommandWatch::Waiting { pane, after, busy, next } = tab.command_watch else { return None };
+            if now < next { return None; }
+            let (watch, probe) = if self.marked_shell(pane) {
+                (CommandWatch::Marked { pane, after }, None)
             } else {
-                let request = command_probe_id();
-                self.tabs[i].command_watch = CommandWatch::Polling { busy, request };
-                self.push(Effect::ProbeCommand { request, pids });
-                self.dirty = true;
+                let pids = self.command_pids(tab);
+                if pids.is_empty() {
+                    (if busy { CommandWatch::Finished } else { CommandWatch::Off }, None)
+                } else {
+                    let request = command_probe_id();
+                    (CommandWatch::Polling { pane, after, busy, request }, Some(Effect::ProbeCommand { request, pids }))
+                }
+            };
+            Some((tab.key, watch, probe))
+        }).collect();
+        for (key, watch, probe) in ready {
+            if let Some(tab) = self.all_tabs_mut().find(|tab| tab.key == key) {
+                tab.command_watch = watch;
             }
+            if let Some(probe) = probe {
+                self.push(probe);
+            } else if watch == CommandWatch::Finished {
+                self.notify_command_finished(key, None);
+            }
+            self.dirty = true;
         }
     }
 
@@ -162,17 +197,71 @@ impl App {
         if self.finish_pane_profile_probe(request, result) {
             return;
         }
-        let Some(index) = self.tabs.iter().position(|t| matches!(t.command_watch, CommandWatch::Polling { request: r, .. } if r == request)) else { return };
-        let tab = &mut self.tabs[index];
-        let CommandWatch::Polling { busy, .. } = tab.command_watch else { return };
-        if busy && result == Some(false) {
-            tab.command_watch = CommandWatch::Finished;
-            self.notify_command_finished(index);
+        let Some((key, pane, after, busy)) = self.all_tabs().find_map(|tab| match tab.command_watch {
+            CommandWatch::Polling { pane, after, busy, request: pending } if pending == request => Some((tab.key, pane, after, busy)),
+            _ => None,
+        }) else { return };
+        let watch = if self.marked_shell(pane) {
+            CommandWatch::Marked { pane, after }
+        } else if busy && result == Some(false) {
+            CommandWatch::Finished
         } else {
-            tab.command_watch = CommandWatch::Waiting { busy: result.unwrap_or(busy), next: Instant::now() + COMMAND_INTERVAL };
+            CommandWatch::Waiting { pane, after, busy: result.unwrap_or(busy), next: Instant::now() + COMMAND_INTERVAL }
+        };
+        if let Some(tab) = self.all_tabs_mut().find(|tab| tab.key == key) {
+            tab.command_watch = watch;
+        }
+        if watch == CommandWatch::Finished {
+            self.notify_command_finished(key, None);
+        } else if watch.deadline().is_some() {
             self.schedule_timer();
         }
         self.dirty = true;
+    }
+
+    pub(crate) fn shell_command_finished(&mut self, pane: PaneId, code: Option<i32>, seq: u64) {
+        let finished = self.all_tabs_mut().find(|tab| tab.command_watch.accepts(pane, seq)).map(|tab| {
+            tab.command_watch = CommandWatch::Finished;
+            tab.key
+        });
+        if let Some(key) = finished {
+            self.notify_command_finished(key, code);
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn clear_command_watch(&mut self, pane: PaneId) {
+        if let Some(tab) = self.all_tabs_mut().find(|tab| tab.command_watch.pane() == Some(pane)) {
+            tab.command_watch = CommandWatch::Off;
+        }
+    }
+
+    pub(crate) fn shell_command_session_ended(&mut self, pane: PaneId, code: Option<u32>) {
+        let Some((key, watch)) = self.all_tabs().find(|tab| tab.command_watch.pane() == Some(pane)).map(|tab| (tab.key, tab.command_watch)) else { return };
+        if !matches!(watch, CommandWatch::Marked { .. }) && !self.marked_shell(pane) {
+            return;
+        }
+        let running = self.terminal(pane).is_some_and(|terminal| terminal.lock().shell_command_running());
+        if let Some(tab) = self.all_tabs_mut().find(|tab| tab.key == key) {
+            tab.command_watch = if running { CommandWatch::Finished } else { CommandWatch::Off };
+        }
+        if running {
+            self.notify_command_finished(key, code.and_then(|code| i32::try_from(code).ok()));
+        }
+    }
+
+    pub(crate) fn jump_shell_prompt(&mut self, older: bool) {
+        if self.focused_pane().and_then(|pane| self.terminal(pane))
+            .is_some_and(|terminal| terminal.lock().jump_prompt(older)) {
+            self.dirty = true;
+        }
+    }
+
+    pub(crate) fn copy_shell_command_output(&mut self) {
+        if let Some(text) = self.focused_pane().and_then(|pane| self.terminal(pane))
+            .and_then(|terminal| terminal.lock().latest_command_output()) {
+            self.push(Effect::SetClipboard(text));
+        }
     }
 
     pub(crate) fn request_close(&mut self, target: CloseTarget) {

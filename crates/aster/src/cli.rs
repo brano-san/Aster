@@ -6,6 +6,7 @@ use std::path::Path;
 pub enum Command {
     Window,
     Hidden,
+    RecordVtFixture,
     InstallationQuit,
     DelegatedConsole { token: String },
     Open { dir: String },
@@ -28,6 +29,7 @@ pub struct Request {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Parsed {
     Request(Command),
+    ReplayFixture(String),
     Version,
     Help,
     Error(String),
@@ -44,6 +46,10 @@ pub const USAGE: &str = "Usage:
   aster paste-path PATH     paste a shell-quoted path into the active pane
   aster url URL             open an Aster profile or folder URL
   aster --hidden            start in the background when tray or dock is enabled
+  aster --record-vt-fixtures
+                            open a tab with terminal fixture recording enabled
+  aster --replay-vt-fixture FILE
+                            verify a terminal fixture without opening a window
   aster --version | --help";
 
 pub fn parse(args: &[String], cwd: Option<&Path>) -> Parsed {
@@ -75,6 +81,9 @@ pub fn parse(args: &[String], cwd: Option<&Path>) -> Parsed {
         Some("--version" | "-V") => Parsed::Version,
         Some("--help" | "-h") => Parsed::Help,
         Some("--hidden") if args.len() == 1 => Parsed::Request(Command::Hidden),
+        Some("--record-vt-fixtures") if args.len() == 1 => Parsed::Request(Command::RecordVtFixture),
+        Some("--replay-vt-fixture") if args.len() == 2 && !args[1].is_empty() => Parsed::ReplayFixture(args[1].clone()),
+        Some("--replay-vt-fixture") => Parsed::Error("--replay-vt-fixture takes one file".into()),
         #[cfg(windows)]
         Some(aster_platform_windows::defterm::CLIENT_ARG) if args.len() == 2 && aster_core::default_terminal::valid_token(&args[1]) => {
             Parsed::Request(Command::DelegatedConsole { token: args[1].clone() })

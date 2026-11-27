@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+mod accessibility;
 mod animations;
 mod autostart;
 mod desktop;

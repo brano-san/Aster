@@ -129,7 +129,7 @@ fn saved_ids(node: &NodeState, ids: &mut Vec<Option<u64>>) {
 pub fn restore<P: Platform>(windows: &[WindowState]) -> io::Result<HashMap<u64, SessionInfo>> {
     let mut client = connect::<P>(false)?;
     let mut ids = Vec::new();
-    for tab in windows.iter().flat_map(|window| &window.tabs) { saved_ids(&tab.root, &mut ids); }
+    for tab in windows.iter().flat_map(WindowState::all_tabs) { saved_ids(&tab.root, &mut ids); }
     let (panes, kill) = match_sessions(&ids, client.list()?);
     for id in kill {
         if let Err(error) = client.kill_detached(id) {

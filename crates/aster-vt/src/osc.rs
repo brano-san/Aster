@@ -16,8 +16,8 @@ enum State {
 const MAX: usize = 4096;
 
 impl Sniffer {
-    pub fn feed(&mut self, bytes: &[u8], mut found: impl FnMut(&[u8])) {
-        for &b in bytes {
+    pub fn feed(&mut self, bytes: &[u8], mut found: impl FnMut(usize, &[u8])) {
+        for (index, &b) in bytes.iter().enumerate() {
             self.state = match (self.state, b) {
                 (State::Ground, 0x1b) => State::Escape,
                 (State::Ground, _) => State::Ground,
@@ -28,10 +28,11 @@ impl Sniffer {
                 (State::Escape, 0x1b) => State::Escape,
                 (State::Escape, _) => State::Ground,
                 (State::Osc, 0x07) => {
-                    found(&self.buf);
+                    found(index + 1, &self.buf);
                     State::Ground
                 }
                 (State::Osc, 0x1b) => State::OscEscape,
+                (State::Osc, 0x18 | 0x1a) => State::Ground,
                 (State::Osc, _) => {
                     if self.buf.len() < MAX {
                         self.buf.push(b);
@@ -39,7 +40,7 @@ impl Sniffer {
                     State::Osc
                 }
                 (State::OscEscape, b'\\') => {
-                    found(&self.buf);
+                    found(index + 1, &self.buf);
                     State::Ground
                 }
                 (State::OscEscape, b']') => {
@@ -50,6 +51,40 @@ impl Sniffer {
             };
         }
     }
+}
+
+pub(crate) enum CommandMark {
+    Prompt,
+    Input,
+    Output(Option<(u64, String)>),
+    Done(Option<i32>),
+}
+
+pub(crate) fn command_mark(payload: &[u8], saved: bool) -> Option<CommandMark> {
+    let mut fields = payload.strip_prefix(b"133;")?.split(|&b| b == b';');
+    match fields.next()? {
+        b"A" => Some(CommandMark::Prompt),
+        b"B" => Some(CommandMark::Input),
+        b"C" => Some(CommandMark::Output(if saved { fields.next().and_then(saved_command) } else { None })),
+        b"D" => {
+            let code = fields.next().filter(|code| !code.is_empty())
+                .map(|code| std::str::from_utf8(code).ok()?.parse().ok());
+            Some(CommandMark::Done(match code { Some(code) => Some(code?), None => None }))
+        }
+        _ => None,
+    }
+}
+
+fn saved_command(field: &[u8]) -> Option<(u64, String)> {
+    let field = std::str::from_utf8(field).ok()?.strip_prefix("aster=")?;
+    let (id, hex) = field.split_once(',')?;
+    let id = id.parse::<u64>().ok().filter(|&id| id < u64::MAX)?;
+    if hex.len() % 2 != 0 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let command: Vec<_> = (0..hex.len()).step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16)).collect::<Result<_, _>>().ok()?;
+    Some((id, String::from_utf8(command).ok()?))
 }
 
 fn percent_decode(s: &str) -> String {

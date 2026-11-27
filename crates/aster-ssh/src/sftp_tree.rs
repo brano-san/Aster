@@ -1,7 +1,9 @@
 use russh_sftp::client::SftpSession;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use crate::sftp::{join, local_name, unique};
+use crate::sftp::{exclusive_upload, file_is_missing, join, local_name, unique, until_cancelled, upload_create_error};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Size {
@@ -112,15 +114,24 @@ async fn copy<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>
 }
 
 pub async fn download(s: &SftpSession, remote: &str, into: &Path, progress: &mut dyn Progress) -> Result<PathBuf, String> {
-    let total = size(s, remote).await?.bytes;
-    let entries = remote_tree(s, remote).await?;
+    download_with_cancel(s, remote, into, progress, None).await
+}
+
+async fn cancellable<T>(cancel: Option<&Notify>, task: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    if let Some(cancel) = cancel { until_cancelled(cancel, task).await } else { task.await }
+}
+
+pub(super) async fn download_with_cancel(s: &SftpSession, remote: &str, into: &Path, progress: &mut dyn Progress, cancel: Option<&Notify>) -> Result<PathBuf, String> {
+    let total = cancellable(cancel, size(s, remote)).await?.bytes;
+    let entries = cancellable(cancel, remote_tree(s, remote)).await?;
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
     let root = unique(into, &local_name(remote));
-    let mut created = false;
+    let mut created = Vec::new();
     let result = async {
         let mut done = 0;
         for (path, meta) in entries {
             if meta.is_symlink() { continue; }
+            cancellable(cancel, async { Ok(()) }).await?;
             let relative = if path == remote { "" } else if remote == "." || remote.is_empty() { &path } else {
                 path.strip_prefix(remote.trim_end_matches('/')).ok_or_else(|| format!("{path}: outside requested tree"))?.trim_start_matches('/')
             };
@@ -128,20 +139,32 @@ pub async fn download(s: &SftpSession, remote: &str, into: &Path, progress: &mut
             let local = if relative.is_empty() { root.clone() } else { root.join(relative) };
             if meta.is_dir() {
                 std::fs::create_dir(&local).map_err(|e| format!("{}: {e}", local.display()))?;
-                created = true;
+                created.push((local, true));
             } else if meta.is_regular() {
                 let mut from = s.open(&path).await.map_err(|e| format!("{path}: {e}"))?;
                 let mut to = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&local).await.map_err(|e| format!("{}: {e}", local.display()))?;
-                created = true;
-                copy(&mut from, &mut to, progress, &mut done, total).await.map_err(|e| format!("{path} -> {}: {e}", local.display()))?;
+                created.push((local.clone(), false));
+                let copied = cancellable(cancel, async {
+                    copy(&mut from, &mut to, progress, &mut done, total).await.map_err(|e| format!("{path} -> {}: {e}", local.display()))
+                }).await;
+                if copied.is_err() { let _ = to.shutdown().await; }
+                copied?;
             }
         }
         Ok(())
     }.await;
     if let Err(error) = result {
-        if created {
-            let cleanup = if root.is_dir() { std::fs::remove_dir_all(&root) } else { std::fs::remove_file(&root) };
-            if let Err(cleanup) = cleanup { return Err(format!("{error}; {}: cleanup failed: {cleanup}", root.display())); }
+        let mut cleanup_error = None;
+        for (path, dir) in created.into_iter().rev() {
+            let result = if dir { std::fs::remove_dir(&path) } else { std::fs::remove_file(&path) };
+            if let Err(e) = result {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    cleanup_error.get_or_insert_with(|| format!("{}: {e}", path.display()));
+                }
+            }
+        }
+        if let Some(cleanup) = cleanup_error {
+            return Err(format!("{error}; cleanup failed: {cleanup}"));
         }
         return Err(error);
     }
@@ -149,33 +172,50 @@ pub async fn download(s: &SftpSession, remote: &str, into: &Path, progress: &mut
 }
 
 pub async fn upload(s: &SftpSession, local: &Path, into: &str, progress: &mut dyn Progress) -> Result<String, String> {
+    upload_with_cancel(s, local, into, progress, None).await
+}
+
+pub(super) async fn upload_with_cancel(s: &SftpSession, local: &Path, into: &str, progress: &mut dyn Progress, cancel: Option<&Notify>) -> Result<String, String> {
     let total = local_size(local).await?.bytes;
     let entries = local_tree(local)?;
     let name = local.file_name().ok_or_else(|| format!("{}: missing name", local.display()))?.to_string_lossy();
     let root = join(into, &name);
-    if s.try_exists(&root).await.map_err(|e| format!("{root}: {e}"))? { return Err(format!("{root} already exists")); }
-    let mut created = false;
+    let mut created = Vec::new();
     let result = async {
         let mut done = 0;
         for (path, meta) in entries {
             if meta.is_symlink() { continue; }
+            cancellable(cancel, async { Ok(()) }).await?;
             let mut remote = root.clone();
             for part in path.strip_prefix(local).map_err(|e| format!("{}: {e}", path.display()))?.components() { remote = join(&remote, &part.as_os_str().to_string_lossy()); }
             if meta.is_dir() {
-                s.create_dir(&remote).await.map_err(|e| format!("{remote}: {e}"))?;
-                created = true;
+                if let Err(error) = s.create_dir(&remote).await {
+                    return Err(upload_create_error(s, &remote, error).await);
+                }
+                created.push((remote, true));
             } else if meta.is_file() {
                 let mut from = tokio::fs::File::open(&path).await.map_err(|e| format!("{}: {e}", path.display()))?;
-                let mut to = s.create(&remote).await.map_err(|e| format!("{remote}: {e}"))?;
-                created = true;
-                copy(&mut from, &mut to, progress, &mut done, total).await.map_err(|e| format!("{} -> {remote}: {e}", path.display()))?;
+                let mut to = exclusive_upload(s, &remote).await?;
+                created.push((remote.clone(), false));
+                let copied = cancellable(cancel, async {
+                    copy(&mut from, &mut to, progress, &mut done, total).await.map_err(|e| format!("{} -> {remote}: {e}", path.display()))
+                }).await;
+                if copied.is_err() { let _ = to.shutdown().await; }
+                copied?;
             }
         }
         Ok(())
     }.await;
     if let Err(error) = result {
-        if created {
-            if let Err(cleanup) = remove(s, &root).await { return Err(format!("{error}; cleanup failed: {cleanup}")); }
+        let mut cleanup_error = None;
+        for (path, dir) in created.into_iter().rev() {
+            let result = if dir { s.remove_dir(&path).await } else { s.remove_file(&path).await };
+            if let Err(e) = result {
+                if !file_is_missing(&e) { cleanup_error.get_or_insert_with(|| format!("{path}: {e}")); }
+            }
+        }
+        if let Some(cleanup) = cleanup_error {
+            return Err(format!("{error}; cleanup failed: {cleanup}"));
         }
         return Err(error);
     }

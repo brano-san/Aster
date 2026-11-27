@@ -1,4 +1,8 @@
 pub mod host;
+pub mod shell_hooks;
+pub const BASH_MARKS: &str = include_str!("bash_marks.sh");
+pub const BASH_LOGIN_BRIDGE: &str = "source \"$ASTER_BASH_RC\"; __aster_prepare_prompt";
+pub const ZSH_MARKS: &str = include_str!("zsh_marks.sh");
 pub mod monitors;
 
 use aster_core::input::{CursorIcon, Event, HitArea, PasteTarget};
@@ -121,6 +125,8 @@ pub trait Waker: Clone + Send + Sync + 'static {
 
 pub trait Window {
     fn id(&self) -> WindowId;
+    fn accessibility_active(&self) -> bool { false }
+    fn update_accessibility(&self, _tree: aster_core::accessibility::Tree) {}
     fn size(&self) -> (u32, u32);
     fn scale(&self) -> f32;
     fn request_redraw(&self);

@@ -1,4 +1,6 @@
 use aster_core::profile::Profile;
+use aster_platform::shell_hooks::{POWERSHELL_MARKS, encode_powershell_command, interactive_powershell_args};
+use aster_platform::SpawnRequest;
 use std::path::{Path, PathBuf};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::System::Registry::{RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ};
@@ -53,6 +55,60 @@ fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+pub(crate) struct BashStartup {
+    directory: PathBuf,
+    file: PathBuf,
+}
+
+impl Drop for BashStartup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+        let _ = std::fs::remove_dir(&self.directory);
+    }
+}
+
+pub(crate) fn startup(req: &SpawnRequest) -> Option<(SpawnRequest, Option<BashStartup>)> {
+    req.local_environment.as_ref()?;
+    let shell = Path::new(&req.command).file_stem()?.to_str()?;
+    if shell.eq_ignore_ascii_case("bash")
+        && req.args.iter().all(|arg| matches!(arg.as_str(), "-i" | "-l" | "-li" | "-il" | "--login"))
+    {
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).ok()?;
+        let directory = std::env::temp_dir().join(format!("aster-shell-{:032x}", u128::from_le_bytes(nonce)));
+        std::fs::create_dir(&directory).ok()?;
+        let startup = BashStartup { file: directory.join("bashrc"), directory };
+        if let Err(error) = std::fs::write(&startup.file, aster_platform::BASH_MARKS) {
+            tracing::warn!("could not prepare shell integration: {error}");
+            return None;
+        }
+        let mut req = req.clone();
+        let path = startup.file.to_str()?.replace('\\', "/");
+        if req.args.iter().any(|arg| arg != "-i") {
+            let spec = req.local_environment.as_ref()?;
+            let explicit = spec.profile.keys().chain(spec.global.keys()).chain(req.env.iter().map(|(key, _)| key))
+                .any(|key| key.eq_ignore_ascii_case("PROMPT_COMMAND"));
+            if explicit { return None; }
+            let previous = std::env::var("PROMPT_COMMAND").unwrap_or_default();
+            req.env.extend([
+                ("ASTER_BASH_RC".to_owned(), path),
+                ("ASTER_BASH_PREVIOUS_PROMPT".to_owned(), previous),
+                ("PROMPT_COMMAND".to_owned(), aster_platform::BASH_LOGIN_BRIDGE.to_owned()),
+            ]);
+        } else {
+            req.args = vec!["--rcfile".into(), path, "-i".into()];
+        }
+        return Some((req, Some(startup)));
+    }
+    if shell.eq_ignore_ascii_case("pwsh") || shell.eq_ignore_ascii_case("powershell") {
+        let args = interactive_powershell_args(&req.args)?;
+        let mut req = req.clone();
+        req.args = args;
+        return Some((req, None));
+    }
+    None
+}
+
 fn pwsh() -> Option<PathBuf> {
     let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
     let candidates = [program_files.join(r"PowerShell\7\pwsh.exe"), program_files.join(r"PowerShell\7-preview\pwsh.exe")];
@@ -87,32 +143,8 @@ fn wsl_distros() -> Vec<String> {
     names
 }
 
-const POWERSHELL_HOOK: &str = r#"$global:__AsterPrompt = $function:prompt
-function global:prompt {
-    $l = $executionContext.SessionState.Path.CurrentLocation
-    if ($l.Provider.Name -eq 'FileSystem') { [Console]::Write("$([char]27)]9;9;`"$($l.ProviderPath)`"$([char]27)\") }
-    & $global:__AsterPrompt
-}"#;
-
-pub(crate) fn encode_command(script: &str) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
 fn powershell(id: &str, name: &str, exe: &Path) -> Profile {
-    let hook = encode_command(POWERSHELL_HOOK);
+    let hook = encode_powershell_command(POWERSHELL_MARKS);
     let mut profile = Profile::new(id, name, &path_str(exe), &["-NoLogo", "-NoExit", "-EncodedCommand", &hook]);
     profile.icon = Some("powershell".into());
     profile
@@ -172,7 +204,7 @@ fn cmder(sys: &Path, root: &Path, windows_ps: Option<&Path>) -> Vec<Profile> {
     }
     let script = vendor.join("profile.ps1");
     if let Some(exe) = windows_ps.filter(|_| script.is_file()) {
-        let command = encode_command(&format!(". '{}'\n{POWERSHELL_HOOK}", path_str(&script).replace('\'', "''")));
+        let command = encode_powershell_command(&format!(". '{}'\n{POWERSHELL_MARKS}", path_str(&script).replace('\'', "''")));
         let mut profile = Profile::new("local:cmder-powershell", "Cmder PowerShell", &path_str(exe), &["-NoLogo", "-NoProfile", "-NoExit", "-EncodedCommand", &command]);
         profile.icon = Some("powershell".into());
         profiles.push(profile);

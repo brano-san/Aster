@@ -100,12 +100,7 @@ fn cloexec(fd: RawFd) {
 
 pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
     let program = cstr(&req.command)?;
-    let mut argv: Vec<CString> = vec![program.clone()];
-    for a in &req.args {
-        argv.push(cstr(a)?);
-    }
-    let argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
-    let env = if let Some(spec) = &req.local_environment {
+    let mut env = if let Some(spec) = &req.local_environment {
         let inherited = std::env::vars_os().filter(|(key, _)| !matches!(key.as_bytes(), b"TERM_PROGRAM" | b"TERM_PROGRAM_VERSION"))
             .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
         let vars: Vec<_> = spec.apply(inherited, &req.env, false).into_iter().collect();
@@ -113,6 +108,13 @@ pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
     } else {
         environment(&req.env)
     };
+    let mut args = req.args.clone();
+    let startup = crate::shells::startup(req, &mut args, &mut env);
+    let mut argv: Vec<CString> = vec![program.clone()];
+    for a in &args {
+        argv.push(cstr(a)?);
+    }
+    let argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
     let env_ptrs: Vec<*const libc::c_char> = env.iter().map(|e| e.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
     let cwd = req.cwd.as_ref().filter(|p| p.is_dir()).and_then(|p| CString::new(p.as_os_str().as_bytes()).ok());
     let mut master: RawFd = -1;
@@ -159,6 +161,7 @@ pub fn spawn(req: &SpawnRequest) -> Result<Spawned, PlatformError> {
     let reader = master.try_clone().map_err(|e| PlatformError::new(-1, format!("dup pty: {e}")))?;
     let writer = master.try_clone().map_err(|e| PlatformError::new(-1, format!("dup pty: {e}")))?;
     let wait = Box::new(move || {
+        let _startup = startup;
         let mut status = 0;
         loop {
             let r = unsafe { libc::waitpid(pid, &mut status, 0) };

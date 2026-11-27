@@ -69,3 +69,24 @@ fn buffer_export_writes_utf8_and_leaves_previous_exports_intact() {
     std::fs::remove_file(second).unwrap();
     std::fs::remove_dir(dir).unwrap();
 }
+
+#[test]
+fn fixture_export_writes_a_self_contained_replay_file() {
+    let dir = std::env::temp_dir().join(format!("aster-fixture-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+    let downloads = dir.clone();
+    let mut vt = aster_vt::Terminal::new(aster_vt::Size::new(80, 5), Default::default(), Arc::new(|_| {}));
+    assert!(vt.enable_fixture_recording());
+    vt.feed_saved_output(b"restored\r\n");
+    vt.resize(aster_vt::Size::new(82, 5));
+    vt.feed(b"live");
+    let terminal = Arc::new(aster_vt::FairMutex::new(vt));
+    let (tx, rx) = bounded(1);
+    save_fixture(42, move || Some(downloads), terminal.clone(), Arc::new(move || tx.send(()).unwrap()));
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let path = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    assert!(path.file_name().unwrap().to_str().unwrap().starts_with("aster-fixture-42-"));
+    verify_fixture_file(&path).unwrap();
+    assert!(terminal.lock().screen_text().contains("[saved to "));
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(dir).unwrap();
+}
